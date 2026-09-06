@@ -1,13 +1,28 @@
 {
   "name": "dithered",
   "version": "0.1.0",
-  "description": "An animated ordered-dither renderer for silhouette shapes.",
+  "description": "An animated ordered-dither renderer for SVG silhouettes, with a framework-agnostic core and an optional React wrapper.",
+  "keywords": [
+    "dither",
+    "bayer",
+    "canvas",
+    "loader",
+    "spinner",
+    "animation",
+    "react"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/V3RON/dithered"
+  },
+  "author": "",
   "type": "module",
   "license": "MIT",
   "sideEffects": false,
   "engines": {
     "node": ">=20"
   },
+  "packageManager": "pnpm@10.33.0",
   "files": [
     "dist"
   ],
@@ -32,7 +47,10 @@
     }
   },
   "scripts": {
+    "dev": "vite serve --config vite.playground.config.ts",
     "build": "tsc --project tsconfig.build.json --emitDeclarationOnly && vite build",
+    "build:playground": "vite build --config vite.playground.config.ts",
+    "prepublishOnly": "pnpm build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "format": "prettier --write .",
@@ -55,6 +73,7 @@
     "@testing-library/react": "^16.3.3",
     "@types/react": "^18.3.31",
     "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react": "^4.7.0",
     "jsdom": "^25.0.1",
     "prettier": "^3.3.3",
     "react": "^18.3.1",

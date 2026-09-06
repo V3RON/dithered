@@ -1,28 +1,39 @@
 # dithered
 
-`dithered` renders an animated ordered (Bayer) dither pattern masked to an SVG silhouette. It samples a coarse grid of cells inside a shape and, each frame, draws or skips a rounded square per cell by comparing an animated brightness field against a 4x4 Bayer threshold.
+`dithered` renders an animated ordered (Bayer) dither pattern masked to an SVG silhouette: it samples a coarse grid of cells inside a shape and, each frame, draws or skips a rounded square per cell by comparing a caller-supplied brightness value against a 4x4 Bayer threshold. The core is framework-agnostic canvas 2D; an optional React wrapper (`dithered/react`) is a separate entry point. The project started as a generalization of the Rozenite loading spinner into a standalone animated-shape primitive.
 
-## Usage
+## Install
+
+```sh
+pnpm add dithered
+```
+
+React is optional — `react`/`react-dom` are peer dependencies marked optional, only needed if you import from `dithered/react`.
+
+## Quick start
+
+### React
+
+```tsx
+import { Dithered } from 'dithered/react';
+import { shapes, presets } from 'dithered';
+
+function LoadingIndicator() {
+  return <Dithered shape={shapes.rozenite} brightness={presets.gem()} fg="#8232ff" size={48} />;
+}
+```
+
+### Vanilla
 
 ```ts
-import { createDithered } from 'dithered';
+import { createDithered, shapes, presets } from 'dithered';
 
 const canvas = document.querySelector('canvas')!;
-
 const instance = createDithered(canvas, {
-  shape: {
-    // Any SVG path `d` string plus the viewBox it was authored in.
-    path: 'M17.333 5.333H20V10.667H22.667V16H25.333V24H22.667V26.667H20V29.333H12V26.667H9.333V24H6.667V16H9.333V10.667H12V5.333H14.667V2.667H17.333V5.333Z',
-    viewBox: { x: 6.67, y: 2.67, width: 18.67, height: 26.67 },
-  },
-  // Brightness per cell per frame: a number is ordered-dithered against the
-  // cell's Bayer threshold, a boolean draws/skips the cell outright.
-  brightness: (cell, t) => {
-    const angle = t * Math.PI * 2;
-    return 0.5 + 0.45 * (cell.u * Math.cos(angle) + cell.v * Math.sin(angle));
-  },
-  size: 48,
+  shape: shapes.rozenite,
+  brightness: presets.gem(),
   fg: '#8232ff',
+  size: 48,
 });
 
 // Later:
@@ -30,8 +41,6 @@ instance.setPaused(true);
 instance.update({ fg: '#22cc88' });
 instance.destroy();
 ```
-
-See `src/renderer.ts` for the full `DitheredOptions` reference (grid size, frame count/period, sprite-strip caching, gap/corner radius, reduced-motion handling, and more).
 
 ## Presets
 
@@ -49,7 +58,7 @@ createDithered(canvas, { shape, brightness: gem() }); // same thing
 - `pulse({ min?, max? })` — radial breathing: brightest at the centre, oscillating once per loop.
 - `rain({ density?, seed? })` — vertical drops falling per column, wrapping cleanly at the loop boundary.
 - `wave({ amplitude?, frequency? })` — a horizontal sine wave moving through the shape.
-- `fill({ direction? })` — a progress-style fill (`t=0` empty, `t=1` full); pair with `renderFrame` for a determinate progress indicator rather than looping it.
+- `fill({ direction? })` — a progress-style fill (`t=0` empty, `t=1` full); pair with `renderFrame`/`progress` for a determinate indicator rather than looping it.
 
 ## Shapes
 
@@ -73,25 +82,70 @@ const shape = shapeFromSvg(`
 `);
 ```
 
-## React
+## Custom animations
 
-`dithered/react` is a separate entry point (`react`/`react-dom` are optional peer dependencies, not required by core `dithered`):
+A `Brightness` is `(cell: Cell, t: number) => number | boolean`:
 
-```tsx
-import { Dithered } from 'dithered/react';
-import { shapes, presets } from 'dithered';
+- `cell.u`, `cell.v` — the cell's centre, normalized to `-0.5..0.5` across the shape's width/height.
+- `cell.i`, `cell.j` — the cell's column/row index in the sampled grid.
+- `t` — the loop phase, `0..1` (exclusive of 1; wraps back to 0).
+- Return a **number** to ordered-dither it against `cell.threshold` (drawn when `brightness > threshold`) — this is what gives the grainy, textured look.
+- Return a **boolean** to draw or skip the cell outright, bypassing the dither for a crisp edge (see `presets.fill`).
 
-function LoadingIndicator() {
-  return <Dithered shape={shapes.rozenite} brightness={presets.gem()} fg="#8232ff" size={48} />;
-}
+Keep your function periodic in `t` (i.e. `f(cell, 0) === f(cell, 1)`) so the loop doesn't visibly jump — drive time-varying terms through `Math.sin`/`Math.cos` of `t * 2π`, or through a wrapped/modulo coordinate, rather than a raw linear function of `t`. `presets.ts` has worked examples of both approaches.
+
+```ts
+const brightness: Brightness = (cell, t) => 0.5 + 0.5 * Math.sin((cell.u + t) * Math.PI * 2);
 ```
 
-One `createDithered` instance is created on mount and destroyed on unmount; every other prop change reconfigures that same instance instead of recreating it. `brightness` (and `shape`) participate in that reconfigure **by identity** — pass a stable reference, either a module-level preset call like `presets.gem()` above, or your own function hoisted outside the component or wrapped in `useMemo`/`useCallback`. An inline arrow function passed as `brightness` will trigger a reconfigure on every render.
+## Determinate progress
 
-For a determinate progress indicator, pass `progress` (`0`–`1`) instead of letting it loop — this pauses the instance and renders the matching frame directly:
+For a progress indicator rather than a loop, pass `progress` (`0`–`1`) to `Dithered`, or call `instance.setPaused(true)` + `instance.renderFrame(frame)` directly with the core API — both pause the animation and render exactly one frame:
 
 ```tsx
 <Dithered shape={shapes.square} brightness={presets.fill()} progress={downloadedFraction} />
 ```
 
-`ref` forwards to the underlying `<canvas>` element.
+## Performance notes
+
+- **Sprite-strip cache**: with `cache: 'auto'` (the default), instances at `size <= 120` pre-render every frame of the loop into an offscreen canvas once; steady-state playback then costs a single `drawImage` per frame instead of redrawing every cell.
+- **Pauses automatically** when the tab is hidden (`document.visibilitychange`) or the canvas scrolls out of the viewport (`IntersectionObserver`), and resumes when either condition clears.
+- **`prefers-reduced-motion`**: a single static frame is rendered and the animation loop never starts, unless `respectReducedMotion: false` is set.
+- Frame index is quantized to `frames` steps per `period`, and a repeated frame index is never redrawn.
+
+## API
+
+### `DitheredOptions`
+
+| Option                 | Type                | Default                   | Description                                                               |
+| ---------------------- | ------------------- | ------------------------- | ------------------------------------------------------------------------- |
+| `shape`                | `Shape`             | —                         | Required. Silhouette to sample cells inside.                              |
+| `brightness`           | `Brightness`        | —                         | Required. Per-cell, per-frame brightness function.                        |
+| `size`                 | `number`            | `48`                      | CSS px height; width follows the shape's aspect ratio.                    |
+| `cols`                 | `number`            | `16`                      | Grid columns.                                                             |
+| `rows`                 | `number`            | derived from aspect ratio | Grid rows.                                                                |
+| `frames`               | `number`            | `48`                      | Frames per loop.                                                          |
+| `period`               | `number`            | `2000`                    | Loop duration, ms.                                                        |
+| `fg`                   | `string`            | `'#000'`                  | Fill color for drawn cells.                                               |
+| `bg`                   | `string`            | `'transparent'`           | Background fill, or `'transparent'`.                                      |
+| `cache`                | `boolean \| 'auto'` | `'auto'`                  | Pre-render the loop into a sprite strip. `'auto'` = on for `size <= 120`. |
+| `paused`               | `boolean`           | `false`                   | Freeze the animation.                                                     |
+| `gap`                  | `number`            | `0.09`                    | Gap between cells, as a fraction of cell size (min 0.6px).                |
+| `radius`               | `number`            | `0.14`                    | Corner radius, as a fraction of cell size.                                |
+| `respectReducedMotion` | `boolean`           | `true`                    | Render a single static frame under `prefers-reduced-motion`.              |
+| `initialFrame`         | `number`            | `0`                       | Frame drawn synchronously on create, so there is no blank flash.          |
+
+### `DitheredInstance`
+
+| Method                                      | Description                                                                             |
+| ------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `setPaused(paused: boolean)`                | Pause or resume the animation loop.                                                     |
+| `update(options: Partial<DitheredOptions>)` | Re-configure the instance in place; may resample cells and/or rebuild the sprite cache. |
+| `renderFrame(frame: number)`                | Draw a specific frame directly, bypassing the animation loop.                           |
+| `destroy()`                                 | Stop the loop and release all listeners/observers.                                      |
+
+`dithered/react`'s `Dithered` component accepts the same options as props (`shape`/`brightness` still required), plus `label` (accessible label, default `'Loading'`, `''` hides it from assistive tech), `className`, `style`, and `progress` — see [Determinate progress](#determinate-progress) and [React](#quick-start) above.
+
+## License
+
+MIT
