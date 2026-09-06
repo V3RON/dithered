@@ -55,6 +55,12 @@ const errorStyle: CSSProperties = {
   whiteSpace: 'pre-wrap',
 };
 
+// `Dithered`'s `fg` default ('#000') is invisible against this playground's
+// dark background, so every instance below passes an explicit accent color
+// rather than relying on the library default (which stays black — this is
+// a playground-only choice, not a library change).
+const ACCENT_FG = '#8232ff';
+
 // ---------------------------------------------------------------------------
 // Gallery: every shape x every preset, size 64
 // ---------------------------------------------------------------------------
@@ -89,7 +95,13 @@ function Gallery() {
       >
         {GALLERY_ITEMS.map((item) => (
           <div key={item.key} style={{ textAlign: 'center' }}>
-            <Dithered shape={item.shape} brightness={item.brightness} size={64} label="" />
+            <Dithered
+              shape={item.shape}
+              brightness={item.brightness}
+              size={64}
+              fg={ACCENT_FG}
+              label=""
+            />
             <div style={{ fontSize: 10, color: '#9aa4b8', marginTop: 4 }}>{item.label}</div>
           </div>
         ))}
@@ -298,7 +310,9 @@ function CustomSvgPanel() {
           {error && <div style={errorStyle}>{error}</div>}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 96 }}>
-          {shape && <Dithered shape={shape} brightness={presets.gem()} size={96} label="" />}
+          {shape && (
+            <Dithered shape={shape} brightness={presets.gem()} size={96} fg={ACCENT_FG} label="" />
+          )}
         </div>
       </div>
     </div>
@@ -379,7 +393,13 @@ function CustomBrightnessPanel() {
           style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 128 }}
         >
           {brightness && (
-            <Dithered shape={shapes.square} brightness={brightness} size={128} label="" />
+            <Dithered
+              shape={shapes.square}
+              brightness={brightness}
+              size={128}
+              fg={ACCENT_FG}
+              label=""
+            />
           )}
         </div>
       </div>

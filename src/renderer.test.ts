@@ -217,4 +217,35 @@ describe('createDithered', () => {
     instance.renderFrame(3);
     expect(ctx.clearRect).toHaveBeenCalledTimes(1);
   });
+
+  // Regression: a caller (notably the React wrapper, which always builds a
+  // full options object from its props) may pass a key with an explicit
+  // `undefined` value rather than omitting it. That must fall back to the
+  // default exactly like an omitted key would, not overwrite the default
+  // with `undefined` (which painted opaque black squares: an unset
+  // `fillStyle` renders as black, and an `undefined` `cols` makes cell
+  // size `NaN`, drawing nothing).
+  it('ignores explicit `undefined` option values and falls back to defaults', () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    createDithered(canvas, baseOptions({ fg: undefined, bg: undefined, cols: undefined }));
+
+    // Default fg is '#000' — the last fillStyle set before drawing cells.
+    expect(ctx.fillStyle).toBe('#000');
+    // Default bg is 'transparent', so no background fillRect should happen.
+    expect(ctx.fillRect).not.toHaveBeenCalled();
+    // Default cols is a real number (16), not `undefined`/NaN, so cells
+    // are still sampled and drawn (brightness is always true here).
+    expect(ctx.fill).toHaveBeenCalled();
+  });
+
+  it('update({ fg: undefined }) leaves the current fg untouched', () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ fg: '#ff00ff' }));
+    ctx.fill.mockClear();
+
+    instance.update({ fg: undefined, cols: 6 });
+
+    expect(ctx.fillStyle).toBe('#ff00ff');
+    expect(ctx.fill).toHaveBeenCalled();
+  });
 });

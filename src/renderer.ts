@@ -68,8 +68,30 @@ const DEFAULTS: Omit<ResolvedOptions, 'shape' | 'brightness'> = {
   initialFrame: 0,
 };
 
+/**
+ * Merges `patch` onto `base`, skipping any key whose value is `undefined`.
+ *
+ * A plain `{ ...base, ...patch }` spread would let an explicitly-passed
+ * `undefined` (e.g. `{ fg: undefined }` — common when a caller forwards
+ * an options object built from optional props) clobber a real value with
+ * `undefined`, silently breaking rendering (an `undefined` `fg`/`bg`
+ * leaves canvas `fillStyle` unset, which paints black; an `undefined`
+ * `cols` makes cell size `NaN`, drawing nothing). Only an *absent* key
+ * should fall through to `base`.
+ */
+function assignDefined<T extends object>(base: T, patch: Partial<T>): T {
+  const result = { ...base };
+  for (const key of Object.keys(patch) as (keyof T)[]) {
+    const value = patch[key];
+    if (value !== undefined) {
+      result[key] = value as T[keyof T];
+    }
+  }
+  return result;
+}
+
 function resolveOptions(options: DitheredOptions): ResolvedOptions {
-  return { ...DEFAULTS, ...options };
+  return assignDefined(DEFAULTS as ResolvedOptions, options);
 }
 
 function resolveRows(opts: ResolvedOptions): number {
@@ -299,7 +321,11 @@ export function createDithered(
     },
 
     update(patch: Partial<DitheredOptions>) {
-      opts = resolveOptions({ ...opts, ...patch });
+      // Merge onto the *current* resolved options (not the static
+      // DEFAULTS), and skip undefined patch values, so an explicit
+      // `undefined` (e.g. a React wrapper forwarding an unset prop)
+      // leaves the current value in place instead of resetting it.
+      opts = assignDefined<ResolvedOptions>(opts, patch);
       reduced = prefersReducedMotion(opts);
       isPaused = opts.paused;
       halt();

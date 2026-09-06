@@ -24,12 +24,13 @@ function lastInstance(): DitheredInstance {
 
 describe('Dithered', () => {
   let env: ReturnType<typeof stubAnimationGlobals>;
+  let ctx: ReturnType<typeof make2dCtx>;
   let getContextSpy: { mockRestore: () => void };
 
   beforeEach(() => {
     mockedCreateDithered.mockClear();
     env = stubAnimationGlobals();
-    const ctx = make2dCtx();
+    ctx = make2dCtx();
     getContextSpy = vi
       .spyOn(HTMLCanvasElement.prototype, 'getContext')
       .mockReturnValue(ctx as unknown as RenderingContext) as unknown as {
@@ -110,5 +111,21 @@ describe('Dithered', () => {
     const { rerender } = render(<Dithered shape={SQUARE_SHAPE} progress={0} />);
     rerender(<Dithered shape={SQUARE_SHAPE} progress={1} />);
     expect(mockedCreateDithered).toHaveBeenCalledTimes(1);
+  });
+
+  // Regression: `Dithered` always builds a full options object from its
+  // props (`{ fg, bg, cols, ... }`), so any unset optional prop reaches
+  // `createDithered` as an explicit `undefined`, not an omitted key. That
+  // must still resolve to the renderer's real defaults (fg '#000', bg
+  // 'transparent', cols 16) instead of painting opaque black squares.
+  it('with no optional props, renders using the renderer defaults (fg, bg, cols)', () => {
+    render(<Dithered shape={SQUARE_SHAPE} brightness={() => true} />);
+
+    // Default fg '#000' is the last fillStyle set before drawing cells.
+    expect(ctx.fillStyle).toBe('#000');
+    // Default bg 'transparent' means no background fillRect call.
+    expect(ctx.fillRect).not.toHaveBeenCalled();
+    // Default cols (16) is a real number, so cells are sampled and drawn.
+    expect(ctx.fill).toHaveBeenCalled();
   });
 });
