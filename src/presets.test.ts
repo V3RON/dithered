@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fill, gem, presets, pulse, rain, sweep, wave } from './presets';
+import { fill, gameOfLife, gem, presets, pulse, rain, sweep, wave } from './presets';
 import type { Cell } from './shape';
 
 function makeCell(u: number, v: number, i = 0, j = 0): Cell {
@@ -24,9 +24,9 @@ const PERIODIC_PRESETS: Record<string, () => (cell: Cell, t: number) => number |
 };
 
 describe('presets export', () => {
-  it('exposes all six presets by name', () => {
+  it('exposes all seven presets by name', () => {
     expect(Object.keys(presets).sort()).toEqual(
-      ['fill', 'gem', 'pulse', 'rain', 'sweep', 'wave'].sort(),
+      ['fill', 'gameOfLife', 'gem', 'pulse', 'rain', 'sweep', 'wave'].sort(),
     );
   });
 });
@@ -115,4 +115,56 @@ describe('fill', () => {
       expect(litAtHalf).toBeLessThan(cells.length);
     },
   );
+});
+
+describe('gameOfLife', () => {
+  // Small board/frame counts keep these tests fast; every (i, j) pair on
+  // the board is sampled so the whole simulation is exercised.
+  const boardSize = 8;
+  const frames = 16;
+  const allCells: Cell[] = [];
+  for (let j = 0; j < boardSize; j++) {
+    for (let i = 0; i < boardSize; i++) {
+      allCells.push(makeCell(0, 0, i, j));
+    }
+  }
+
+  it('returns booleans for every cell/frame', () => {
+    const brightness = gameOfLife({ boardSize, frames });
+    for (const cell of allCells) {
+      for (let f = 0; f < frames; f++) {
+        expect(typeof brightness(cell, f / frames)).toBe('boolean');
+      }
+    }
+  });
+
+  it('is deterministic: the same seed always produces the same life and death', () => {
+    const a = gameOfLife({ seed: 42, boardSize, frames });
+    const b = gameOfLife({ seed: 42, boardSize, frames });
+    for (const cell of allCells) {
+      for (let f = 0; f < frames; f++) {
+        const t = f / frames;
+        expect(a(cell, t)).toBe(b(cell, t));
+      }
+    }
+  });
+
+  it('a different seed produces a different starting pattern', () => {
+    const a = gameOfLife({ seed: 1, boardSize, frames });
+    const b = gameOfLife({ seed: 2, boardSize, frames });
+    const patternA = allCells.map((cell) => a(cell, 0));
+    const patternB = allCells.map((cell) => b(cell, 0));
+    expect(patternA).not.toEqual(patternB);
+  });
+
+  it('never dies out completely: some cell is alive at every frame (guardrail)', () => {
+    // A low density makes the naive simulation likely to go fully extinct
+    // well before the loop ends without the anti-extinction guardrail.
+    const brightness = gameOfLife({ seed: 7, density: 0.12, boardSize, frames: 48 });
+    for (let f = 0; f < 48; f++) {
+      const t = f / 48;
+      const anyAlive = allCells.some((cell) => brightness(cell, t));
+      expect(anyAlive).toBe(true);
+    }
+  });
 });

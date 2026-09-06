@@ -61,6 +61,7 @@ createDithered(canvas, { shape, brightness: gem() }); // same thing
 - `rain({ density?, seed? })` — vertical drops falling per column, wrapping cleanly at the loop boundary.
 - `wave({ amplitude?, frequency? })` — a horizontal sine wave moving through the shape.
 - `fill({ direction? })` — a progress-style fill (`t=0` empty, `t=1` full); pair with `renderFrame`/`progress` for a determinate indicator rather than looping it.
+- `gameOfLife({ seed?, density?, frames?, boardSize? })` — Conway's Game of Life, simulated once and played back on loop. Pass your own `seed` to get a specific starting pattern (same seed = same result every time). The board wraps at its edges and quietly reseeds itself if the population ever crashes, so it won't fizzle out and leave the shape dark for the rest of the loop.
 
 ## Shapes
 
