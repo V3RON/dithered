@@ -1,15 +1,5 @@
-import { beforeAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { BAYER_4, aspectOf, sampleCells, type Shape } from './shape';
-
-// jsdom does not implement Path2D. sampleCells only needs a constructible
-// stand-in — the mocked isPointInPath below never inspects the path itself.
-beforeAll(() => {
-  if (typeof globalThis.Path2D === 'undefined') {
-    (globalThis as { Path2D?: unknown }).Path2D = class {
-      constructor(_d?: string) {}
-    };
-  }
-});
 
 const SQUARE: Shape = {
   path: 'M0 0 H10 V10 H0 Z',
