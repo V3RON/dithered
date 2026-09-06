@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { forwardRef, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { Brightness, Shape } from 'dithered';
@@ -17,15 +17,26 @@ const panel: CSSProperties = {
   border: '1px solid #262c3a',
   borderRadius: 10,
   padding: '20px 24px',
+  transition: 'box-shadow 0.3s ease, border-color 0.3s ease',
+};
+
+const panelHighlighted: CSSProperties = {
+  boxShadow: `0 0 0 2px ${ACCENT}`,
 };
 
 const sectionTitle: CSSProperties = {
-  margin: '0 0 12px',
+  margin: '0 0 4px',
   fontSize: 13,
   fontWeight: 600,
   letterSpacing: 0.4,
   textTransform: 'uppercase',
   color: '#9aa4b8',
+};
+
+const sectionHint: CSSProperties = {
+  margin: '0 0 16px',
+  fontSize: 13,
+  color: '#6b7385',
 };
 
 const label: CSSProperties = {
@@ -40,7 +51,18 @@ const row: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 4 };
 const controlsGrid: CSSProperties = {
   display: 'grid',
   gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
-  gap: 12,
+  gap: 14,
+};
+
+const fieldStyle: CSSProperties = {
+  width: '100%',
+};
+
+const subCard: CSSProperties = {
+  background: '#0f1219',
+  border: '1px solid #262c3a',
+  borderRadius: 8,
+  padding: 14,
 };
 
 const textareaStyle: CSSProperties = {
@@ -76,6 +98,12 @@ const ghostButtonStyle: CSSProperties = {
   color: '#e6e8ee',
 };
 
+const divider: CSSProperties = {
+  borderTop: '1px solid #262c3a',
+  marginTop: 24,
+  paddingTop: 20,
+};
+
 const codeBlockStyle: CSSProperties = {
   background: '#0b0d12',
   border: '1px solid #262c3a',
@@ -105,7 +133,7 @@ function Hero() {
       }}
     >
       <div style={{ flex: '1 1 340px', minWidth: 280 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+        <div style={{ marginBottom: 12 }}>
           <Dithered
             shape={shapes.rozenite}
             brightness={presets.gem()}
@@ -113,14 +141,11 @@ function Hero() {
             fg={ACCENT}
             label=""
           />
-          <a href={REPO_URL} style={{ fontSize: 13, color: '#9aa4b8', textDecoration: 'none' }}>
-            View on GitHub ↗
-          </a>
         </div>
         <h1 style={{ fontSize: 42, margin: '0 0 12px', lineHeight: 1.1 }}>dithered</h1>
         <p style={{ fontSize: 17, color: '#c4cad8', margin: '0 0 20px', maxWidth: 480 }}>
-          Turn any SVG silhouette into an animated, dithered loading spinner — a few lines of code,
-          zero dependencies.
+          Turn any SVG shape into a little animated, dithered loading spinner. Just a few lines of
+          code, and nothing else to install.
         </p>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <code style={codeBlockStyle}>pnpm add dithered</code>
@@ -148,7 +173,8 @@ function Hero() {
 }
 
 // ---------------------------------------------------------------------------
-// Gallery: compact grid of every shape x every preset
+// Gallery: compact grid of every shape x every preset — click one to load it
+// into the playground below
 // ---------------------------------------------------------------------------
 
 const SHAPE_ENTRIES = Object.entries(shapes) as [string, Shape][];
@@ -163,15 +189,22 @@ const GALLERY_ITEMS = SHAPE_ENTRIES.flatMap(([shapeName, shape]) =>
   PRESET_ENTRIES.map(([presetName, factory]) => ({
     key: `${shapeName}-${presetName}`,
     label: `${shapeName} / ${presetName}`,
+    shapeName,
+    presetName,
     shape,
     brightness: factory(),
   })),
 );
 
-function Gallery() {
+interface GalleryProps {
+  onSelect: (shapeName: string, presetName: string) => void;
+}
+
+function Gallery({ onSelect }: GalleryProps) {
   return (
     <section style={panel}>
-      <h2 style={sectionTitle}>Every shape × every preset</h2>
+      <h2 style={sectionTitle}>Every shape, every animation</h2>
+      <p style={sectionHint}>Click one to load it into the playground below.</p>
       <div
         style={{
           display: 'grid',
@@ -180,10 +213,23 @@ function Gallery() {
         }}
       >
         {GALLERY_ITEMS.map((item) => (
-          <div
+          <button
             key={item.key}
+            type="button"
+            className="gallery-item"
             title={item.label}
-            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+            aria-label={`Load the ${item.shapeName} shape with the ${item.presetName} animation`}
+            onClick={() => onSelect(item.shapeName, item.presetName)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: 'transparent',
+              border: '1px solid transparent',
+              borderRadius: 8,
+              padding: 4,
+              cursor: 'pointer',
+            }}
           >
             <Dithered
               shape={item.shape}
@@ -192,7 +238,7 @@ function Gallery() {
               fg={ACCENT}
               label=""
             />
-          </div>
+          </button>
         ))}
       </div>
     </section>
@@ -200,25 +246,91 @@ function Gallery() {
 }
 
 // ---------------------------------------------------------------------------
-// Make it yours: live preview + controls + paste-your-SVG + advanced options
+// Playground: live preview + controls + paste-your-SVG + advanced options +
+// a code snippet that always matches whatever's currently configured
 // ---------------------------------------------------------------------------
 
-const DEFAULT_SVG = `<svg viewBox="0 0 100 100">\n  <path d="M50 5 L95 50 L50 95 L5 50 Z" />\n</svg>`;
+// A five-pointed star — deliberately not one of the built-in shapes, so
+// switching to "Custom SVG" always starts from something new to look at.
+const DEFAULT_CUSTOM_SVG = `<svg viewBox="0 0 100 100">
+  <path d="M50 2 L61 37 L98 37 L68 59 L79 95 L50 73 L21 95 L32 59 L2 37 L39 37 Z" />
+</svg>`;
 
-function Customize() {
-  const [shapeKey, setShapeKey] = useState<string>('rozenite');
-  const [presetKey, setPresetKey] = useState<string>('gem');
-  const [fg, setFg] = useState('#8232ff');
-  const [customShape, setCustomShape] = useState<Shape | null>(null);
-  const [svgText, setSvgText] = useState(DEFAULT_SVG);
+function parseCustomShape(svg: string): { shape: Shape | null; error: string | null } {
+  try {
+    return { shape: shapeFromSvg(svg), error: null };
+  } catch (err) {
+    return { shape: null, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export interface PlaygroundState {
+  shapeKey: string;
+  setShapeKey: (key: string) => void;
+  presetKey: string;
+  setPresetKey: (key: string) => void;
+  fg: string;
+  setFg: (fg: string) => void;
+  cols: number;
+  setCols: (cols: number) => void;
+  period: number;
+  setPeriod: (period: number) => void;
+  noiseAmt: number;
+  setNoiseAmt: (n: number) => void;
+  golSeed: number;
+  setGolSeed: (n: number) => void;
+  svgText: string;
+  setSvgText: (svg: string) => void;
+  highlighted: boolean;
+}
+
+const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
+  {
+    shapeKey,
+    setShapeKey,
+    presetKey,
+    setPresetKey,
+    fg,
+    setFg,
+    cols,
+    setCols,
+    period,
+    setPeriod,
+    noiseAmt,
+    setNoiseAmt,
+    golSeed,
+    setGolSeed,
+    svgText,
+    setSvgText,
+    highlighted,
+  },
+  ref,
+) {
+  const [customShape, setCustomShape] = useState<Shape | null>(
+    () => parseCustomShape(DEFAULT_CUSTOM_SVG).shape,
+  );
   const [svgError, setSvgError] = useState<string | null>(null);
   const [advanced, setAdvanced] = useState(false);
-  const [cols, setCols] = useState(16);
-  const [period, setPeriod] = useState(2000);
-  const [noiseAmt, setNoiseAmt] = useState(0.8);
-  const [golSeed, setGolSeed] = useState(1);
 
-  const shape = customShape ?? shapes[shapeKey as keyof typeof shapes];
+  const isCustomShape = shapeKey === 'custom';
+
+  // Re-parse the pasted SVG whenever it changes, but only while it's
+  // actually in use — so the textarea "reacts to changes" without the user
+  // having to click an Apply button. Keeps showing the last valid shape
+  // while the SVG is mid-edit and invalid, rather than flashing blank.
+  useEffect(() => {
+    if (!isCustomShape) return;
+    const id = setTimeout(() => {
+      const { shape: parsed, error } = parseCustomShape(svgText);
+      if (parsed) setCustomShape(parsed);
+      setSvgError(error);
+    }, 300);
+    return () => clearTimeout(id);
+  }, [svgText, isCustomShape]);
+
+  const shape = isCustomShape
+    ? (customShape ?? shapes.rozenite)
+    : shapes[shapeKey as keyof typeof shapes];
 
   const brightness = useMemo(() => {
     const factory = presets[presetKey as keyof typeof presets];
@@ -228,18 +340,28 @@ function Customize() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [presetKey, noiseAmt, golSeed]);
 
-  const applySvg = () => {
-    try {
-      setCustomShape(shapeFromSvg(svgText));
-      setSvgError(null);
-    } catch (err) {
-      setSvgError(err instanceof Error ? err.message : String(err));
-    }
-  };
+  const snippet = useMemo(
+    () =>
+      buildSnippet({
+        isCustomShape,
+        shapeKey,
+        svgText,
+        presetKey,
+        noiseAmt,
+        golSeed,
+        fg,
+        cols,
+        period,
+      }),
+    [isCustomShape, shapeKey, svgText, presetKey, noiseAmt, golSeed, fg, cols, period],
+  );
 
   return (
-    <section style={panel}>
-      <h2 style={sectionTitle}>Make it yours</h2>
+    <section ref={ref} style={{ ...panel, ...(highlighted ? panelHighlighted : {}) }}>
+      <h2 style={sectionTitle}>Play with it</h2>
+      <p style={sectionHint}>
+        Pick a shape and an animation, tweak the knobs, then grab the code at the bottom.
+      </p>
       <div style={{ display: 'flex', gap: 28, flexWrap: 'wrap' }}>
         <div
           style={{
@@ -266,23 +388,26 @@ function Customize() {
             <label style={row}>
               <span style={label}>Shape</span>
               <select
+                style={fieldStyle}
                 value={shapeKey}
-                onChange={(e) => {
-                  setShapeKey(e.target.value);
-                  setCustomShape(null);
-                }}
+                onChange={(e) => setShapeKey(e.target.value)}
               >
                 {SHAPE_ENTRIES.map(([name]) => (
                   <option key={name} value={name}>
                     {name}
                   </option>
                 ))}
+                <option value="custom">Custom (paste SVG)</option>
               </select>
             </label>
 
             <label style={row}>
-              <span style={label}>Preset</span>
-              <select value={presetKey} onChange={(e) => setPresetKey(e.target.value)}>
+              <span style={label}>Animation</span>
+              <select
+                style={fieldStyle}
+                value={presetKey}
+                onChange={(e) => setPresetKey(e.target.value)}
+              >
                 {PRESET_ENTRIES.map(([name]) => (
                   <option key={name} value={name}>
                     {name}
@@ -297,29 +422,32 @@ function Customize() {
             </label>
           </div>
 
-          <div>
-            <span style={label}>Or paste your own SVG</span>
-            <textarea
-              style={textareaStyle}
-              value={svgText}
-              onChange={(e) => setSvgText(e.target.value)}
-              spellCheck={false}
-            />
-            <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
-              <button onClick={applySvg} style={buttonStyle}>
-                Apply
-              </button>
-              <button onClick={() => setAdvanced((v) => !v)} style={ghostButtonStyle}>
-                {advanced ? 'Hide advanced' : 'Advanced options'}
-              </button>
+          {isCustomShape && (
+            <div style={subCard}>
+              <span style={label}>Paste your own SVG</span>
+              <textarea
+                style={textareaStyle}
+                value={svgText}
+                onChange={(e) => setSvgText(e.target.value)}
+                spellCheck={false}
+              />
+              <p style={{ ...sectionHint, margin: '6px 0 0' }}>
+                Needs a viewBox and at least one &lt;path&gt; — the preview updates as you type.
+              </p>
+              {svgError && <div style={errorStyle}>{svgError}</div>}
             </div>
-            {svgError && <div style={errorStyle}>{svgError}</div>}
+          )}
+
+          <div>
+            <button onClick={() => setAdvanced((v) => !v)} style={ghostButtonStyle}>
+              {advanced ? 'Hide advanced options' : 'Advanced options'}
+            </button>
           </div>
 
           {advanced && (
-            <div style={controlsGrid}>
+            <div style={{ ...subCard, ...controlsGrid }}>
               <label style={row}>
-                <span style={label}>Cols: {cols}</span>
+                <span style={label}>Columns: {cols}</span>
                 <input
                   type="range"
                   min={8}
@@ -329,7 +457,7 @@ function Customize() {
                 />
               </label>
               <label style={row}>
-                <span style={label}>Period: {period}ms</span>
+                <span style={label}>Speed: {period}ms per loop</span>
                 <input
                   type="range"
                   min={200}
@@ -375,47 +503,125 @@ function Customize() {
           )}
         </div>
       </div>
+
+      <div style={divider}>
+        <h3 style={sectionTitle}>Grab the code</h3>
+        <p style={sectionHint}>This matches whatever you've got set up above.</p>
+        <pre style={codeBlockStyle}>{snippet}</pre>
+      </div>
     </section>
+  );
+});
+
+function buildSnippet(opts: {
+  isCustomShape: boolean;
+  shapeKey: string;
+  svgText: string;
+  presetKey: string;
+  noiseAmt: number;
+  golSeed: number;
+  fg: string;
+  cols: number;
+  period: number;
+}): string {
+  const { isCustomShape, shapeKey, svgText, presetKey, noiseAmt, golSeed, fg, cols, period } = opts;
+
+  const presetArgParts: string[] = [];
+  if (presetKey === 'gem' && noiseAmt !== 0.8) presetArgParts.push(`noise: ${noiseAmt}`);
+  if (presetKey === 'gameOfLife' && golSeed !== 1) presetArgParts.push(`seed: ${golSeed}`);
+  const presetArgs = presetArgParts.length ? `{ ${presetArgParts.join(', ')} }` : '';
+  const brightnessExpr = `presets.${presetKey}(${presetArgs})`;
+
+  const propParts = [
+    `shape={${isCustomShape ? 'shape' : `shapes.${shapeKey}`}}`,
+    `brightness={${brightnessExpr}}`,
+    `fg="${fg}"`,
+  ];
+  if (cols !== 16) propParts.push(`cols={${cols}}`);
+  if (period !== 2000) propParts.push(`period={${period}}`);
+
+  const jsx = `<Dithered\n  ${propParts.join('\n  ')}\n/>`;
+
+  if (isCustomShape) {
+    return (
+      `import { Dithered } from 'dithered/react';\n` +
+      `import { presets, shapeFromSvg } from 'dithered';\n\n` +
+      `const shape = shapeFromSvg(\`${svgText}\`);\n\n` +
+      jsx
+    );
+  }
+
+  return (
+    `import { Dithered } from 'dithered/react';\n` +
+    `import { shapes, presets } from 'dithered';\n\n` +
+    jsx
   );
 }
 
 // ---------------------------------------------------------------------------
-// React snippet + footer
+// Footer
 // ---------------------------------------------------------------------------
 
-const SNIPPET = `import { Dithered } from 'dithered/react';
-import { shapes, presets } from 'dithered';
-
-<Dithered shape={shapes.rozenite} brightness={presets.gem()} fg="#8232ff" />`;
-
-function GetStarted() {
+function Footer() {
   return (
-    <section
+    <footer
       style={{
-        ...panel,
-        display: 'flex',
-        gap: 24,
-        flexWrap: 'wrap',
-        alignItems: 'center',
-        justifyContent: 'space-between',
+        textAlign: 'center',
+        fontSize: 13,
+        color: '#6b7385',
+        padding: '8px 0 24px',
       }}
     >
-      <div style={{ flex: '1 1 320px', minWidth: 280 }}>
-        <h2 style={sectionTitle}>Drop it into React</h2>
-        <pre style={codeBlockStyle}>{SNIPPET}</pre>
-      </div>
-      <div style={{ fontSize: 13, color: '#9aa4b8' }}>
-        <a href={REPO_URL} style={{ color: '#e6e8ee' }}>
-          github.com/V3RON/dithered ↗
-        </a>
-      </div>
-    </section>
+      MIT licensed.{' '}
+      <a href={REPO_URL} style={{ color: '#9aa4b8' }}>
+        Poke around on GitHub ↗
+      </a>
+    </footer>
   );
 }
 
 // ---------------------------------------------------------------------------
 
+const DEFAULTS = {
+  shapeKey: 'rozenite',
+  presetKey: 'gem',
+  fg: ACCENT,
+  cols: 16,
+  period: 2000,
+  noiseAmt: 0.8,
+  golSeed: 1,
+};
+
 function App() {
+  const [shapeKey, setShapeKey] = useState(DEFAULTS.shapeKey);
+  const [presetKey, setPresetKey] = useState(DEFAULTS.presetKey);
+  const [fg, setFg] = useState(DEFAULTS.fg);
+  const [cols, setCols] = useState(DEFAULTS.cols);
+  const [period, setPeriod] = useState(DEFAULTS.period);
+  const [noiseAmt, setNoiseAmt] = useState(DEFAULTS.noiseAmt);
+  const [golSeed, setGolSeed] = useState(DEFAULTS.golSeed);
+  const [svgText, setSvgText] = useState(DEFAULT_CUSTOM_SVG);
+  const [highlighted, setHighlighted] = useState(false);
+
+  const playgroundRef = useRef<HTMLElement | null>(null);
+  const highlightTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const applyExample = (nextShapeKey: string, nextPresetKey: string) => {
+    setShapeKey(nextShapeKey);
+    setPresetKey(nextPresetKey);
+    setFg(DEFAULTS.fg);
+    setCols(DEFAULTS.cols);
+    setPeriod(DEFAULTS.period);
+    setNoiseAmt(DEFAULTS.noiseAmt);
+    setGolSeed(DEFAULTS.golSeed);
+
+    playgroundRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    if (highlightTimeout.current) clearTimeout(highlightTimeout.current);
+    setHighlighted(true);
+    highlightTimeout.current = setTimeout(() => setHighlighted(false), 900);
+  };
+
   return (
     <div
       style={{
@@ -428,9 +634,28 @@ function App() {
       }}
     >
       <Hero />
-      <Gallery />
-      <Customize />
-      <GetStarted />
+      <Gallery onSelect={applyExample} />
+      <Playground
+        ref={playgroundRef}
+        shapeKey={shapeKey}
+        setShapeKey={setShapeKey}
+        presetKey={presetKey}
+        setPresetKey={setPresetKey}
+        fg={fg}
+        setFg={setFg}
+        cols={cols}
+        setCols={setCols}
+        period={period}
+        setPeriod={setPeriod}
+        noiseAmt={noiseAmt}
+        setNoiseAmt={setNoiseAmt}
+        golSeed={golSeed}
+        setGolSeed={setGolSeed}
+        svgText={svgText}
+        setSvgText={setSvgText}
+        highlighted={highlighted}
+      />
+      <Footer />
     </div>
   );
 }

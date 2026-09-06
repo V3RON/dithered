@@ -32,6 +32,50 @@
       input {
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       }
+      select,
+      input[type='number'] {
+        background: #0b0d12;
+        color: #e6e8ee;
+        border: 1px solid #262c3a;
+        border-radius: 6px;
+        padding: 7px 8px;
+        font-size: 13px;
+      }
+      input[type='range'] {
+        width: 100%;
+        accent-color: #8232ff;
+      }
+      input[type='color'] {
+        width: 44px;
+        height: 32px;
+        padding: 2px;
+        border-radius: 6px;
+        border: 1px solid #262c3a;
+        background: #0b0d12;
+        cursor: pointer;
+      }
+      button {
+        transition: filter 0.15s ease;
+      }
+      button:hover {
+        filter: brightness(1.12);
+      }
+      button:focus-visible,
+      select:focus-visible,
+      input:focus-visible,
+      textarea:focus-visible {
+        outline: 2px solid #8232ff;
+        outline-offset: 2px;
+      }
+      .gallery-item {
+        transition:
+          background 0.15s ease,
+          border-color 0.15s ease;
+      }
+      .gallery-item:hover {
+        background: #1b2130;
+        border-color: #262c3a !important;
+      }
     </style>
   </head>
   <body>
