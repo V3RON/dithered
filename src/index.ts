@@ -9,3 +9,6 @@ export type {
   PaintGeometry,
 } from './renderer';
 export { createDithered, frameAt, paintFrame } from './renderer';
+export { presets, gem, sweep, pulse, rain, wave, fill } from './presets';
+export { shapes, rozenite, circle, square, diamond, heart } from './shapes';
+export { shapeFromSvg } from './svg';

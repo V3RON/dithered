@@ -32,3 +32,43 @@ instance.destroy();
 ```
 
 See `src/renderer.ts` for the full `DitheredOptions` reference (grid size, frame count/period, sprite-strip caching, gap/corner radius, reduced-motion handling, and more).
+
+## Presets
+
+Built-in `Brightness` factories, importable individually or via `presets`:
+
+```ts
+import { presets, gem } from 'dithered';
+
+createDithered(canvas, { shape, brightness: presets.gem({ noise: 0.8 }) });
+createDithered(canvas, { shape, brightness: gem() }); // same thing
+```
+
+- `gem({ noise? })` — the Rozenite loader's light field: a rotating sweep plus a travelling highlight blob and grain, ported line-for-line from the reference loader.
+- `sweep({ angle?, width? })` — a soft band of light travelling across the shape once per loop.
+- `pulse({ min?, max? })` — radial breathing: brightest at the centre, oscillating once per loop.
+- `rain({ density?, seed? })` — vertical drops falling per column, wrapping cleanly at the loop boundary.
+- `wave({ amplitude?, frequency? })` — a horizontal sine wave moving through the shape.
+- `fill({ direction? })` — a progress-style fill (`t=0` empty, `t=1` full); pair with `renderFrame` for a determinate progress indicator rather than looping it.
+
+## Shapes
+
+Ready-made `Shape` objects, importable individually or via `shapes`: `rozenite` (the Rozenite gem mark), `circle`, `square`, `diamond`, `heart`.
+
+```ts
+import { shapes } from 'dithered';
+
+createDithered(canvas, { shape: shapes.heart, brightness: presets.pulse() });
+```
+
+Build a `Shape` from your own SVG with `shapeFromSvg`, which reads the root `viewBox` and concatenates every `<path>` descendant's `d` attribute (only `<path>` elements are supported):
+
+```ts
+import { shapeFromSvg } from 'dithered';
+
+const shape = shapeFromSvg(`
+  <svg viewBox="0 0 100 100">
+    <path d="M10 10 H90 V90 H10 Z" />
+  </svg>
+`);
+```
