@@ -247,7 +247,15 @@ function Customize() {
             width: 140,
           }}
         >
-          <Dithered shape={shape} brightness={brightness} size={140} fg={fg} label="Preview" />
+          <Dithered
+            shape={shape}
+            brightness={brightness}
+            size={140}
+            fg={fg}
+            cols={cols}
+            period={period}
+            label="Preview"
+          />
         </div>
 
         <div style={{ flex: '1 1 300px', display: 'flex', flexDirection: 'column', gap: 16 }}>
