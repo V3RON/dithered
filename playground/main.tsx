@@ -133,7 +133,7 @@ function Hero() {
       }}
     >
       <div style={{ flex: '1 1 340px', minWidth: 280 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+        <div style={{ marginBottom: 12 }}>
           <Dithered
             shape={shapes.rozenite}
             brightness={presets.gem()}
@@ -141,9 +141,6 @@ function Hero() {
             fg={ACCENT}
             label=""
           />
-          <a href={REPO_URL} style={{ fontSize: 13, color: '#9aa4b8', textDecoration: 'none' }}>
-            View on GitHub ↗
-          </a>
         </div>
         <h1 style={{ fontSize: 42, margin: '0 0 12px', lineHeight: 1.1 }}>dithered</h1>
         <p style={{ fontSize: 17, color: '#c4cad8', margin: '0 0 20px', maxWidth: 480 }}>
