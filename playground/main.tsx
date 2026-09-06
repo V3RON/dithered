@@ -5,6 +5,9 @@ import type { Brightness, Shape } from 'dithered';
 import { presets, shapeFromSvg, shapes } from 'dithered';
 import { Dithered } from 'dithered/react';
 
+const REPO_URL = 'https://github.com/V3RON/dithered';
+const ACCENT = '#8232ff';
+
 // ---------------------------------------------------------------------------
 // styling helpers (inline styles only — no CSS framework)
 // ---------------------------------------------------------------------------
@@ -12,9 +15,17 @@ import { Dithered } from 'dithered/react';
 const panel: CSSProperties = {
   background: '#141821',
   border: '1px solid #262c3a',
-  borderRadius: 8,
-  padding: 16,
-  marginBottom: 24,
+  borderRadius: 10,
+  padding: '20px 24px',
+};
+
+const sectionTitle: CSSProperties = {
+  margin: '0 0 12px',
+  fontSize: 13,
+  fontWeight: 600,
+  letterSpacing: 0.4,
+  textTransform: 'uppercase',
+  color: '#9aa4b8',
 };
 
 const label: CSSProperties = {
@@ -24,45 +35,120 @@ const label: CSSProperties = {
   marginBottom: 4,
 };
 
-const row: CSSProperties = {
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 4,
-};
+const row: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 4 };
 
 const controlsGrid: CSSProperties = {
   display: 'grid',
-  gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
-  gap: 16,
+  gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+  gap: 12,
 };
 
 const textareaStyle: CSSProperties = {
   width: '100%',
-  minHeight: 90,
+  minHeight: 64,
   background: '#0b0d12',
   color: '#e6e8ee',
   border: '1px solid #262c3a',
   borderRadius: 6,
   padding: 8,
-  fontSize: 13,
+  fontSize: 12,
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
   resize: 'vertical',
 };
 
-const errorStyle: CSSProperties = {
-  color: '#ff6b6b',
-  fontSize: 12,
-  marginTop: 6,
-  whiteSpace: 'pre-wrap',
+const errorStyle: CSSProperties = { color: '#ff6b6b', fontSize: 12, marginTop: 6 };
+
+const buttonStyle: CSSProperties = {
+  background: ACCENT,
+  color: '#fff',
+  border: 'none',
+  borderRadius: 6,
+  padding: '8px 14px',
+  fontSize: 13,
+  fontWeight: 600,
+  cursor: 'pointer',
 };
 
-// `Dithered`'s `fg` default ('#000') is invisible against this playground's
-// dark background, so every instance below passes an explicit accent color
-// rather than relying on the library default (which stays black — this is
-// a playground-only choice, not a library change).
-const ACCENT_FG = '#8232ff';
+const ghostButtonStyle: CSSProperties = {
+  ...buttonStyle,
+  background: 'transparent',
+  border: '1px solid #262c3a',
+  color: '#e6e8ee',
+};
+
+const codeBlockStyle: CSSProperties = {
+  background: '#0b0d12',
+  border: '1px solid #262c3a',
+  borderRadius: 8,
+  padding: '12px 14px',
+  fontSize: 12.5,
+  lineHeight: 1.6,
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+  color: '#e6e8ee',
+  overflowX: 'auto',
+  margin: 0,
+};
 
 // ---------------------------------------------------------------------------
-// Gallery: every shape x every preset, size 64
+// Hero
+// ---------------------------------------------------------------------------
+
+function Hero() {
+  return (
+    <header
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 32,
+        flexWrap: 'wrap',
+        padding: '32px 0 24px',
+      }}
+    >
+      <div style={{ flex: '1 1 340px', minWidth: 280 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+          <Dithered
+            shape={shapes.rozenite}
+            brightness={presets.gem()}
+            size={28}
+            fg={ACCENT}
+            label=""
+          />
+          <a href={REPO_URL} style={{ fontSize: 13, color: '#9aa4b8', textDecoration: 'none' }}>
+            View on GitHub ↗
+          </a>
+        </div>
+        <h1 style={{ fontSize: 42, margin: '0 0 12px', lineHeight: 1.1 }}>dithered</h1>
+        <p style={{ fontSize: 17, color: '#c4cad8', margin: '0 0 20px', maxWidth: 480 }}>
+          Turn any SVG silhouette into an animated, dithered loading spinner — a few lines of code,
+          zero dependencies.
+        </p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <code style={codeBlockStyle}>pnpm add dithered</code>
+        </div>
+      </div>
+      <div
+        style={{
+          flex: '0 0 auto',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          minWidth: 220,
+        }}
+      >
+        <Dithered
+          shape={shapes.rozenite}
+          brightness={presets.gem()}
+          size={200}
+          fg={ACCENT}
+          label="dithered loading animation"
+        />
+      </div>
+    </header>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Gallery: compact grid of every shape x every preset
 // ---------------------------------------------------------------------------
 
 const SHAPE_ENTRIES = Object.entries(shapes) as [string, Shape][];
@@ -84,50 +170,54 @@ const GALLERY_ITEMS = SHAPE_ENTRIES.flatMap(([shapeName, shape]) =>
 
 function Gallery() {
   return (
-    <div style={panel}>
-      <h2 style={{ marginTop: 0 }}>Gallery — every shape × every preset</h2>
+    <section style={panel}>
+      <h2 style={sectionTitle}>Every shape × every preset</h2>
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(96px, 1fr))',
-          gap: 12,
+          gridTemplateColumns: 'repeat(auto-fill, minmax(52px, 1fr))',
+          gap: 8,
         }}
       >
         {GALLERY_ITEMS.map((item) => (
-          <div key={item.key} style={{ textAlign: 'center' }}>
+          <div
+            key={item.key}
+            title={item.label}
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          >
             <Dithered
               shape={item.shape}
               brightness={item.brightness}
-              size={64}
-              fg={ACCENT_FG}
+              size={40}
+              fg={ACCENT}
               label=""
             />
-            <div style={{ fontSize: 10, color: '#9aa4b8', marginTop: 4 }}>{item.label}</div>
           </div>
         ))}
       </div>
-    </div>
+    </section>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Control panel: one large (size 160) instance
+// Make it yours: live preview + controls + paste-your-SVG + advanced options
 // ---------------------------------------------------------------------------
 
-function ControlPanel() {
+const DEFAULT_SVG = `<svg viewBox="0 0 100 100">\n  <path d="M50 5 L95 50 L50 95 L5 50 Z" />\n</svg>`;
+
+function Customize() {
   const [shapeKey, setShapeKey] = useState<string>('rozenite');
   const [presetKey, setPresetKey] = useState<string>('gem');
   const [fg, setFg] = useState('#8232ff');
-  const [transparentBg, setTransparentBg] = useState(true);
-  const [bg, setBg] = useState('#0b0d12');
+  const [customShape, setCustomShape] = useState<Shape | null>(null);
+  const [svgText, setSvgText] = useState(DEFAULT_SVG);
+  const [svgError, setSvgError] = useState<string | null>(null);
+  const [advanced, setAdvanced] = useState(false);
   const [cols, setCols] = useState(16);
   const [period, setPeriod] = useState(2000);
   const [noiseAmt, setNoiseAmt] = useState(0.8);
-  const [paused, setPaused] = useState(false);
-  const [progressEnabled, setProgressEnabled] = useState(false);
-  const [progress, setProgress] = useState(0.5);
 
-  const shape = shapes[shapeKey as keyof typeof shapes];
+  const shape = customShape ?? shapes[shapeKey as keyof typeof shapes];
 
   const brightness = useMemo(() => {
     const factory = presets[presetKey as keyof typeof presets];
@@ -135,275 +225,161 @@ function ControlPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [presetKey, noiseAmt]);
 
-  return (
-    <div style={panel}>
-      <h2 style={{ marginTop: 0 }}>Control panel</h2>
-      <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
-        <Dithered
-          shape={shape}
-          brightness={brightness}
-          size={160}
-          fg={fg}
-          bg={transparentBg ? 'transparent' : bg}
-          cols={cols}
-          period={period}
-          paused={paused}
-          progress={progressEnabled ? progress : undefined}
-          label="Preview"
-        />
-
-        <div style={{ ...controlsGrid, flex: 1, minWidth: 280 }}>
-          <label style={row}>
-            <span style={label}>Shape</span>
-            <select value={shapeKey} onChange={(e) => setShapeKey(e.target.value)}>
-              {SHAPE_ENTRIES.map(([name]) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label style={row}>
-            <span style={label}>Preset</span>
-            <select value={presetKey} onChange={(e) => setPresetKey(e.target.value)}>
-              {PRESET_ENTRIES.map(([name]) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label style={row}>
-            <span style={label}>Foreground</span>
-            <input type="color" value={fg} onChange={(e) => setFg(e.target.value)} />
-          </label>
-
-          <label style={row}>
-            <span style={label}>
-              Background{' '}
-              <input
-                type="checkbox"
-                checked={transparentBg}
-                onChange={(e) => setTransparentBg(e.target.checked)}
-              />{' '}
-              transparent
-            </span>
-            <input
-              type="color"
-              value={bg}
-              disabled={transparentBg}
-              onChange={(e) => setBg(e.target.value)}
-            />
-          </label>
-
-          <label style={row}>
-            <span style={label}>Cols: {cols}</span>
-            <input
-              type="range"
-              min={8}
-              max={48}
-              value={cols}
-              onChange={(e) => setCols(Number(e.target.value))}
-            />
-          </label>
-
-          <label style={row}>
-            <span style={label}>Period: {period}ms</span>
-            <input
-              type="range"
-              min={200}
-              max={6000}
-              step={100}
-              value={period}
-              onChange={(e) => setPeriod(Number(e.target.value))}
-            />
-          </label>
-
-          {presetKey === 'gem' && (
-            <label style={row}>
-              <span style={label}>Noise: {noiseAmt.toFixed(2)}</span>
-              <input
-                type="range"
-                min={0}
-                max={1.4}
-                step={0.05}
-                value={noiseAmt}
-                onChange={(e) => setNoiseAmt(Number(e.target.value))}
-              />
-            </label>
-          )}
-
-          <label style={row}>
-            <span style={label}>
-              <input
-                type="checkbox"
-                checked={paused}
-                disabled={progressEnabled}
-                onChange={(e) => setPaused(e.target.checked)}
-              />{' '}
-              Paused
-            </span>
-          </label>
-
-          <label style={row}>
-            <span style={label}>
-              <input
-                type="checkbox"
-                checked={progressEnabled}
-                onChange={(e) => setProgressEnabled(e.target.checked)}
-              />{' '}
-              Determinate progress
-            </span>
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.01}
-              value={progress}
-              disabled={!progressEnabled}
-              onChange={(e) => setProgress(Number(e.target.value))}
-            />
-          </label>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Custom SVG
-// ---------------------------------------------------------------------------
-
-const DEFAULT_SVG = `<svg viewBox="0 0 100 100">\n  <path d="M50 5 L95 50 L50 95 L5 50 Z" />\n</svg>`;
-
-function CustomSvgPanel() {
-  const [svgText, setSvgText] = useState(DEFAULT_SVG);
-  const [shape, setShape] = useState<Shape | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const apply = () => {
+  const applySvg = () => {
     try {
-      setShape(shapeFromSvg(svgText));
-      setError(null);
+      setCustomShape(shapeFromSvg(svgText));
+      setSvgError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setShape(null);
+      setSvgError(err instanceof Error ? err.message : String(err));
     }
   };
 
   return (
-    <div style={panel}>
-      <h2 style={{ marginTop: 0 }}>Custom SVG</h2>
-      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-        <div style={{ flex: 1, minWidth: 260 }}>
-          <textarea
-            style={textareaStyle}
-            value={svgText}
-            onChange={(e) => setSvgText(e.target.value)}
-            spellCheck={false}
-          />
-          <button onClick={apply} style={{ marginTop: 8 }}>
-            Apply
-          </button>
-          {error && <div style={errorStyle}>{error}</div>}
+    <section style={panel}>
+      <h2 style={sectionTitle}>Make it yours</h2>
+      <div style={{ display: 'flex', gap: 28, flexWrap: 'wrap' }}>
+        <div
+          style={{
+            flex: '0 0 auto',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 140,
+          }}
+        >
+          <Dithered shape={shape} brightness={brightness} size={140} fg={fg} label="Preview" />
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 96 }}>
-          {shape && (
-            <Dithered shape={shape} brightness={presets.gem()} size={96} fg={ACCENT_FG} label="" />
+
+        <div style={{ flex: '1 1 300px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div style={controlsGrid}>
+            <label style={row}>
+              <span style={label}>Shape</span>
+              <select
+                value={shapeKey}
+                onChange={(e) => {
+                  setShapeKey(e.target.value);
+                  setCustomShape(null);
+                }}
+              >
+                {SHAPE_ENTRIES.map(([name]) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label style={row}>
+              <span style={label}>Preset</span>
+              <select value={presetKey} onChange={(e) => setPresetKey(e.target.value)}>
+                {PRESET_ENTRIES.map(([name]) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label style={row}>
+              <span style={label}>Color</span>
+              <input type="color" value={fg} onChange={(e) => setFg(e.target.value)} />
+            </label>
+          </div>
+
+          <div>
+            <span style={label}>Or paste your own SVG</span>
+            <textarea
+              style={textareaStyle}
+              value={svgText}
+              onChange={(e) => setSvgText(e.target.value)}
+              spellCheck={false}
+            />
+            <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
+              <button onClick={applySvg} style={buttonStyle}>
+                Apply
+              </button>
+              <button onClick={() => setAdvanced((v) => !v)} style={ghostButtonStyle}>
+                {advanced ? 'Hide advanced' : 'Advanced options'}
+              </button>
+            </div>
+            {svgError && <div style={errorStyle}>{svgError}</div>}
+          </div>
+
+          {advanced && (
+            <div style={controlsGrid}>
+              <label style={row}>
+                <span style={label}>Cols: {cols}</span>
+                <input
+                  type="range"
+                  min={8}
+                  max={48}
+                  value={cols}
+                  onChange={(e) => setCols(Number(e.target.value))}
+                />
+              </label>
+              <label style={row}>
+                <span style={label}>Period: {period}ms</span>
+                <input
+                  type="range"
+                  min={200}
+                  max={6000}
+                  step={100}
+                  value={period}
+                  onChange={(e) => setPeriod(Number(e.target.value))}
+                />
+              </label>
+              {presetKey === 'gem' && (
+                <label style={row}>
+                  <span style={label}>Noise: {noiseAmt.toFixed(2)}</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1.4}
+                    step={0.05}
+                    value={noiseAmt}
+                    onChange={(e) => setNoiseAmt(Number(e.target.value))}
+                  />
+                </label>
+              )}
+            </div>
           )}
         </div>
       </div>
-    </div>
+    </section>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Custom brightness
+// React snippet + footer
 // ---------------------------------------------------------------------------
 
-const DEFAULT_BRIGHTNESS_CODE = '(cell, t) => 0.5 + 0.5 * Math.sin((cell.u + t) * Math.PI * 2)';
+const SNIPPET = `import { Dithered } from 'dithered/react';
+import { shapes, presets } from 'dithered';
 
-/**
- * Compiles a user-typed brightness expression at runtime. This is a dev-only
- * playground (never shipped), so evaluating arbitrary pasted code via
- * `new Function` is an acceptable, contained way to let people experiment
- * live without a build step.
- */
-function compileBrightness(code: string): { fn?: Brightness; error?: string } {
-  try {
-    // eslint-disable-next-line no-new-func
-    const value = new Function(`"use strict"; return (${code});`)();
-    if (typeof value !== 'function') {
-      throw new Error('Expected an expression that evaluates to a function, e.g. (cell, t) => ...');
-    }
-    return { fn: value as Brightness };
-  } catch (err) {
-    return { error: err instanceof Error ? err.message : String(err) };
-  }
-}
+<Dithered shape={shapes.rozenite} brightness={presets.gem()} fg="#8232ff" />`;
 
-function CustomBrightnessPanel() {
-  const [code, setCode] = useState(DEFAULT_BRIGHTNESS_CODE);
-  const [applied, setApplied] = useState(DEFAULT_BRIGHTNESS_CODE);
-  const [runtimeError, setRuntimeError] = useState<string | null>(null);
-
-  const compiled = useMemo(() => compileBrightness(applied), [applied]);
-
-  const brightness: Brightness | undefined = useMemo(() => {
-    if (!compiled.fn) return undefined;
-    let reported = false;
-    return (cell, t) => {
-      try {
-        return compiled.fn!(cell, t);
-      } catch (err) {
-        if (!reported) {
-          reported = true;
-          setRuntimeError(err instanceof Error ? err.message : String(err));
-        }
-        return 0;
-      }
-    };
-  }, [compiled.fn]);
-
-  const apply = () => {
-    setRuntimeError(null);
-    setApplied(code);
-  };
-
+function GetStarted() {
   return (
-    <div style={panel}>
-      <h2 style={{ marginTop: 0 }}>Custom brightness</h2>
-      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-        <div style={{ flex: 1, minWidth: 260 }}>
-          <textarea
-            style={textareaStyle}
-            value={code}
-            onChange={(e) => setCode(e.target.value)}
-            spellCheck={false}
-          />
-          <button onClick={apply} style={{ marginTop: 8 }}>
-            Apply
-          </button>
-          {compiled.error && <div style={errorStyle}>{compiled.error}</div>}
-          {!compiled.error && runtimeError && <div style={errorStyle}>{runtimeError}</div>}
-        </div>
-        <div
-          style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 128 }}
-        >
-          {brightness && (
-            <Dithered
-              shape={shapes.square}
-              brightness={brightness}
-              size={128}
-              fg={ACCENT_FG}
-              label=""
-            />
-          )}
-        </div>
+    <section
+      style={{
+        ...panel,
+        display: 'flex',
+        gap: 24,
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+      }}
+    >
+      <div style={{ flex: '1 1 320px', minWidth: 280 }}>
+        <h2 style={sectionTitle}>Drop it into React</h2>
+        <pre style={codeBlockStyle}>{SNIPPET}</pre>
       </div>
-    </div>
+      <div style={{ fontSize: 13, color: '#9aa4b8' }}>
+        <a href={REPO_URL} style={{ color: '#e6e8ee' }}>
+          github.com/V3RON/dithered ↗
+        </a>
+      </div>
+    </section>
   );
 }
 
@@ -411,12 +387,20 @@ function CustomBrightnessPanel() {
 
 function App() {
   return (
-    <div style={{ maxWidth: 1100, margin: '0 auto', padding: '24px 16px 64px' }}>
-      <h1>dithered playground</h1>
-      <ControlPanel />
-      <CustomSvgPanel />
-      <CustomBrightnessPanel />
+    <div
+      style={{
+        maxWidth: 1000,
+        margin: '0 auto',
+        padding: '0 20px 40px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 20,
+      }}
+    >
+      <Hero />
       <Gallery />
+      <Customize />
+      <GetStarted />
     </div>
   );
 }

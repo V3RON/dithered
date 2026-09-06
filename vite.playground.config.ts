@@ -4,6 +4,7 @@ import { defineConfig } from 'vite';
 
 export default defineConfig({
   root: 'playground',
+  base: '/dithered/',
   plugins: [react()],
   resolve: {
     alias: [

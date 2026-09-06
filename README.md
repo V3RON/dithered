@@ -1,5 +1,7 @@
 # dithered
 
+[Live demo →](https://v3ron.github.io/dithered/)
+
 `dithered` renders an animated ordered (Bayer) dither pattern masked to an SVG silhouette: it samples a coarse grid of cells inside a shape and, each frame, draws or skips a rounded square per cell by comparing a caller-supplied brightness value against a 4x4 Bayer threshold. The core is framework-agnostic canvas 2D; an optional React wrapper (`dithered/react`) is a separate entry point. The project started as a generalization of the Rozenite loading spinner into a standalone animated-shape primitive.
 
 ## Install

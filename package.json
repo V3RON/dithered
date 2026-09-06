@@ -15,6 +15,7 @@
     "type": "git",
     "url": "https://github.com/V3RON/dithered"
   },
+  "homepage": "https://v3ron.github.io/dithered/",
   "author": "",
   "type": "module",
   "license": "MIT",
