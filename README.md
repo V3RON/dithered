@@ -72,3 +72,26 @@ const shape = shapeFromSvg(`
   </svg>
 `);
 ```
+
+## React
+
+`dithered/react` is a separate entry point (`react`/`react-dom` are optional peer dependencies, not required by core `dithered`):
+
+```tsx
+import { Dithered } from 'dithered/react';
+import { shapes, presets } from 'dithered';
+
+function LoadingIndicator() {
+  return <Dithered shape={shapes.rozenite} brightness={presets.gem()} fg="#8232ff" size={48} />;
+}
+```
+
+One `createDithered` instance is created on mount and destroyed on unmount; every other prop change reconfigures that same instance instead of recreating it. `brightness` (and `shape`) participate in that reconfigure **by identity** — pass a stable reference, either a module-level preset call like `presets.gem()` above, or your own function hoisted outside the component or wrapped in `useMemo`/`useCallback`. An inline arrow function passed as `brightness` will trigger a reconfigure on every render.
+
+For a determinate progress indicator, pass `progress` (`0`–`1`) instead of letting it loop — this pauses the instance and renders the matching frame directly:
+
+```tsx
+<Dithered shape={shapes.square} brightness={presets.fill()} progress={downloadedFraction} />
+```
+
+`ref` forwards to the underlying `<canvas>` element.

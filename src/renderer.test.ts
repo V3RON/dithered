@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDithered, frameAt, paintFrame, type DitheredOptions } from './renderer';
-import type { Cell, Shape } from './shape';
+import type { Cell } from './shape';
+import { SQUARE_SHAPE, makeFakeCanvas, stubAnimationGlobals } from './test-utils';
 
 describe('frameAt', () => {
   it('quantizes time into [0, frames)', () => {
@@ -114,78 +115,15 @@ describe('paintFrame', () => {
 // createDithered
 // ---------------------------------------------------------------------------
 
-const SQUARE_SHAPE: Shape = {
-  path: 'M0 0 H10 V10 H0 Z',
-  viewBox: { x: 0, y: 0, width: 10, height: 10 },
-};
-
-function make2dCtx() {
-  return {
-    fillStyle: '',
-    fillRect: vi.fn(),
-    beginPath: vi.fn(),
-    rect: vi.fn(),
-    fill: vi.fn(),
-    clearRect: vi.fn(),
-    drawImage: vi.fn(),
-    setTransform: vi.fn(),
-    isPointInPath: vi.fn(() => true),
-  };
-}
-
-function makeFakeCanvas() {
-  const ctx = make2dCtx();
-  const canvas = {
-    width: 0,
-    height: 0,
-    style: {} as Record<string, string>,
-    getContext: vi.fn(() => ctx),
-  };
-  return { canvas: canvas as unknown as HTMLCanvasElement, ctx };
-}
-
 describe('createDithered', () => {
-  let rafCallbacks: FrameRequestCallback[] = [];
-  let rafId = 0;
-  let ioInstances: {
-    callback: IntersectionObserverCallback;
-    observe: ReturnType<typeof vi.fn>;
-    disconnect: ReturnType<typeof vi.fn>;
-  }[] = [];
+  let env: ReturnType<typeof stubAnimationGlobals>;
 
   beforeEach(() => {
-    rafCallbacks = [];
-    rafId = 0;
-    ioInstances = [];
-
-    vi.stubGlobal(
-      'requestAnimationFrame',
-      vi.fn((cb: FrameRequestCallback) => {
-        rafCallbacks.push(cb);
-        return ++rafId;
-      }),
-    );
-    vi.stubGlobal('cancelAnimationFrame', vi.fn());
-    vi.stubGlobal(
-      'matchMedia',
-      vi.fn(() => ({ matches: false })),
-    );
-    vi.stubGlobal(
-      'IntersectionObserver',
-      vi.fn(function (this: unknown, callback: IntersectionObserverCallback) {
-        const instance = {
-          callback,
-          observe: vi.fn(),
-          disconnect: vi.fn(),
-        };
-        ioInstances.push(instance);
-        return instance;
-      }),
-    );
+    env = stubAnimationGlobals();
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
+    env.restore();
   });
 
   function baseOptions(overrides: Partial<DitheredOptions> = {}): DitheredOptions {
@@ -210,13 +148,13 @@ describe('createDithered', () => {
   it('schedules an animation frame when not paused', () => {
     const { canvas } = makeFakeCanvas();
     createDithered(canvas, baseOptions());
-    expect(rafCallbacks.length).toBe(1);
+    expect(env.rafCallbacks.length).toBe(1);
   });
 
   it('does not schedule when created paused', () => {
     const { canvas } = makeFakeCanvas();
     createDithered(canvas, baseOptions({ paused: true }));
-    expect(rafCallbacks.length).toBe(0);
+    expect(env.rafCallbacks.length).toBe(0);
   });
 
   it('does not schedule under prefers-reduced-motion', () => {
@@ -226,13 +164,13 @@ describe('createDithered', () => {
     );
     const { canvas } = makeFakeCanvas();
     createDithered(canvas, baseOptions());
-    expect(rafCallbacks.length).toBe(0);
+    expect(env.rafCallbacks.length).toBe(0);
   });
 
   it('setPaused(true) cancels the scheduled frame', () => {
     const { canvas } = makeFakeCanvas();
     const instance = createDithered(canvas, baseOptions());
-    expect(rafCallbacks.length).toBe(1);
+    expect(env.rafCallbacks.length).toBe(1);
     instance.setPaused(true);
     expect(cancelAnimationFrame).toHaveBeenCalled();
   });
@@ -240,18 +178,18 @@ describe('createDithered', () => {
   it('setPaused(false) resumes scheduling', () => {
     const { canvas } = makeFakeCanvas();
     const instance = createDithered(canvas, baseOptions({ paused: true }));
-    expect(rafCallbacks.length).toBe(0);
+    expect(env.rafCallbacks.length).toBe(0);
     instance.setPaused(false);
-    expect(rafCallbacks.length).toBe(1);
+    expect(env.rafCallbacks.length).toBe(1);
   });
 
   it('destroy cancels the loop and disconnects the intersection observer', () => {
     const { canvas } = makeFakeCanvas();
     const instance = createDithered(canvas, baseOptions());
-    expect(ioInstances).toHaveLength(1);
+    expect(env.ioInstances).toHaveLength(1);
     instance.destroy();
     expect(cancelAnimationFrame).toHaveBeenCalled();
-    expect(ioInstances[0].disconnect).toHaveBeenCalled();
+    expect(env.ioInstances[0].disconnect).toHaveBeenCalled();
   });
 
   it('destroy removes the visibilitychange listener', () => {
