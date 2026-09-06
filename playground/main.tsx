@@ -216,14 +216,17 @@ function Customize() {
   const [cols, setCols] = useState(16);
   const [period, setPeriod] = useState(2000);
   const [noiseAmt, setNoiseAmt] = useState(0.8);
+  const [golSeed, setGolSeed] = useState(1);
 
   const shape = customShape ?? shapes[shapeKey as keyof typeof shapes];
 
   const brightness = useMemo(() => {
     const factory = presets[presetKey as keyof typeof presets];
-    return presetKey === 'gem' ? factory({ noise: noiseAmt }) : factory();
+    if (presetKey === 'gem') return factory({ noise: noiseAmt });
+    if (presetKey === 'gameOfLife') return factory({ seed: golSeed });
+    return factory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [presetKey, noiseAmt]);
+  }, [presetKey, noiseAmt, golSeed]);
 
   const applySvg = () => {
     try {
@@ -347,6 +350,25 @@ function Customize() {
                     value={noiseAmt}
                     onChange={(e) => setNoiseAmt(Number(e.target.value))}
                   />
+                </label>
+              )}
+              {presetKey === 'gameOfLife' && (
+                <label style={row}>
+                  <span style={label}>Seed</span>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <input
+                      type="number"
+                      value={golSeed}
+                      onChange={(e) => setGolSeed(Number(e.target.value))}
+                      style={{ width: 90 }}
+                    />
+                    <button
+                      onClick={() => setGolSeed(Math.floor(Math.random() * 100000))}
+                      style={ghostButtonStyle}
+                    >
+                      Random
+                    </button>
+                  </div>
                 </label>
               )}
             </div>

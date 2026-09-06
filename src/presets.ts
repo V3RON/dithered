@@ -119,4 +119,81 @@ export function fill(opts: { direction?: 'up' | 'down' | 'left' | 'right' } = {}
   };
 }
 
-export const presets = { gem, sweep, pulse, rain, wave, fill };
+/**
+ * Conway's Game of Life, simulated once up front on a wrapping (toroidal)
+ * board and played back frame by frame. `seed` picks the starting pattern
+ * (same seed always produces the same life and death); `density` (default
+ * 0.35) is the initial fraction of live cells.
+ *
+ * Left fully to chance, some seeds die out completely partway through the
+ * loop and stay dark for the rest of it. To keep that from happening, two
+ * guardrails are baked into the simulation: the board wraps at its edges
+ * (so gliders re-enter instead of vanishing off the side), and if a
+ * generation's population ever crashes below a small floor, a sprinkle of
+ * fresh cells is seeded back in — deterministically, from the same seed —
+ * so the pattern keeps evolving instead of flatlining.
+ */
+export function gameOfLife(
+  opts: { seed?: number; density?: number; frames?: number; boardSize?: number } = {},
+): Brightness {
+  const seed = opts.seed ?? 1;
+  const density = Math.min(1, Math.max(0, opts.density ?? 0.35));
+  const frames = Math.max(1, Math.round(opts.frames ?? 48));
+  const size = Math.max(4, Math.round(opts.boardSize ?? 48));
+  const minAlive = Math.max(4, Math.round(size * size * 0.05));
+
+  const seeded = (i: number, j: number, salt: number): boolean =>
+    hash(i + seed * 1013.9 + salt * 91.7, j + seed * 7919.3 - salt * 57.3) < density;
+
+  let board = new Uint8Array(size * size);
+  for (let j = 0; j < size; j++) {
+    for (let i = 0; i < size; i++) {
+      board[j * size + i] = seeded(i, j, 0) ? 1 : 0;
+    }
+  }
+
+  const generations: Uint8Array[] = [board];
+  for (let g = 1; g < frames; g++) {
+    const prev = generations[g - 1];
+    const next = new Uint8Array(size * size);
+    let alive = 0;
+    for (let j = 0; j < size; j++) {
+      for (let i = 0; i < size; i++) {
+        let neighbors = 0;
+        for (let dj = -1; dj <= 1; dj++) {
+          for (let di = -1; di <= 1; di++) {
+            if (di === 0 && dj === 0) continue;
+            const ni = (i + di + size) % size;
+            const nj = (j + dj + size) % size;
+            neighbors += prev[nj * size + ni];
+          }
+        }
+        const wasAlive = prev[j * size + i] === 1;
+        const willLive = wasAlive ? neighbors === 2 || neighbors === 3 : neighbors === 3;
+        if (willLive) alive++;
+        next[j * size + i] = willLive ? 1 : 0;
+      }
+    }
+    // Guardrail: the population crashed, so seed a few fresh cells back in
+    // (deterministically, from the same seed) instead of letting it flatline.
+    if (alive < minAlive) {
+      for (let j = 0; j < size; j++) {
+        for (let i = 0; i < size; i++) {
+          if (next[j * size + i] === 0 && seeded(i, j, g)) {
+            next[j * size + i] = 1;
+          }
+        }
+      }
+    }
+    generations.push(next);
+  }
+
+  return (cell, t) => {
+    const g = ((Math.round(t * frames) % frames) + frames) % frames;
+    const i = ((cell.i % size) + size) % size;
+    const j = ((cell.j % size) + size) % size;
+    return generations[g][j * size + i] === 1;
+  };
+}
+
+export const presets = { gem, sweep, pulse, rain, wave, fill, gameOfLife };
