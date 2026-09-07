@@ -24,7 +24,9 @@ export interface DitheredProps extends Omit<
   /**
    * Pre-sampled cells, skipping the shape hit-test on mount. Must match
    * `cols`, `rows` and `matrix` — see `sampleCells`. When set, `matrix`
-   * is ignored: the thresholds are already baked into those cells.
+   * is ignored: the thresholds are already baked into those cells. A
+   * `matrix` change still re-records every frame in this case (for
+   * byte-identical output) — see `useDitheredPictures`'s `cells` doc.
    */
   cells?: readonly Cell[];
   /** Accessible label. Set to '' to hide from assistive tech entirely. Default 'Loading'. */

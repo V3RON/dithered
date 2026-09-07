@@ -20,6 +20,10 @@ export interface DitheredPicturesOptions extends DitheredOptions {
    * `rows` and `matrix` — see `sampleCells`. When `cells` is supplied,
    * `matrix` is ignored: the thresholds are already baked into those
    * cells, the same way `cols`/`rows` already behave alongside `cells`.
+   * `matrix` still stays in this hook's `useMemo` deps regardless, so
+   * changing it while `cells` is supplied still triggers a re-record —
+   * for byte-identical output — the same trade-off `cols`/`rows` already
+   * make alongside `cells`.
    */
   cells?: readonly Cell[];
 }

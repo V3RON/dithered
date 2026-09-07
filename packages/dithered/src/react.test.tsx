@@ -114,6 +114,19 @@ describe('Dithered', () => {
     expect(updateSpy).toHaveBeenCalled();
   });
 
+  // Regression: `matrix` must reach `createDithered` on mount, not only
+  // `update()` on a later re-render — a component whose props never
+  // change again would otherwise render `bayer4` forever regardless of
+  // what `matrix` prop it was given.
+  it('mounts with the matrix prop passed to createDithered', () => {
+    render(<Dithered shape={SQUARE_SHAPE} matrix="bayer8" />);
+
+    expect(mockedCreateDithered).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ matrix: 'bayer8' }),
+    );
+  });
+
   // Regression for the missing-dependency failure mode: `update({ matrix })`
   // must actually be called when `matrix` changes, not silently skipped
   // because the update effect's dependency array forgot it.

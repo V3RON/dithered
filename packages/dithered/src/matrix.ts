@@ -218,8 +218,14 @@ function validateResolvedMatrixShape(input: ResolvedMatrix): BrandedResolvedMatr
       );
     }
     for (let i = 0; i < width; i++) {
-      if (!isFiniteNumber(row[i])) {
+      const v = row[i];
+      if (!isFiniteNumber(v)) {
         throw new Error(`dithered: resolved matrix thresholds[${j}][${i}] is not a finite number.`);
+      }
+      if (v < 0 || v > 1) {
+        throw new Error(
+          `dithered: resolved matrix thresholds[${j}][${i}] is ${v}, outside the range 0..1.`,
+        );
       }
     }
   }

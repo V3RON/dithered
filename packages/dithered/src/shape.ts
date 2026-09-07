@@ -28,9 +28,12 @@ export interface Cell {
   /**
    * Ordered-dither threshold for this cell (see `matrix` in
    * `DitheredOptions`). In `(0, 1)` for every built-in matrix and for a
-   * custom matrix in rank mode; a custom matrix in float mode may produce
-   * exactly `0` (always drawn) or `1` (never drawn) — see `ResolvedMatrix`
-   * in `matrix.ts`.
+   * custom matrix in rank mode; a custom matrix in float mode may also
+   * produce exactly `0` or `1` — see `ResolvedMatrix` in `matrix.ts`. Cells
+   * are drawn on `brightness > threshold` (strict), so a threshold of `0`
+   * still skips a cell whose brightness is exactly `0`, and a threshold of
+   * `1` only guarantees "never drawn" for brightness that stays within
+   * `[0, 1]`, which the `Brightness` type does not itself enforce.
    */
   threshold: number;
 }

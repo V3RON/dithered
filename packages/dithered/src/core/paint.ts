@@ -94,9 +94,11 @@ function drawCell(
 
 /**
  * Paints one frame's worth of cells: an optional background fill, then a
- * rounded square (or plain rect) per cell whose brightness clears its
- * Bayer threshold — or, for a multi-tone `fg`, whose quantized
- * {@link toneLevel} is non-zero, in the color of that level's tone.
+ * rounded square (or plain rect, if `roundRect` is unsupported) per cell
+ * whose brightness clears its dither threshold (Bayer, blue noise, or a
+ * custom matrix — see `matrix` in `DitheredOptions`) — or, for a
+ * multi-tone `fg`, whose quantized {@link toneLevel} is non-zero, in the
+ * color of that level's tone.
  *
  * `brightness` is called exactly once per cell per frame regardless of
  * palette size — `gameOfLife` is stateful, and re-invoking it per tone

@@ -683,6 +683,83 @@ describe('createDithered', () => {
     expect(env.ioInstances).toHaveLength(0);
     addSpy.mockRestore();
   });
+
+  // Regression: a rejected `update()` used to merge the invalid patch into
+  // `opts` before validating it, so the throw left the instance poisoned —
+  // `cols`/`matrix` committed despite the error, the animation halted with
+  // no `schedule()` to restart it, and even a subsequent *valid* `update()`
+  // would re-throw against the same bad `opts.matrix` forever.
+  describe('a rejected update()', () => {
+    function raggedMatrix() {
+      return [
+        [0, 1, 2],
+        [1, 2],
+      ];
+    }
+
+    it('propagates the error', () => {
+      const { canvas } = makeFakeCanvas();
+      const instance = createDithered(canvas, baseOptions());
+      expect(() => instance.update({ matrix: raggedMatrix() })).toThrow(/ragged/);
+    });
+
+    it('leaves opts unchanged: a rejected cols change alongside it never took effect', () => {
+      const { canvas, ctx } = makeFakeCanvas();
+      const instance = createDithered(canvas, baseOptions({ cols: 4 }));
+
+      // Cell width is derived from `opts.cols` fresh on every paint (see
+      // `computeGeometry`), so it exposes a poisoned `opts.cols` even
+      // though the sampled `cells` array itself was never reassigned
+      // (the assignment that would do so never runs, since it sits after
+      // the throwing `sampleCells` call either way).
+      ctx.rect.mockClear();
+      instance.renderFrame(0);
+      const [, , widthBefore] = ctx.rect.mock.calls[0] as number[];
+
+      expect(() => instance.update({ cols: 8, matrix: raggedMatrix() })).toThrow(/ragged/);
+
+      ctx.rect.mockClear();
+      instance.renderFrame(0);
+      const [, , widthAfter] = ctx.rect.mock.calls[0] as number[];
+
+      expect(widthAfter).toBe(widthBefore);
+    });
+
+    it('leaves the canvas surface untouched', () => {
+      const { canvas } = makeFakeCanvas();
+      const instance = createDithered(canvas, baseOptions({ size: 40 }));
+      const widthBefore = canvas.width;
+      const heightBefore = canvas.height;
+
+      expect(() => instance.update({ size: 80, matrix: raggedMatrix() })).toThrow(/ragged/);
+
+      expect(canvas.width).toBe(widthBefore);
+      expect(canvas.height).toBe(heightBefore);
+    });
+
+    it('leaves the animation scheduled, since it was already running', () => {
+      const { canvas } = makeFakeCanvas();
+      const instance = createDithered(canvas, baseOptions());
+      expect(env.rafCallbacks.length).toBe(1);
+
+      expect(() => instance.update({ matrix: raggedMatrix() })).toThrow(/ragged/);
+
+      // halt()/schedule() were never reached: no new cancel, no new frame.
+      expect(cancelAnimationFrame).not.toHaveBeenCalled();
+      expect(env.rafCallbacks.length).toBe(1);
+    });
+
+    it('does not poison a later, valid update()', () => {
+      const { canvas, ctx } = makeFakeCanvas();
+      const instance = createDithered(canvas, baseOptions());
+
+      expect(() => instance.update({ matrix: raggedMatrix() })).toThrow(/ragged/);
+
+      ctx.fill.mockClear();
+      expect(() => instance.update({ period: 3000 })).not.toThrow();
+      expect(ctx.fill).toHaveBeenCalled();
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

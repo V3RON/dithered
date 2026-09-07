@@ -336,6 +336,33 @@ describe('resolveMatrix / thresholdFor — hand-built ResolvedMatrix', () => {
       /resolved matrix declares height 2 but thresholds has 1 rows/,
     );
   });
+
+  // The raw-array path (`validateAndResolve`) has always enforced `0..1`
+  // on float-mode thresholds; the hand-built `ResolvedMatrix` path used to
+  // skip that check entirely, silently accepting out-of-range thresholds
+  // that `ResolvedMatrix`'s own jsdoc promises can't happen.
+  it('rejects a threshold above 1, naming the offending coordinate', () => {
+    const outOfRange = { width: 1, height: 1, thresholds: [[5]] };
+    expect(() => resolveMatrix(outOfRange)).toThrow(
+      /resolved matrix thresholds\[0\]\[0\] is 5, outside the range 0\.\.1/,
+    );
+  });
+
+  it('rejects a threshold below 0, naming the offending coordinate', () => {
+    const outOfRange = { width: 1, height: 1, thresholds: [[-3]] };
+    expect(() => resolveMatrix(outOfRange)).toThrow(
+      /resolved matrix thresholds\[0\]\[0\] is -3, outside the range 0\.\.1/,
+    );
+  });
+
+  // The realistic mis-use the ADR calls out: handing `BAYER_4`'s raw ranks
+  // straight through as a `ResolvedMatrix`'s thresholds is a plausible
+  // typo, and it typechecks. It must throw rather than paint (almost)
+  // nothing with no error anywhere.
+  it('rejects BAYER_4 passed as thresholds directly, instead of resolving it', () => {
+    const misuse = { width: 4, height: 4, thresholds: BAYER_4 };
+    expect(() => resolveMatrix(misuse)).toThrow(/outside the range 0\.\.1/);
+  });
 });
 
 describe('BLUE_NOISE_16', () => {

@@ -164,19 +164,26 @@ export function createDithered(
 
     const dpr = Math.min((typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1, 3);
     const css = surfaceSize(opts);
-    canvas.style.width = css.width + 'px';
-    canvas.style.height = css.height + 'px';
     const device = surfaceSize(opts, dpr);
-    W = canvas.width = Math.round(device.width);
-    H = canvas.height = Math.round(device.height);
+    const newW = Math.round(device.width);
+    const newH = Math.round(device.height);
 
-    cells = sampleCells(
+    // Sample first, before touching the canvas or any module state: an
+    // invalid `matrix` (or any other bad option) throws here, and
+    // `update()` relies on nothing having changed yet when that happens.
+    const newCells = sampleCells(
       opts.shape,
       opts.cols,
       domHitTester(opts.shape, ctx),
       resolveRows(opts),
       opts.matrix,
     );
+
+    canvas.style.width = css.width + 'px';
+    canvas.style.height = css.height + 'px';
+    W = canvas.width = newW;
+    H = canvas.height = newH;
+    cells = newCells;
 
     buildCache();
 
@@ -256,11 +263,30 @@ export function createDithered(
       // caller-supplied `fg` array is cloned first — same reasoning as
       // `resolveOptions`, see `clonePaletteOption` — so this instance
       // never aliases the caller's array.
-      opts = assignDefined<ResolvedOptions>(opts, { ...patch, fg: clonePaletteOption(patch.fg) });
+      const candidate = assignDefined<ResolvedOptions>(opts, {
+        ...patch,
+        fg: clonePaletteOption(patch.fg),
+      });
+
+      // Try the candidate before committing to anything: an invalid
+      // `matrix` (or any other bad option) must leave this instance
+      // exactly as it was — same `opts`, same rendered frame, same
+      // animation state — rather than getting bricked mid-merge. `opts`
+      // is swapped in only for the duration of `configure()` (which reads
+      // it via closure) and reverted if that throws, before the error
+      // propagates.
+      const previous = opts;
+      opts = candidate;
+      try {
+        configure();
+      } catch (err) {
+        opts = previous;
+        throw err;
+      }
+
       reduced = prefersReducedMotion(opts);
       isPaused = opts.paused;
       halt();
-      configure();
       blit(currentFrame >= 0 ? currentFrame % opts.frames : opts.initialFrame);
       schedule();
     },
