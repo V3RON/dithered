@@ -263,19 +263,52 @@ function parseCustomShape(svg: string): { shape: Shape | null; error: string | n
   }
 }
 
-// Darkest -> brightest; the middle tone is the same accent used everywhere
-// else, so dropping to 1 tone and back to 3 round-trips to a familiar look.
-// Also doubles as the README's own multi-tone example.
-const DEFAULT_PALETTE = ['#2a1a4a', ACCENT, '#d9c2ff'];
+// Darkest -> brightest, one default per tone count rather than a single
+// 3-tone array indexed by position: the accent is always present, and every
+// entry is distinct from the others *at that tone count*. Indexing a single
+// default array by position would make `DEFAULT_PALETTE[1] === ACCENT`
+// collide with the 1-tone default (also just `[ACCENT]`), producing a
+// duplicate the moment the user grew from the untouched default — see ADR
+// 0005 review round 2, finding 1.
+const DEFAULT_PALETTES: Readonly<Record<1 | 2 | 3, readonly string[]>> = {
+  1: [ACCENT],
+  2: ['#2a1a4a', ACCENT],
+  3: ['#2a1a4a', ACCENT, '#d9c2ff'],
+};
+
+/** Whether `palette` is exactly the untouched default for its own length. */
+function isDefaultPalette(palette: readonly string[]): boolean {
+  const def = DEFAULT_PALETTES[palette.length as 1 | 2 | 3] as readonly string[] | undefined;
+  return def !== undefined && palette.every((color, i) => color === def[i]);
+}
 
 /**
- * Grows or shrinks `palette` to exactly `count` tones: shrinking truncates
- * (keeping the darker tones, since they sort darkest-first), and growing
- * fills new slots from `DEFAULT_PALETTE` by position rather than repeating
- * the last color, so a fresh tone is never a no-op duplicate.
+ * Grows or shrinks `palette` to exactly `count` tones (1-3).
+ *
+ * - If `palette` is still the untouched default for its current length, the
+ *   whole palette switches wholesale to the default for `count` — growing
+ *   *and* shrinking. This is what makes the default 1 -> 2 -> 3 -> 2 -> 1
+ *   path show a genuinely new tone at every step and land back on the plain
+ *   accent at 1, instead of e.g. truncating 2 tones down to `['#2a1a4a']`
+ *   (losing the accent) or filling new slots positionally from a palette
+ *   anchored at a different length (the duplicate in finding 1).
+ * - Otherwise the user has edited at least one swatch, so their colors are
+ *   preserved: shrinking truncates (keeping the darker tones, since the
+ *   palette is darkest-first), and growing fills only the new slots, each
+ *   from the 3-tone default pool, skipping any candidate already present in
+ *   the palette so growing never introduces a duplicate tone.
  */
 function resizePalette(palette: string[], count: number): string[] {
-  return Array.from({ length: count }, (_, i) => palette[i] ?? DEFAULT_PALETTE[i] ?? ACCENT);
+  if (isDefaultPalette(palette)) return [...DEFAULT_PALETTES[count as 1 | 2 | 3]];
+
+  if (count <= palette.length) return palette.slice(0, count);
+
+  const next = palette.slice();
+  const pool = DEFAULT_PALETTES[3];
+  for (let i = palette.length; i < count; i++) {
+    next.push(pool.find((color) => !next.includes(color)) ?? ACCENT);
+  }
+  return next;
 }
 
 export interface PlaygroundState {
@@ -741,7 +774,7 @@ const DEFAULTS = {
   presetKey: 'gem',
   blendKey: 'none',
   mix: 0.5,
-  palette: [ACCENT],
+  palette: [...DEFAULT_PALETTES[1]],
   cols: 16,
   period: 2000,
   noiseAmt: 0.8,

@@ -3,6 +3,7 @@ import { createRef } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Dithered } from './react';
 import type { DitheredInstance } from './renderer';
+import type { Palette } from './core';
 import { SQUARE_SHAPE, make2dCtx, stubAnimationGlobals, stubGetContext } from './test-utils';
 
 vi.mock('./renderer', async () => {
@@ -298,5 +299,20 @@ describe('Dithered', () => {
 
     expect(ref.current).toBeInstanceOf(HTMLCanvasElement);
     expect(instanceRef.current).not.toBeInstanceOf(HTMLCanvasElement);
+  });
+
+  // Round-2 review finding 3: `DitheredProps['fg']` (via `DitheredOptions`)
+  // must accept the `Palette` type the library itself hands back to
+  // callers -- `readonly string[]` -- not just a mutable `string[]`
+  // literal. This fails to typecheck (`pnpm typecheck`) if `fg` regresses
+  // to `string | string[]`.
+  it('accepts a readonly Palette value for fg (type-level)', () => {
+    const palette: Palette = ['#a00', '#0a0'];
+    render(<Dithered shape={SQUARE_SHAPE} brightness={alwaysDraw} fg={palette} label="" />);
+
+    expect(mockedCreateDithered).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ fg: palette }),
+    );
   });
 });

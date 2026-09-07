@@ -1,6 +1,7 @@
 import { renderHook } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { Cell } from '../shape';
+import type { Palette } from '../core';
 
 interface FakeRect {
   x: number;
@@ -108,6 +109,20 @@ describe('useDitheredPictures: currentColor is native-only unsupported', () => {
           brightness: () => true,
           fg: ['#111', '#222', '#333'],
         }),
+      ),
+    ).not.toThrow();
+  });
+
+  // Round-2 review finding 3: `DitheredPicturesOptions['fg']` (via
+  // `DitheredOptions`) must accept the `Palette` type the library itself
+  // hands back to callers -- `readonly string[]` -- not just a mutable
+  // `string[]` literal. This fails to typecheck (`pnpm typecheck`) if `fg`
+  // regresses to `string | string[]`.
+  it('accepts a readonly Palette value for fg (type-level)', () => {
+    const palette: Palette = ['#111', '#222', '#333'];
+    expect(() =>
+      renderHook(() =>
+        useDitheredPictures({ shape: SQUARE_SHAPE, brightness: () => true, fg: palette }),
       ),
     ).not.toThrow();
   });

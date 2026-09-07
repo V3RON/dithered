@@ -29,8 +29,15 @@ export interface DitheredOptions {
    * `'currentColor'`, anywhere in a palette, resolves to the canvas's
    * computed text color; web only (`dithered/react` and `createDithered`),
    * rejected on `dithered/native`. Default '#000'.
+   *
+   * `readonly string[]` (not just `string[]`) so the exported `Palette`
+   * type — itself `readonly string[]` — can be passed straight back in,
+   * e.g. `fg={somePalette}` or `fg={['#a00', '#0a0'] as const}`. Safe
+   * because every entry point copies the array before storing it
+   * (`clonePaletteOption`/`toPalette`), so nothing here ever mutates the
+   * caller's array regardless of its mutability.
    */
-  fg?: string | string[];
+  fg?: string | readonly string[];
   /** Background fill, or 'transparent'. Default 'transparent'. */
   bg?: string;
   /**
@@ -54,9 +61,9 @@ export interface DitheredOptions {
 export type ResolvedOptions = Required<DitheredOptions>;
 
 // `fg` is narrowed back to `string` here (`ResolvedOptions.fg` is `string |
-// string[]`, to allow a palette) since the default is always a single
-// color — `toPalette`/`resolvePalette` in `./palette` lean on `DEFAULTS.fg`
-// being a plain `string` fallback, not a union.
+// readonly string[]`, to allow a palette) since the default is always a
+// single color — `toPalette`/`resolvePalette` in `./palette` lean on
+// `DEFAULTS.fg` being a plain `string` fallback, not a union.
 export const DEFAULTS: Omit<ResolvedOptions, 'shape' | 'brightness'> & { fg: string } = {
   size: 48,
   cols: 16,
@@ -110,9 +117,15 @@ export function assignDefined<T extends object>(base: T, patch: Partial<T>): T {
  * aliasing one is harmless.
  */
 export function clonePaletteOption(
-  fg: string | string[] | undefined,
+  fg: string | readonly string[] | undefined,
 ): string | string[] | undefined {
-  return Array.isArray(fg) ? [...fg] : fg;
+  // `typeof`/`undefined` checks rather than `Array.isArray`: narrowing a
+  // `readonly string[]` union member through an `Array.isArray` guard
+  // doesn't eliminate it from the non-array branch (a `readonly` array
+  // isn't assignable to the mutable `any[]` the guard narrows against), so
+  // the else branch would keep the widened, un-copied type. This narrows
+  // cleanly either way.
+  return typeof fg === 'string' || fg === undefined ? fg : [...fg];
 }
 
 export function resolveOptions(options: DitheredOptions): ResolvedOptions {

@@ -590,6 +590,33 @@ describe('createDithered', () => {
 
     stub.restore();
   });
+
+  // Round-2 finding 2: the previous two tests only ever hand the array to
+  // `createDithered` (i.e. `resolveOptions`'s copy), so they can't catch a
+  // regression in the *other* call site that must also copy -- the
+  // `update()` patch merge. This one routes the array through `update({
+  // fg: palette })` instead, so a later mutation of the caller's array must
+  // still not be observed. Confirmed to fail (paints `#ff00ff`) if
+  // `update()`'s merge is changed to `assignDefined<ResolvedOptions>(opts,
+  // patch)`, i.e. dropped the `clonePaletteOption(patch.fg)` call.
+  it('does not observe a later mutation of an fg array passed via update()', () => {
+    const palette = ['#a00', '#0a0'];
+    const rec = makeColorRecordingCtx();
+    const stub = stubGetContext(rec.ctx);
+    const canvas = document.createElement('canvas');
+
+    const instance = createDithered(canvas, baseOptions({ fg: '#000', cache: false }));
+    instance.update({ fg: palette });
+    rec.cellColors.length = 0; // discard the paint triggered by update()
+
+    palette[1] = '#ff00ff'; // mutate the array after handing it to update()
+    instance.renderFrame(1); // any repaint, with no further update() call
+
+    expect(rec.cellColors).not.toContain('#ff00ff');
+    expect(rec.cellColors).toContain('#0a0');
+
+    stub.restore();
+  });
 });
 
 // ---------------------------------------------------------------------------

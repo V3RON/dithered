@@ -32,7 +32,7 @@ export interface DitheredPictures {
 }
 
 /** A palette joined by value, for identity-insensitive memo dependencies. */
-function paletteKey(fg: string | string[] | undefined): string | undefined {
+function paletteKey(fg: string | readonly string[] | undefined): string | undefined {
   return fg === undefined ? undefined : typeof fg === 'string' ? fg : fg.join(' ');
 }
 

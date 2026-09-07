@@ -71,7 +71,7 @@ function setRef<T>(ref: Ref<T> | undefined, value: T): void {
 }
 
 /** A stable join of a palette's *value*, for identity-insensitive comparison. */
-function paletteKey(fg: string | string[] | undefined): string | undefined {
+function paletteKey(fg: string | readonly string[] | undefined): string | undefined {
   return fg === undefined ? undefined : typeof fg === 'string' ? fg : fg.join(' ');
 }
 
@@ -86,7 +86,9 @@ function paletteKey(fg: string | string[] | undefined): string | undefined {
  * and the reconfigure effect below would rebuild the sprite cache and
  * re-record every frame on every render, palette or not.
  */
-function useStablePalette(fg: string | string[] | undefined): string | string[] | undefined {
+function useStablePalette(
+  fg: string | readonly string[] | undefined,
+): string | readonly string[] | undefined {
   const key = paletteKey(fg);
   const ref = useRef(fg);
   const keyRef = useRef(key);

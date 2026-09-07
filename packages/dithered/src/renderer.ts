@@ -124,12 +124,8 @@ export function createDithered(
    */
   function applyResolvedFg(): boolean {
     const palette = toPalette(opts.fg);
-    // Spread into a fresh mutable array: `ResolvedOptions.fg` (like the
-    // public `DitheredOptions.fg` it's `Required<>` of) is `string |
-    // string[]`, not `string | Palette` — `resolvePalette` returns the
-    // latter (readonly), which a plain `string[]`-typed field can't hold.
-    const next: string | string[] = hasCurrentColor(palette)
-      ? [...resolvePalette(palette, computedColor())]
+    const next: string | Palette = hasCurrentColor(palette)
+      ? resolvePalette(palette, computedColor())
       : opts.fg;
     const changed = !palettesEqual(next, paintOpts.fg);
     paintOpts = next === opts.fg ? opts : { ...opts, fg: next };

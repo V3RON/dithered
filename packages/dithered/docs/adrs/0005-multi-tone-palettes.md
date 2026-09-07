@@ -40,8 +40,17 @@ deliberately does not depend on issue #8 (shared threshold assignment); it reads
 
 ```ts
 /** A single color (unchanged), or an ordered palette from darkest to brightest. */
-fg?: string | string[];
+fg?: string | readonly string[];
 ```
+
+<!--
+  Round-2 review correction (finding 3): the exported `Palette` type is
+  `readonly string[]`, so a mutable `string | string[]` here would reject a
+  caller passing back a `Palette` value (or an `as const` array) they got
+  from the library itself. Widened to `string | readonly string[]`; safe
+  because normalization always copies (see below). This is the one
+  correction the review authorized to this ADR, to match the shipped API.
+-->
 
 A palette is normalized once, at the edge, into a `readonly string[]` of length
 `n >= 1`:
@@ -253,7 +262,7 @@ This surfaces from `useDitheredPictures` (and therefore `<Dithered>` from
 
 | File                                                                   | Change                                                                                                                                                                                                                   |
 | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `src/core/options.ts`                                                  | `fg?: string \| string[]`; doc comment for palettes and `currentColor`. `DEFAULTS.fg` stays `'#000'`.                                                                                                                    |
+| `src/core/options.ts`                                                  | `fg?: string \| readonly string[]`; doc comment for palettes and `currentColor`. `DEFAULTS.fg` stays `'#000'`.                                                                                                           |
 | `src/core/paint.ts`                                                    | `PaintGeometry.fg: string \| readonly string[]`; `paintFrame` normalizes, buckets by level for `n > 1`, keeps today's inline loop for `n === 1`.                                                                         |
 | `src/core/index.ts`                                                    | Export the palette helpers and their types.                                                                                                                                                                              |
 | `src/renderer.ts`                                                      | Resolve `currentColor` against `getComputedStyle(canvas).color` in `configure()`; add `refreshColors()` to `DitheredInstance`; keep the unresolved palette in `opts`.                                                    |

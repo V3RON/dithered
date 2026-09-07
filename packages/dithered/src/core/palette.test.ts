@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { CURRENT_COLOR, hasCurrentColor, resolvePalette, toPalette, toneLevel } from './palette';
+import type { Palette } from './palette';
 import { DEFAULTS } from './options';
+import type { DitheredOptions } from './options';
 import { BAYER_4 } from '../shape';
+import { SQUARE_SHAPE } from '../test-utils';
 
 // Every threshold `sampleCells` can actually produce: `(v + 0.5) / 16` for
 // each `v` in the 4x4 Bayer matrix (0..15, each appearing exactly once).
@@ -158,5 +161,27 @@ describe('resolvePalette', () => {
 
   it('falls back to DEFAULTS.fg for an empty resolved color', () => {
     expect(resolvePalette([CURRENT_COLOR], '')).toEqual([DEFAULTS.fg]);
+  });
+});
+
+// Round-2 review finding 3: `Palette` (the type the library hands back to
+// callers, e.g. from `toPalette`) is `readonly string[]`, but until this
+// fix `DitheredOptions.fg` was `string | string[]` — a *mutable* array
+// type readonly string[] cannot be assigned to. So a caller who received a
+// `Palette` (or wrote `fg={[...] as const}`) could not pass it back in as
+// `fg`, e.g. `TS2322: The type 'readonly string[]' is 'readonly' and
+// cannot be assigned to the mutable type 'string[]'`. This doesn't assert
+// anything at runtime; its job is purely that the file fails to typecheck
+// (`pnpm typecheck`) if `DitheredOptions.fg` regresses to `string |
+// string[]`.
+describe('DitheredOptions.fg accepts a Palette (type-level)', () => {
+  it('a readonly Palette value type-checks as fg', () => {
+    const palette: Palette = toPalette(['#a00', '#0a0']);
+    const options: DitheredOptions = {
+      shape: SQUARE_SHAPE,
+      brightness: () => true,
+      fg: palette,
+    };
+    expect(options.fg).toBe(palette);
   });
 });
