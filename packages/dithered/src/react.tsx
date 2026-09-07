@@ -19,6 +19,8 @@ export { presets, gem, sweep, pulse, rain, wave, fill, gameOfLife } from './pres
 export { shapes, rozenite, circle, square, diamond, heart } from './shapes';
 export { shapeFromSvg } from './svg';
 export { shapeFromSvgLite } from './svg-lite';
+export type { MixAmount, CellPredicate } from './compose';
+export { compose, blend, mask, timeScale, reverse, offset, invert, clamp } from './compose';
 
 export interface DitheredProps extends Omit<DitheredOptions, 'brightness' | 'shape'> {
   shape: Shape;

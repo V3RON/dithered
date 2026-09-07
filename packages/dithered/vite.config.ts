@@ -1,6 +1,12 @@
 import { defineConfig } from 'vite';
 
 export default defineConfig({
+  // Keep `process.env.NODE_ENV` checks (see compose.ts's timeScale warning)
+  // verbatim in the built output. Vite's library build otherwise inlines
+  // the literal `"production"`, which would hard-disable the check for
+  // every consumer including in development — defining the expression to
+  // itself leaves the decision to the *consumer's* bundler.
+  define: { 'process.env.NODE_ENV': 'process.env.NODE_ENV' },
   build: {
     lib: {
       entry: {

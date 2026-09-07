@@ -158,6 +158,54 @@ Keep your function periodic in `t` (i.e. `f(cell, 0) === f(cell, 1)`) so the loo
 const brightness: Brightness = (cell, t) => 0.5 + 0.5 * Math.sin((cell.u + t) * Math.PI * 2);
 ```
 
+## Composing presets
+
+`compose` is a small set of pure helpers that take a `Brightness` and return a `Brightness`, so you can wrap or combine an existing preset instead of reimplementing it. Each helper is also a named export, following the `presets` pattern:
+
+```ts
+import { compose, presets } from 'dithered';
+```
+
+| Helper                      | Does                                                                         |
+| --------------------------- | ---------------------------------------------------------------------------- |
+| `blend(a, b, mix)`          | Linear mix of two brightnesses. `mix` is a number, or `(cell, t) => number`. |
+| `mask(source, predicate)`   | Keeps `source` where `predicate(cell)` is true; skips it elsewhere.          |
+| `timeScale(source, factor)` | Speeds up/slows down `source`'s loop by `factor`.                            |
+| `reverse(source)`           | Plays `source`'s loop backwards.                                             |
+| `offset(source, dt)`        | Shifts `source` in time by `dt` (looped).                                    |
+| `invert(source)`            | `1 - b`, or `!b` for a boolean source.                                       |
+| `clamp(source, min?, max?)` | Bounds `source` to `[min, max]` (default `0..1`).                            |
+
+**Booleans**: a `Brightness` can return a boolean for a crisp, undithered edge (see `presets.fill`), and each helper has an explicit rule for what it does with one. `mask` and `invert` preserve booleans (a masked-in `true` stays `true`; an inverted `true` becomes `false`). `blend` and `clamp` always return a number — coercing `true`/`false` to `1`/`0` first — because a linear mix or a clamped bound isn't itself a crisp value. `timeScale`, `reverse` and `offset` only touch `t`, so whatever `source` returns (number or boolean) passes straight through.
+
+**`timeScale` and periodicity**: an **integer** `factor` keeps the loop seamless. A non-integer factor (e.g. `1.5`) breaks the `f(cell, 0) === f(cell, 1)` contract — the loop will visibly jump at the seam — so `compose.ts` warns once per distinct factor in development (stripped from production builds).
+
+**Example 1 — `sweep`, but slower and only on the left half:**
+
+```ts
+import { compose, presets } from 'dithered';
+
+const brightness = compose.mask(
+  compose.timeScale(presets.sweep(), 0.5), // half speed
+  (cell) => cell.u <= 0,
+);
+```
+
+`0.5` is a non-integer factor, so per the caveat above it will log a one-time dev warning and the loop technically jumps at the seam — for a half-speed sweep the jump is small enough to be unnoticeable in practice, but for a visibly seamless slowdown, raise `period` on the `Dithered` component instead (it stretches the whole loop, `compose` included).
+
+**Example 2 — blending two presets with a time-varying mix:**
+
+```ts
+import { compose, presets } from 'dithered';
+
+// Crossfades from `pulse` to `wave` and back, once per loop.
+const brightness = compose.blend(
+  presets.pulse(),
+  presets.wave(),
+  (_cell, t) => 0.5 + 0.5 * Math.sin(t * Math.PI * 2),
+);
+```
+
 ## Determinate progress
 
 For a progress indicator rather than a loop, pass `progress` (`0`–`1`) to `Dithered`, or call `instance.setPaused(true)` + `instance.renderFrame(frame)` directly with the core API — both pause the animation and render exactly one frame:
