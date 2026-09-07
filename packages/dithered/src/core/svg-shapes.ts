@@ -132,9 +132,12 @@ function polyPointsToPath(attr: AttrGetter, closed: boolean): string | null {
   const raw = attr('points');
   if (!raw) return null;
 
+  // scanPointList stops at (but doesn't discard what precedes) the first
+  // unparseable token, so a trailing garbage token truncates the list
+  // instead of dropping the whole element; a trailing odd coordinate on
+  // top of that is dropped too. Both are "render up to the error", same
+  // as SVG 2 specifies.
   const numbers = scanPointList(raw);
-  if (numbers === null) return null;
-  // A trailing odd coordinate is dropped, same as a renderer parsing up to the error.
   const coordCount = numbers.length - (numbers.length % 2);
   if (coordCount < 4) return null;
 
@@ -156,10 +159,13 @@ const POINTS_SEPARATOR = new Set([' ', '\t', '\n', '\r', ',']);
  * with it (`readNumberToken`) rather than re-split with a naive regex
  * that would misparse the glued-sign case.
  *
- * Returns `null` on the first unparseable token; the caller treats that
- * like any other degenerate shape (skip), not a loader error.
+ * Stops at the first unparseable token but returns whatever valid prefix
+ * it already collected — SVG renders a `points` list up to the point
+ * where it stops parsing, rather than discarding the whole element, and
+ * this mirrors that (ADR 0010 §3). The caller applies the "fewer than two
+ * points" skip rule to the (possibly truncated) result.
  */
-function scanPointList(text: string): number[] | null {
+function scanPointList(text: string): number[] {
   const numbers: number[] = [];
   const n = text.length;
   let i = 0;
@@ -167,7 +173,7 @@ function scanPointList(text: string): number[] | null {
     while (i < n && POINTS_SEPARATOR.has(text[i])) i++;
     if (i >= n) break;
     const token = readNumberToken(text, i);
-    if (!token) return null;
+    if (!token) break;
     numbers.push(token.value);
     i = token.end;
   }

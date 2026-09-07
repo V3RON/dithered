@@ -28,6 +28,50 @@ describe('shapeFromSvgLite', () => {
     expect(shapeFromSvgLite(svg)).toEqual(shapeFromSvg(svg));
   });
 
+  it('agrees with shapeFromSvg on a CRLF-authored d attribute (regression: finding 2)', () => {
+    // A real DOMParser folds "\r\n" to one "\n" before attribute-value
+    // normalization even sees it, so it collapses to one space; without
+    // that line-ending step first, the lite scanner's one-for-one
+    // whitespace-to-space replacement would instead see "\r" and "\n" as
+    // two separate characters and emit two spaces.
+    const svg = '<svg viewBox="0 0 100 100">\r\n<path d="M10 10\r\nH90\r\nV90 H10 Z"/>\r\n</svg>';
+    expect(shapeFromSvg(svg).path).toBe('M10 10 H90 V90 H10 Z');
+    expect(shapeFromSvgLite(svg)).toEqual(shapeFromSvg(svg));
+  });
+
+  it('agrees with shapeFromSvg on a lone-CR-authored d attribute', () => {
+    const svg = '<svg viewBox="0 0 100 100"><path d="M10 10\rH90 V90 H10 Z"/></svg>';
+    expect(shapeFromSvgLite(svg)).toEqual(shapeFromSvg(svg));
+  });
+
+  it('expands numeric and predefined character references in attribute values, matching shapeFromSvg (regression: finding 3)', () => {
+    const svg = '<svg viewBox="0 0 100 100"><path d="M10 10&#xA;H90 V90 H10 Z"/></svg>';
+    expect(shapeFromSvg(svg).path).toBe('M10 10\nH90 V90 H10 Z');
+    expect(shapeFromSvgLite(svg)).toEqual(shapeFromSvg(svg));
+  });
+
+  it('does not normalize a &#xA; character reference to a space, unlike a literal newline', () => {
+    // Character references are expanded *after* whitespace normalization,
+    // so the newline they name passes through verbatim rather than being
+    // collapsed the way an actual newline byte in the source would be.
+    const svg = '<svg viewBox="0 0 10 10"><path d="M1 1&#xA;Z"/></svg>';
+    expect(shapeFromSvgLite(svg).path).toBe('M1 1\nZ');
+  });
+
+  it('expands a decimal character reference, matching shapeFromSvg', () => {
+    // "&#48;" is '0'; a real parser splices it in before path parsing ever
+    // sees the attribute value, so it merges into the "1" before it.
+    const svg = '<svg viewBox="0 0 10 10"><path d="M1&#48; 10 Z"/></svg>';
+    expect(shapeFromSvgLite(svg).path).toBe('M10 10 Z');
+    expect(shapeFromSvgLite(svg)).toEqual(shapeFromSvg(svg));
+  });
+
+  it('expands the five predefined XML entities in attribute values, matching shapeFromSvg', () => {
+    const svg = `<svg viewBox="0 0 10 10"><path d="M1 1 Z&amp;&lt;&gt;&quot;&apos;"/></svg>`;
+    expect(shapeFromSvgLite(svg).path).toBe(`M1 1 Z&<>"'`);
+    expect(shapeFromSvgLite(svg)).toEqual(shapeFromSvg(svg));
+  });
+
   it('reads the viewBox', () => {
     expect(shapeFromSvgLite(TWO_PATH_SVG).viewBox).toEqual({
       x: 0,

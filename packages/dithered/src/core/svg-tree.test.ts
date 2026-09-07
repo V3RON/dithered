@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { jsHitTester } from '../test-utils';
 import { collectGeometry, type SvgNode } from './svg-tree';
 
 /** A minimal hand-built `SvgNode`, for exercising the traversal directly. */
@@ -50,6 +51,34 @@ describe('collectGeometry: basic concatenation', () => {
   it('converts a <polyline> without closing it, end to end through the traversal', () => {
     const tree = root([new Node('polyline', { points: '0,0 10,0 5,10' })]);
     expect(collectGeometry(tree, 'test').path).toBe('M 0 0 L 10 0 L 5 10');
+  });
+
+  it('rewrites a leading relative moveto to absolute before concatenating, so it does not resolve against the previous element (regression: finding 1)', () => {
+    // Without the fix, "m60 60 ..." resolves against the first path's
+    // current point after its "z" (which restores it to (10,10)),
+    // displacing the whole second square to (70,70)..(90,90).
+    const tree = root([path('M10 10 h20 v20 h-20 z'), path('m60 60 h20 v20 h-20 z')]);
+    const { path: d } = collectGeometry(tree, 'test');
+    expect(d).toBe('M10 10 h20 v20 h-20 z M60 60 h20 v20 h-20 z');
+
+    const tester = jsHitTester({ path: d, viewBox: { x: 0, y: 0, width: 100, height: 100 } });
+    expect(tester(62, 62)).toBe(true); // inside the second square, 60..80
+    expect(tester(65, 65)).toBe(true);
+    expect(tester(85, 85)).toBe(false); // outside it — the bug displaced it to 70..90
+    expect(tester(88, 88)).toBe(false);
+  });
+
+  it('rewrites a leading relative moveto on a <path> that follows a generated <rect> subpath', () => {
+    // The <rect>-generated subpath always starts with an absolute M, so
+    // this exercises the case the ADR calls out explicitly: a *following*
+    // relative-m path, whose displacement would otherwise depend on where
+    // the rect's own path data left the current point.
+    const tree = root([
+      new Node('rect', { x: '0', y: '0', width: '10', height: '10' }),
+      path('m60 60 h20 v20 h-20 z'),
+    ]);
+    const { path: d } = collectGeometry(tree, 'test');
+    expect(d).toBe('M 0 0 H 10 V 10 H 0 Z M60 60 h20 v20 h-20 z');
   });
 });
 

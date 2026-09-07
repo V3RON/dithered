@@ -12,16 +12,18 @@ import type { Shape } from './shape';
  *
  * The trade-off is strictness. This handles well-formed SVG as emitted by
  * design tools: comments and CDATA sections are skipped, attribute values
- * may be single- or double-quoted, and tag names are matched
- * case-insensitively. It does *not* implement XML — entity references are
- * not expanded, and a `>` inside an attribute value will confuse it
- * (harmless in practice: path data and viewBox values never contain one).
- * On the web, prefer `shapeFromSvg`, which delegates to a real parser.
+ * may be single- or double-quoted, tag names are matched
+ * case-insensitively, line endings are normalized and numeric/predefined
+ * character references (`&#xA;`, `&amp;`, ...) are expanded in attribute
+ * values, same as a real parser. It does *not* implement XML — a `>`
+ * inside an attribute value will confuse it (harmless in practice: path
+ * data and viewBox values never contain one). On the web, prefer
+ * `shapeFromSvg`, which delegates to a real parser.
  *
  * @param svg An SVG source string.
  */
 export function shapeFromSvgLite(svg: string): Shape {
-  const source = stripNonMarkup(svg);
+  const source = stripNonMarkup(normalizeLineEndings(svg));
   const root = buildTree(source);
   if (!root || root.tag !== 'svg') {
     throw new Error('shapeFromSvgLite: input does not contain an <svg> root element.');
@@ -48,6 +50,19 @@ export function shapeFromSvgLite(svg: string): Shape {
 /** Drops comments and CDATA so their contents can't be mistaken for markup. */
 function stripNonMarkup(svg: string): string {
   return svg.replace(/<!--[\s\S]*?-->/g, '').replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, '');
+}
+
+/**
+ * XML's end-of-line handling (XML 1.0 §2.11): every CRLF pair, and every
+ * lone CR, is normalized to a single LF *before* anything else parses the
+ * document — including before attribute-value normalization. Applied here
+ * to the whole source, up front, rather than inside `normalizeAttrValue`,
+ * so it runs exactly once and in the right order: a real `DOMParser` folds
+ * `\r\n` into one `\n`, not the two spaces a naive one-for-one
+ * whitespace-to-space replacement of an unnormalized CRLF would produce.
+ */
+function normalizeLineEndings(svg: string): string {
+  return svg.replace(/\r\n?/g, '\n');
 }
 
 /** One element in the tree {@link buildTree} scans out of source text. */
@@ -130,15 +145,46 @@ function parseAttrs(text: string): Map<string, string> {
   return attrs;
 }
 
+/** `&name;` -> character, for the five entities XML predefines without a DTD. */
+const PREDEFINED_ENTITIES: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+};
+
+/** `&#nn;` (decimal), `&#xNN;` (hex, lowercase `x` per the XML grammar), or `&name;`. */
+const ENTITY_RE = /&(?:#x([0-9a-fA-F]+)|#([0-9]+)|([a-zA-Z]+));/g;
+
 /**
- * XML attribute-value normalization: every tab, newline, and carriage
- * return in an attribute's literal text becomes a single space. A real
- * `DOMParser` does this for every attribute — not just whitespace-
- * collapsing, one-for-one replacement — so a multi-line `d` (routine in
- * hand-written and Illustrator-exported SVG) reads the same path data
- * through both loaders instead of `shapeFromSvgLite` leaking raw
- * newlines that `shapeFromSvg` never sees.
+ * XML attribute-value normalization (XML 1.0 §3.3.3), applied in the same
+ * two steps and the same order a real `DOMParser` uses:
+ *
+ * 1. Every literal tab or newline in the attribute's raw text becomes a
+ *    single space — not just whitespace-collapsing, a one-for-one
+ *    replacement — so a multi-line `d` (routine in hand-written and
+ *    Illustrator-exported SVG) reads the same path data through both
+ *    loaders instead of `shapeFromSvgLite` leaking raw newlines that
+ *    `shapeFromSvg` never sees. (A literal `\r` can't reach here: line-
+ *    ending normalization already folded every `\r\n`/`\r` in the source
+ *    to `\n` before tags were even found — see `normalizeLineEndings` —
+ *    which is the order XML itself specifies. The pattern below still
+ *    matches `\r` too, purely as a defensive no-op.)
+ * 2. Character references (`&#nn;`, `&#xNN;`) and the five predefined
+ *    entities are expanded *after* step 1, so a reference to a whitespace
+ *    character — `&#xA;` is the one that actually shows up in hand-written
+ *    `d` data — comes through as the literal character it names, not
+ *    collapsed to a space the way a literal newline in the source is. An
+ *    unrecognized named entity (there is no DTD here to define one) is left
+ *    as written, rather than throwing, matching this scanner's general
+ *    tolerance of malformed input.
  */
 function normalizeAttrValue(value: string): string {
-  return value.replace(/[\t\n\r]/g, ' ');
+  const whitespaceNormalized = value.replace(/[\t\n\r]/g, ' ');
+  return whitespaceNormalized.replace(ENTITY_RE, (match, hex, dec, name) => {
+    if (hex !== undefined) return String.fromCodePoint(parseInt(hex, 16));
+    if (dec !== undefined) return String.fromCodePoint(parseInt(dec, 10));
+    return PREDEFINED_ENTITIES[name] ?? match;
+  });
 }

@@ -39,8 +39,9 @@ const isDigit = (ch: string | undefined) => ch !== undefined && ch >= '0' && ch 
  * Returns `null`, rather than throwing, when `s[i..]` doesn't start with
  * a valid number: `parsePath` turns that into a thrown error (a bad `d`
  * is a loader error), while `svg-shapes.ts`'s `points` scanner turns it
- * into "skip this element" (a bad `points` value just means the element
- * is degenerate, like any other invalid geometry attribute).
+ * into "stop scanning here", keeping whatever valid prefix it already
+ * collected (a bad `points` value just means the list ends early, like a
+ * renderer parsing up to the error).
  */
 export function readNumberToken(s: string, i: number): { value: number; end: number } | null {
   const start = i;

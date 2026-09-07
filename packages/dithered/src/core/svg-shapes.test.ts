@@ -152,6 +152,16 @@ describe('basicShapeToPath: polygon', () => {
     expect(basicShapeToPath('polygon', attrs({ points: '0,0 x,10' }))).toBeNull();
   });
 
+  it('keeps the valid prefix when the unparseable token is trailing, rather than skipping the element (regression: finding 4)', () => {
+    // Both this and the mid-list case above stop at the bad token, but
+    // only here does that leave >= 2 points behind — this is the case the
+    // round-1 fix regressed, dropping the whole polygon instead of the
+    // one bad trailing point.
+    expect(basicShapeToPath('polygon', attrs({ points: '0,0 10,0 5,10 x' }))).toBe(
+      'M 0 0 L 10 0 L 5 10 Z',
+    );
+  });
+
   it('accepts a sign glued directly onto the next number with no separator', () => {
     // "10-5" is a legal points value: the sign starts a new number.
     expect(basicShapeToPath('polygon', attrs({ points: '0 0 10-5 20 20' }))).toBe(

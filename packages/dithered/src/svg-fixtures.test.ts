@@ -224,3 +224,52 @@ describe('fixture: polygon star', () => {
     expectSameCells(shapeFromSvgLite(SVG), HAND_SHAPE);
   });
 });
+
+/**
+ * Characterization tests for a known, documented limitation (ADR 0010's
+ * Consequences, and the README's "Known limitation" note) — NOT a
+ * statement that this behavior is desirable. Concatenating every
+ * element's geometry into one path string means overlapping regions of
+ * *separately filled* elements cancel instead of union: SVG paints each
+ * element's own area solid regardless of what else covers it, but the
+ * merged path's winding (or, under evenodd, its crossing parity) does
+ * not. These tests pin down today's actual output so a future change to
+ * it is a deliberate decision, not a silent regression; they are not
+ * something to "fix" as part of the findings above.
+ */
+describe('known limitation: concatenation is not a union of independently-filled elements', () => {
+  it('nonzero: an opposite-winding element punches a hole where it overlaps a same-rule sibling', () => {
+    // <rect> emits its path clockwise (right, down, left, back to start —
+    // see svg-shapes.ts); this <path> traces the same kind of square
+    // counter-clockwise (down, right, up, back to start). SVG renders
+    // both solid; concatenated under nonzero, the overlap's winding
+    // numbers cancel to 0.
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+        <rect x="10" y="10" width="60" height="60" />
+        <path d="M40 40 L40 90 L90 90 L90 40 Z" />
+      </svg>
+    `;
+    const shape = shapeFromSvg(svg);
+    expect(shape.fillRule).toBeUndefined(); // both elements are (implicitly) nonzero
+    const hit = jsHitTester(shape);
+    expect(hit(20, 20)).toBe(true); // inside the rect only
+    expect(hit(80, 80)).toBe(true); // inside the path only
+    expect(hit(50, 50)).toBe(false); // inside both — a real renderer paints this solid
+  });
+
+  it('evenodd: any overlap between two elements becomes a hole, even with matching winding', () => {
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+        <rect x="10" y="10" width="60" height="60" fill-rule="evenodd" />
+        <rect x="40" y="40" width="50" height="50" fill-rule="evenodd" />
+      </svg>
+    `;
+    const shape = shapeFromSvg(svg);
+    expect(shape.fillRule).toBe('evenodd');
+    const hit = jsHitTester(shape);
+    expect(hit(20, 20)).toBe(true); // inside the first rect only
+    expect(hit(80, 80)).toBe(true); // inside the second rect only
+    expect(hit(50, 50)).toBe(false); // inside both — a real renderer paints this solid
+  });
+});

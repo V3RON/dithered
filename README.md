@@ -130,6 +130,8 @@ A few things are skipped rather than drawn: `<defs>`, `<clipPath>`, `<mask>`, `<
 
 `<use>`, `<text>` and `<image>` are not supported; a document containing only those throws a specific error telling you to expand symbols and convert text to outlines before re-exporting. See [ADR 0010](packages/dithered/docs/adrs/0010-wider-svg-input.md) for the full design.
 
+**Known limitation:** every element's geometry is concatenated into one path string, so elements that overlap and rely on being filled _independently_ — a real SVG renderer always paints each element's own area solid, regardless of what's under it — will instead show a hole where they overlap, because the merged path's winding cancels there. If your SVG relies on this (two shapes touching or overlapping, each meant to render solid), union them into one shape in your editor before exporting.
+
 `shapeFromSvg` uses `DOMParser`, so it is web-only. `shapeFromSvgLite` is the same contract implemented by scanning the source text into a tree rather than parsing it, and is exported from both `dithered` and `dithered/react-native`:
 
 ```ts

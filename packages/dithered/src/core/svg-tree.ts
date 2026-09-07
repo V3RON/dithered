@@ -144,7 +144,7 @@ function walk(node: SvgNode, inherited: Inherited, walked: Walked, label: string
     if (fill === 'none' && stroke === 'none') return; // paint-invisible leaf
     const d = geometryPath(tag, node);
     if (d === null) return; // zero-area / degenerate, not an error
-    walked.paths.push(bakeTransform(d, ctm, label));
+    walked.paths.push(bakeTransform(forceAbsoluteLeadingMoveto(d), ctm, label));
     walked.fillRules.add(fillRule);
     return;
   }
@@ -163,6 +163,26 @@ function geometryPath(tag: string, node: SvgNode): string | null {
   }
   if (tag === 'line') return null; // zero area: can never add a cell
   return basicShapeToPath(tag, (name) => node.attr(name));
+}
+
+/**
+ * Rewrites `d`'s leading moveto to absolute `M`, if it was written as a
+ * relative `m`. In the source document an element's path data starts its
+ * own path, and SVG treats a leading `m` as identical to `M` there (there
+ * is no current point yet — the implicit start is `(0,0)`, same as right
+ * after an absolute `M 0 0`). Spliced into the concatenated output that
+ * same `m` would instead resolve against the *previous* element's current
+ * point, displacing the whole subpath (see ADR 0010's Consequences).
+ *
+ * Only the leading command letter changes; the coordinates that follow it
+ * are untouched and every command after the first keeps whatever form it
+ * was written in, so already-absolute path data (what `basicShapeToPath`
+ * emits, and what most design tools emit) round-trips byte-identical.
+ */
+function forceAbsoluteLeadingMoveto(d: string): string {
+  const leading = d.match(/^\s*/)?.[0].length ?? 0;
+  if (d[leading] !== 'm') return d;
+  return d.slice(0, leading) + 'M' + d.slice(leading + 1);
 }
 
 function parseNodeTransform(node: SvgNode, label: string): Matrix {
