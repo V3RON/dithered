@@ -17,6 +17,7 @@ import {
   resolveSizePx,
   surfaceSize,
   toPalette,
+  wrapFrame,
   wrapPhase,
   type DitheredOptions,
   type PaintContext,
@@ -52,7 +53,9 @@ export interface DitheredInstance {
    * Drives playback externally: sets the loop phase to `t` (loop units —
    * `1` is one full loop) and halts the internal clock. Idempotent —
    * repeated calls that land on the same frame index repaint at most
-   * once — and does not fire `onLoop`, since a jump isn't a wrap.
+   * once — and does not fire `onLoop`, since a jump isn't a wrap. A
+   * non-finite `t` (`NaN`, `Infinity`, `-Infinity`) is ignored: the
+   * displayed frame holds and neither callback fires.
    */
   setTime(t: number): void;
   /**
@@ -63,11 +66,6 @@ export interface DitheredInstance {
   clearTime(): void;
   /** Stops the loop and releases all listeners/observers. */
   destroy(): void;
-}
-
-/** Wraps a frame index into `[0, count)`, matching `wrapFrame`'s semantics in `core/static.ts`. */
-function wrapFrame(frame: number, count: number): number {
-  return ((Math.round(frame) % count) + count) % count;
 }
 
 interface MeasuredBox {
@@ -231,8 +229,14 @@ export function createDithered(
   // Seeded via `phaseForFrame`, not a bare `initialFrame / opts.frames`:
   // the latter rounds down for a third of its valid inputs (ADR 0006
   // §1), which would both paint the wrong initial frame and report it
-  // to `onFrame` below.
-  let phase = opts.frames > 0 ? phaseForFrame(opts.initialFrame, opts.frames) : 0;
+  // to `onFrame` below. `initialFrame` is wrapped into `[0, opts.frames)`
+  // *before* that conversion (ADR 0006 §6) so an out-of-range value
+  // (`-1`, `frames`, ...) seeds the same `loopsAt` starting point — `0`
+  // — as native's `wrapFrame`-then-convert seed does; seeding it
+  // unwrapped makes `loopsAt` start at `-1` for `initialFrame: -1`, so
+  // the first forward wrap fires `onLoop(0)` instead of `onLoop(1)`.
+  let phase =
+    opts.frames > 0 ? phaseForFrame(wrapFrame(opts.initialFrame, opts.frames), opts.frames) : 0;
   let lastNow: number | null = null;
   // True while a `setTime` caller owns `phase`; the internal clock never
   // runs while this is set, regardless of `isPaused`.
@@ -467,6 +471,9 @@ export function createDithered(
     // always resets `currentFrame` to -1 (review finding 2). While
     // reduced motion is in effect, the frame shown is always `initialFrame`.
     const frameToShow = reduced ? opts.initialFrame : frameForPhase(phase, opts.frames);
+    // Also captured here, before a possible `buildCache()` below resets
+    // `currentFrame` to -1 — see the identical comment in `update()`.
+    const frameBeforeRepaint = currentFrame;
     applySurface();
     // Floored at 2 device px: `W`/`builtW` are always whole device pixels
     // (rounded in `applySurface()`), so the smallest possible nonzero delta
@@ -502,7 +509,7 @@ export function createDithered(
     // A resize always warrants a repaint at the new dimensions, even if
     // `frameToShow` happens to equal `currentFrame` — but `onFrame` only
     // fires when the frame index actually moved.
-    const frameChanged = frameToShow !== currentFrame;
+    const frameChanged = frameToShow !== frameBeforeRepaint;
     blit(frameToShow);
     if (frameChanged) opts.onFrame?.(frameToShow, frameToShow / opts.frames);
   }
@@ -737,9 +744,10 @@ export function createDithered(
     // Captured before `buildCache()` clobbers `currentFrame` — see the
     // identical comment in `resizeTo` (review finding 2).
     const frameToShow = reduced ? opts.initialFrame : frameForPhase(phase, opts.frames);
+    const frameBeforeRepaint = currentFrame;
     applySurface();
     buildCache();
-    const frameChanged = frameToShow !== currentFrame;
+    const frameChanged = frameToShow !== frameBeforeRepaint;
     blit(frameToShow);
     if (frameChanged) opts.onFrame?.(frameToShow, frameToShow / opts.frames);
   }
@@ -964,6 +972,11 @@ export function createDithered(
         // reduced motion is (now) in effect, the frame shown is always
         // `initialFrame` — the documented single static frame.
         const frameToShow = nextReduced ? opts.initialFrame : frameForPhase(phase, opts.frames);
+        // Also captured here, before `buildCache()` resets `currentFrame`
+        // to -1: comparing `frameToShow` against the *live* `currentFrame`
+        // after that reset would report every cache-affecting repaint as a
+        // "new" frame to `onFrame`, even one that redraws the same index.
+        const frameBeforeRepaint = currentFrame;
 
         // Run only the stages this patch actually touches (ADR 0011's
         // three-stage table), rather than unconditionally reapplying the
@@ -1045,7 +1058,7 @@ export function createDithered(
           // review finding 7) — but only report a new frame to `onFrame`
           // when the index actually moved, matching `paintForPhase`'s
           // "never redraw or report the same frame twice" contract.
-          const frameChanged = frameToShow !== currentFrame;
+          const frameChanged = frameToShow !== frameBeforeRepaint;
           blit(frameToShow);
           if (frameChanged) opts.onFrame?.(frameToShow, frameToShow / opts.frames);
         }
@@ -1110,6 +1123,16 @@ export function createDithered(
     },
 
     setTime(t: number) {
+      // A non-finite `t` is ignored outright (ADR 0006 §3), not clamped
+      // to frame 0 — `frameForPhase`'s totality is a backstop for
+      // anything that slips past every driver, not license for a driver
+      // to snap to frame 0 on its own. Left completely untouched: the
+      // displayed frame holds, `onFrame` does not fire, and the
+      // instance is exactly as driveable by a subsequent finite
+      // `setTime` as it was before this call. This is the PRD's
+      // flagship case: `time={scrollY / contentHeight}` is `NaN` on the
+      // first render, before layout.
+      if (!Number.isFinite(t)) return;
       driven = true;
       halt();
       phase = t;

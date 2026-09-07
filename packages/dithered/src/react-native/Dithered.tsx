@@ -10,14 +10,17 @@ import {
   type SharedValue,
 } from 'react-native-reanimated';
 import type { Brightness, DitheredOptions } from '../core';
+import { wrapFrame } from '../core';
 import { gem } from '../presets';
 import type { Cell, Shape } from '../shape';
 import { useDitheredPictures } from './pictures';
 import {
   advancePhaseUI,
-  frameForPhaseUI,
+  frameForRepoint,
+  isExternallyDriven,
   loopsAtUI,
   phaseForFrameUI,
+  resolveAppliedFrame,
   wrapPhaseUI,
 } from './playback';
 
@@ -48,9 +51,12 @@ export interface DitheredProps extends Omit<
    * the UI thread via `useAnimatedReaction`, so a gesture or scroll
    * handler writing `time.value` reaches the picture swap without a JS
    * round trip. Takes precedence over `progress`; clearing it back to
-   * `undefined` resumes the frame callback from wherever it was left.
+   * `undefined` *or* `null` resumes the frame callback from wherever it
+   * was left — `null` behaves exactly like an absent prop (useful for
+   * `time={sharedValue ?? null}`, before the shared value exists), it
+   * does not freeze playback.
    */
-  time?: number | SharedValue<number>;
+  time?: number | SharedValue<number> | null;
   /**
    * Called after a frame is painted, with the frame index and loop
    * phase in `[0, 1)`. Crosses to the JS thread via `runOnJS` — not for
@@ -90,10 +96,6 @@ function useAppActive(): boolean {
     return () => subscription.remove();
   }, []);
   return active;
-}
-
-function wrapFrame(frame: number, count: number): number {
-  return ((Math.round(frame) % count) + count) % count;
 }
 
 /** Duck-typed rather than Reanimated's `isSharedValue`, to avoid raising the peer floor. */
@@ -189,12 +191,18 @@ export function Dithered({
   const lastTimestamp = useSharedValue<number | null>(null);
 
   // Re-point at the new recordings whenever they are rebuilt, so an
-  // option change is visible even while playback is halted.
+  // option change is visible even while playback is halted. Re-derives
+  // the frame from whichever of `externalPhase`/`internalPhase` is
+  // currently driving (finding 2): `wrapFrame(currentFrame.value,
+  // frameCount)` — the old frame index modulo the new count — is
+  // exactly the `currentFrame % opts.frames` mapping ADR 0006 §4
+  // replaced on the web, and disagrees with the web driver (which
+  // re-points from the preserved *phase*) whenever `frames` changes.
   useEffect(() => {
-    const frame = wrapFrame(currentFrame.value, frameCount);
+    const frame = frameForRepoint(externalPhase.value, internalPhase.value, frameCount);
     currentFrame.value = frame;
     picture.value = pictures[frame];
-  }, [pictures, frameCount, currentFrame, picture]);
+  }, [pictures, frameCount, currentFrame, picture, externalPhase, internalPhase]);
 
   // Latest-value ref trampolines, mirroring `dithered/react`: `onFrame`
   // fires via `runOnJS` from the UI thread and must not itself force a
@@ -233,8 +241,14 @@ export function Dithered({
   const applyPhase = useCallback(
     (phase: number) => {
       'worklet';
-      const frame = frameForPhaseUI(phase, frameCount);
-      if (frame !== currentFrame.value) {
+      // What to paint (or whether to paint at all) is decided by
+      // `resolveAppliedFrame` — a non-finite `phase` (ADR 0006 §3,
+      // finding 1) or one that maps to the frame already showing both
+      // return `null`, and this worklet does nothing: no shared-value
+      // write, no `onFrame`. Pulled out so the decision is unit-testable
+      // without a React Native renderer (this package has none).
+      const frame = resolveAppliedFrame(phase, frameCount, currentFrame.value);
+      if (frame !== null) {
         currentFrame.value = frame;
         picture.value = pictures[frame];
         if (hasOnFrame) runOnJS(notifyFrame)(frame, wrapPhaseUI(phase));
@@ -243,7 +257,13 @@ export function Dithered({
     [pictures, frameCount, currentFrame, picture, hasOnFrame, notifyFrame],
   );
 
-  const driven = time !== undefined || progress !== undefined;
+  // `null` is treated the same as `undefined` — *not* driven (finding
+  // 6) — because no write path below ever claims it: `typeof null ===
+  // 'number'` is false and `isSharedValue(null)` is false (its
+  // `value !== null` guard), so a `null` `time` reaches neither write
+  // path and would otherwise leave `holding` permanently true with
+  // nothing ever driving `applyPhase` again.
+  const driven = isExternallyDriven(time, progress);
   const holding =
     paused || driven || !appActive || (respectReducedMotion && reducedMotion === true);
 

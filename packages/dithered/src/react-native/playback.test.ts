@@ -1,12 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { advancePhase, frameForPhase, loopsAt, phaseForFrame, wrapPhase } from '../core/clock';
+import {
+  advancePhase,
+  frameForPhase,
+  loopsAt,
+  phaseForFrame,
+  wrapFrame,
+  wrapPhase,
+} from '../core/clock';
 import { createDithered } from '../renderer';
 import { SQUARE_SHAPE, makeFakeCanvas, stubAnimationGlobals } from '../test-utils';
 import {
   advancePhaseUI,
   frameForPhaseUI,
+  frameForRepoint,
+  isExternallyDriven,
   loopsAtUI,
   phaseForFrameUI,
+  resolveAppliedFrame,
   wrapPhaseUI,
 } from './playback';
 
@@ -59,6 +69,24 @@ describe('native/playback parity with core/clock', () => {
     }
   });
 
+  // ADR 0006 test 43 / finding 1, the `*UI` twin. Same totality
+  // guarantee as `core/clock.ts`'s `frameForPhase`: a non-finite phase,
+  // or any `frames <= 0`, returns frame `0` rather than `undefined`
+  // reaching Skia's `drawPicture`.
+  it('frameForPhaseUI is total: NaN/Infinity/-Infinity and frames <= 0 all return frame 0', () => {
+    for (const phase of [NaN, Infinity, -Infinity]) {
+      for (const frames of [1, 10, 48]) {
+        expect(frameForPhaseUI(phase, frames)).toBe(0);
+        expect(frameForPhaseUI(phase, frames)).toBe(frameForPhase(phase, frames));
+      }
+    }
+    for (const frames of [0, -1, -48]) {
+      for (const phase of [0, 0.5, -0.3, NaN]) {
+        expect(frameForPhaseUI(phase, frames)).toBe(0);
+      }
+    }
+  });
+
   it('loopsAtUI matches loopsAt across a sweep of phases', () => {
     for (const phase of PHASES) {
       expect(loopsAtUI(phase)).toBe(loopsAt(phase));
@@ -79,6 +107,73 @@ describe('native/playback parity with core/clock', () => {
         expect(frameForPhaseUI(phaseForFrameUI(frame, frames), frames)).toBe(frame);
       }
     }
+  });
+
+  describe('resolveAppliedFrame (extracted from the applyPhase worklet, finding 1)', () => {
+    it('returns null (paint nothing) for a non-finite phase, regardless of the currently displayed frame', () => {
+      for (const phase of [NaN, Infinity, -Infinity]) {
+        expect(resolveAppliedFrame(phase, 48, 0)).toBeNull();
+        expect(resolveAppliedFrame(phase, 48, 5)).toBeNull();
+      }
+    });
+
+    it('returns null when the phase maps to the frame already displayed (no redundant repaint/onFrame)', () => {
+      expect(resolveAppliedFrame(phaseForFrameUI(5, 10), 10, 5)).toBeNull();
+    });
+
+    it('returns the new frame index when the phase maps somewhere else', () => {
+      expect(resolveAppliedFrame(phaseForFrameUI(5, 10), 10, 2)).toBe(5);
+    });
+  });
+
+  describe('frameForRepoint (extracted from the recordings re-point effect, finding 2)', () => {
+    it('reads externalPhase when it is set, ignoring internalPhase', () => {
+      expect(frameForRepoint(0.75, 0.1, 10)).toBe(frameForPhaseUI(0.75, 10));
+    });
+
+    it('falls back to internalPhase when externalPhase is null', () => {
+      expect(frameForRepoint(null, 0.75, 10)).toBe(frameForPhaseUI(0.75, 10));
+    });
+
+    // The exact ADR 0006 §6 regression scenario: `initialFrame: 30,
+    // frames: 48`, paused, then re-rendered at `frames: 10`. The old
+    // `wrapFrame(currentFrame, frameCount)` mapping this replaces would
+    // answer `wrapFrame(30, 10) === 0`; the phase-based mapping agrees
+    // with the web driver's `frameForPhase` at frame `6`.
+    it('re-points from the preserved phase, not the old frame index, at the exact ADR regression scenario', () => {
+      const frames = 48;
+      const seedFrame = wrapFrame(30, frames);
+      const internalPhase = phaseForFrameUI(seedFrame, frames);
+
+      const newFrameCount = 10;
+      const repointed = frameForRepoint(null, internalPhase, newFrameCount);
+
+      expect(repointed).toBe(6);
+      // Pinned against the buggy mapping this replaces, so the fix can't
+      // silently regress back to it.
+      expect(repointed).not.toBe(wrapFrame(seedFrame, newFrameCount));
+    });
+  });
+
+  describe('isExternallyDriven (extracted from the `driven` computation, finding 6)', () => {
+    it('is false when time and progress are both absent', () => {
+      expect(isExternallyDriven(undefined, undefined)).toBe(false);
+    });
+
+    // The actual regression: `time={sharedValue ?? null}` before the
+    // shared value exists must behave like "not externally driven", not
+    // freeze the frame callback forever.
+    it('treats a null time the same as an absent one, even with progress absent too', () => {
+      expect(isExternallyDriven(null, undefined)).toBe(false);
+    });
+
+    it('is true for a numeric time, a shared-value-shaped time, or a set progress', () => {
+      expect(isExternallyDriven(0.5, undefined)).toBe(true);
+      expect(isExternallyDriven(0, undefined)).toBe(true); // falsy but present
+      expect(isExternallyDriven({ value: 0.5 }, undefined)).toBe(true);
+      expect(isExternallyDriven(null, 0.5)).toBe(true); // progress alone still drives
+      expect(isExternallyDriven(undefined, 0)).toBe(true); // falsy but present
+    });
   });
 
   // ADR 0006 test 42. The sweep above (and the one it replaces) only
@@ -152,6 +247,64 @@ describe('native/playback parity with core/clock', () => {
       }
 
       expect(webFrames).toEqual(uiFrames);
+    });
+
+    // ADR 0006 test 48 / finding 8. `initialFrame` is wrapped into
+    // `[0, frames)` *before* being converted to a phase, on both
+    // platforms — otherwise `loopsAt` starts somewhere other than `0`
+    // for an out-of-range `initialFrame` on whichever platform seeds it
+    // unwrapped, and the two disagree about the first `onLoop` count for
+    // identical props. This drives the real web `createDithered` and
+    // compares it against the native accumulator built from the same
+    // pure helpers `Dithered.tsx` seeds with (`wrapFrame` +
+    // `phaseForFrameUI`), since there is no React Native renderer here
+    // to mount the component itself.
+    it('initialFrame out of range paints the same frame and reports the same first onLoop count on both platforms', () => {
+      const frames = 48;
+      const period = 1000;
+
+      for (const initialFrame of [-1, frames, frames + 1]) {
+        // Web: the real renderer. Tracked as a running "last painted
+        // frame" rather than an array of pushes: advancing by exactly
+        // one full period returns to the *same* frame index (only the
+        // loop count changes), so `onFrame` correctly does not fire
+        // again — an array would go empty and lose the value entirely.
+        let lastWebFrame = -1;
+        const webLoops: number[] = [];
+        const { canvas } = makeFakeCanvas();
+        createDithered(canvas, {
+          shape: SQUARE_SHAPE,
+          brightness: () => true,
+          cache: false,
+          frames,
+          period,
+          initialFrame,
+          onFrame: (f) => {
+            lastWebFrame = f;
+          },
+          onLoop: (loops) => webLoops.push(loops),
+        });
+        const webInitialFrame = lastWebFrame; // from the mount-time paint
+
+        const cb = env.rafCallbacks[env.rafCallbacks.length - 1]!;
+        cb(0); // establishes lastNow, no movement
+        cb(period); // one full period forward: crosses exactly one loop boundary
+
+        // Native: the same seeding `Dithered.tsx` performs at mount
+        // (`wrapFrame` then `phaseForFrameUI`), then one accumulator step
+        // through the same forward period.
+        const nativeSeedFrame = wrapFrame(initialFrame, frames);
+        let nativePhase = phaseForFrameUI(nativeSeedFrame, frames);
+        const loopsBefore = loopsAtUI(nativePhase);
+        nativePhase = advancePhaseUI(nativePhase, period, period, 1);
+        const loopsAfter = loopsAtUI(nativePhase);
+        const nativeFirstLoop = loopsAfter !== loopsBefore ? loopsAfter : undefined;
+        const nativeFinalFrame = frameForPhaseUI(nativePhase, frames);
+
+        expect(webInitialFrame).toBe(nativeSeedFrame);
+        expect(webLoops[0]).toBe(nativeFirstLoop);
+        expect(lastWebFrame).toBe(nativeFinalFrame);
+      }
     });
   });
 });

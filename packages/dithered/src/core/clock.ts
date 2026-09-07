@@ -30,8 +30,21 @@ export function advancePhase(phase: number, dtMs: number, period: number, speed:
  * enough to 1 that `p * frames` rounds up to `frames` in floating point,
  * and an out-of-range index reads `undefined` out of the native picture
  * array.
+ *
+ * Total: a non-finite `phase` (`NaN`, `Infinity`, `-Infinity`) and any
+ * `frames <= 0` return `0` rather than propagating. `Math.min(frames - 1,
+ * NaN)` is `NaN`, so the clamp above guards the float edge but not the
+ * input — without this, `NaN` reaches straight through to
+ * `pictures[NaN]` (`undefined`, handed to Skia's `drawPicture` on
+ * native) or a `drawImage` with non-finite args (a blank canvas, on
+ * web). This is the floor, not the whole story: the *drivers* that carry
+ * external time (`setTime`, the `time` prop, native's `applyPhase`)
+ * ignore a non-finite `t` outright rather than relying on this to fall
+ * back to frame `0` — see ADR 0006 §3. This totality is the backstop for
+ * anything that slips past that.
  */
 export function frameForPhase(phase: number, frames: number): number {
+  if (!Number.isFinite(phase) || !(frames > 0)) return 0;
   const p = wrapPhase(phase);
   return Math.min(frames - 1, Math.floor(p * frames));
 }
@@ -54,4 +67,16 @@ export function loopsAt(phase: number): number {
  */
 export function phaseForFrame(frame: number, frames: number): number {
   return (frame + 0.5) / frames;
+}
+
+/**
+ * Wraps a (possibly out-of-range, possibly non-integer) frame index into
+ * `[0, frames)`. Used to normalize `initialFrame` *before* it is
+ * converted to a phase by {@link phaseForFrame} — seeding it unwrapped
+ * makes `loopsAt` start somewhere other than `0` for an out-of-range
+ * `initialFrame` (e.g. `-1`), which disagrees with a driver that wraps
+ * first. See ADR 0006 §6.
+ */
+export function wrapFrame(frame: number, frames: number): number {
+  return ((Math.round(frame) % frames) + frames) % frames;
 }

@@ -1,5 +1,4 @@
 import type { Cell } from '../shape';
-import { frameForPhase } from './clock';
 import type { Brightness, ResolvedOptions } from './options';
 import { toneLevel, toPalette, type Palette } from './palette';
 
@@ -53,9 +52,19 @@ export interface PaintGeometry {
  * stays exported and behaves exactly as before — it's the direct
  * `nowMs -> frame` mapping to reach for outside that instance, e.g. to
  * align a one-off render with a `performance.now()` timestamp.
+ *
+ * Deliberately **not** re-expressed as `frameForPhase(nowMs / period,
+ * frames)`: the two are not the same function in floating point.
+ * `(nowMs % period) / period` and `(nowMs / period) % 1` diverge at
+ * `Date.now()` magnitudes, and the top edge wraps to `0` here under the
+ * original `% frames` but would clamp to `frames - 1` under
+ * `frameForPhase`. The promise is "behaviour unchanged", so this body is
+ * kept byte-for-byte identical to what it was before ADR 0006. See ADR
+ * 0006 §1.
  */
 export function frameAt(nowMs: number, period: number, frames: number): number {
-  return frameForPhase(nowMs / period, frames);
+  const phase = ((nowMs % period) + period) % period; // guard negative nowMs
+  return Math.floor((phase / period) * frames) % frames;
 }
 
 /**

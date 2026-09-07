@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react';
 import { createRef } from 'react';
 import { renderToString } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { renderToSvg } from './core';
+import { DEFAULTS, renderToSvg } from './core';
 import { Dithered } from './react';
 import type { DitheredInstance } from './renderer';
 import type { Palette } from './core';
@@ -224,6 +224,43 @@ describe('Dithered', () => {
     }
   });
 
+  // ADR 0006 test 49 / finding 7. `frames: 0` used to reach `setTime`
+  // with a non-finite phase (`Math.floor(0.5 * -1) === -1`, then
+  // `phaseForFrame(-1, 0) === -Infinity`) — finding 1's blank-canvas bug,
+  // entered through the `progress` mapping rather than `time` directly.
+  it('progress with frames: 0 does not produce a non-finite phase', () => {
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} />);
+    const instance = lastInstance();
+    const setTimeSpy = vi.spyOn(instance, 'setTime');
+
+    rerender(<Dithered shape={SQUARE_SHAPE} frames={0} progress={0.5} />);
+
+    expect(setTimeSpy).toHaveBeenCalledTimes(1);
+    expect(Number.isFinite(setTimeSpy.mock.calls[0]![0])).toBe(true);
+  });
+
+  // ADR 0006 test 49, second half. The mapping must read
+  // `DEFAULTS.frames`, not repeat the library's default as a bare `48`
+  // literal, so the two can't silently drift apart if the real default
+  // ever changes. Mutates the shared `DEFAULTS` object for the duration
+  // of the test, restored in `finally`.
+  it("progress's frame mapping (no frames prop) follows DEFAULTS.frames rather than a hard-coded 48", () => {
+    const original = DEFAULTS.frames;
+    DEFAULTS.frames = 20;
+    try {
+      const { rerender } = render(<Dithered shape={SQUARE_SHAPE} />);
+      const instance = lastInstance();
+      const setTimeSpy = vi.spyOn(instance, 'setTime');
+
+      rerender(<Dithered shape={SQUARE_SHAPE} progress={0.5} />);
+
+      // frame = floor(0.5 * (20 - 1)) = 9; phase = phaseForFrame(9, 20).
+      expect(setTimeSpy).toHaveBeenCalledWith((9 + 0.5) / 20);
+    } finally {
+      DEFAULTS.frames = original;
+    }
+  });
+
   it('time takes precedence over progress when both are set', () => {
     const { rerender } = render(<Dithered shape={SQUARE_SHAPE} progress={0.5} />);
     const instance = lastInstance();
@@ -235,17 +272,56 @@ describe('Dithered', () => {
     expect(setTimeSpy).not.toHaveBeenCalledWith((0.5 * 47) / 48);
   });
 
+  // ADR 0006 test 31 / finding 5. The original version of this test only
+  // asserted that `setTime` was *called* with `0.35` and that
+  // `clearTime` was called — never the two things its name actually
+  // claims: that the argument produces the right *painted* frame, and
+  // that the RAF loop genuinely stops (as opposed to `setTime` being a
+  // no-op stub that happens to record its argument).
   it('time renders the matching frame and pauses the loop, then clearTime resumes on removal', () => {
-    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} />);
+    const reported: number[] = [];
+    const onFrame = (f: number) => reported.push(f);
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} frames={10} onFrame={onFrame} />);
     const instance = lastInstance();
-    const setTimeSpy = vi.spyOn(instance, 'setTime');
     const clearTimeSpy = vi.spyOn(instance, 'clearTime');
 
-    rerender(<Dithered shape={SQUARE_SHAPE} time={0.35} />);
-    expect(setTimeSpy).toHaveBeenCalledWith(0.35);
+    expect(env.rafCallbacks.length).toBe(1); // scheduled normally before time takes over
+    reported.length = 0; // drop the mount-time initial paint at frame 0
 
-    rerender(<Dithered shape={SQUARE_SHAPE} />);
+    rerender(<Dithered shape={SQUARE_SHAPE} frames={10} time={0.35} onFrame={onFrame} />);
+
+    // The actual painted frame index, via the real onFrame path — not
+    // just the raw argument setTime happened to receive.
+    expect(reported[reported.length - 1]).toBe(Math.floor(0.35 * 10));
+    // The internal RAF loop actually stopped: no new frame was
+    // scheduled, and the one that was pending got cancelled.
+    expect(env.rafCallbacks.length).toBe(1);
+    expect(cancelAnimationFrame).toHaveBeenCalled();
+
+    rerender(<Dithered shape={SQUARE_SHAPE} frames={10} />);
     expect(clearTimeSpy).toHaveBeenCalled();
+  });
+
+  // ADR 0006 test 50, web half / finding 6. `time={null}` (as opposed
+  // to an absent prop — e.g. `time={sharedProgress ?? null}`) must
+  // behave exactly like `time` being `undefined`: `clearTime()` runs and
+  // playback keeps going, rather than freezing (the native failure mode
+  // this finding is really about — see native/playback.test.ts's
+  // `isExternallyDriven` coverage). `typeof null === 'number'` is
+  // already false, so the effect falls through to `clearTime()`; this
+  // pins that so it can't regress.
+  it('time={null} behaves as not externally driven: clearTime runs and playback resumes', () => {
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} time={0.2} />);
+    const instance = lastInstance();
+    const clearTimeSpy = vi.spyOn(instance, 'clearTime');
+    const rafCountWhileDriven = env.rafCallbacks.length;
+
+    rerender(<Dithered shape={SQUARE_SHAPE} time={null} />);
+
+    expect(clearTimeSpy).toHaveBeenCalled();
+    // The real instance actually resumed scheduling — not just a spy
+    // recording that the method was called.
+    expect(env.rafCallbacks.length).toBeGreaterThan(rafCountWhileDriven);
   });
 
   it('time changing does not trigger update() (no reconfigure)', () => {

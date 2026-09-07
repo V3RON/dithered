@@ -53,6 +53,60 @@ describe('frameAt', () => {
     expect(frameAt(0, 2000, 48)).toBe(0);
     expect(frameAt(1999, 2000, 48)).toBe(47);
   });
+
+  // ADR 0006 test 46 / finding 3. `frameAt` keeps its pre-ADR-0006 body
+  // verbatim rather than delegating to `frameForPhase`: `(nowMs % period)
+  // / period` and `(nowMs / period) % 1` are not the same computation in
+  // floating point, and diverge at `Date.now()` magnitudes — the
+  // existing tests above use timestamps of at most a few thousand ms and
+  // cannot see it. This pins the original arithmetic against a large,
+  // deterministic sample of `Date.now()`-magnitude timestamps (a fixed
+  // seed, not `Date.now()` itself, so the test is reproducible), over
+  // periods that include 333 (where the two formulations diverge at a
+  // real rate) and 2000 (where, per the ADR, they happen not to).
+  it('agrees with its pre-refactor implementation over a large sample of Date.now()-magnitude timestamps', () => {
+    // The exact original body (see ADR 0006 §1 and the commit history),
+    // duplicated here rather than imported, so this test pins `frameAt`
+    // against an independent reference rather than restating its own
+    // implementation.
+    function referenceFrameAt(nowMs: number, period: number, frames: number): number {
+      const phase = ((nowMs % period) + period) % period;
+      return Math.floor((phase / period) * frames) % frames;
+    }
+
+    // The ADR's own worked example: frameAt(1352750077665.375, 333, 48)
+    // is 26 under the original body and 25 under a `frameForPhase`
+    // delegation.
+    expect(frameAt(1352750077665.375, 333, 48)).toBe(26);
+    expect(frameAt(1352750077665.375, 333, 48)).toBe(referenceFrameAt(1352750077665.375, 333, 48));
+
+    // A small deterministic PRNG (mulberry32) rather than Math.random(),
+    // so a failure is reproducible without recording the seed elsewhere.
+    function mulberry32(seed: number) {
+      let a = seed;
+      return () => {
+        a |= 0;
+        a = (a + 0x6d2b79f5) | 0;
+        let t = Math.imul(a ^ (a >>> 15), 1 | a);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+    const rand = mulberry32(0xd17ee7ed);
+
+    const periods = [333, 2000, 700, 1000, 4001];
+    const frameCounts = [48, 24, 60, 10];
+    let sampled = 0;
+    for (let i = 0; i < 500; i++) {
+      // Date.now()-magnitude: current era is ~1.7-1.8e12 ms.
+      const nowMs = 1_700_000_000_000 + rand() * 1e11;
+      const period = periods[i % periods.length]!;
+      const frames = frameCounts[i % frameCounts.length]!;
+      expect(frameAt(nowMs, period, frames)).toBe(referenceFrameAt(nowMs, period, frames));
+      sampled++;
+    }
+    expect(sampled).toBe(500);
+  });
 });
 
 function makeCells(n: number): Cell[] {
@@ -2441,12 +2495,30 @@ describe('createDithered playback controls', () => {
     expect(onFrame).not.toHaveBeenCalled();
   });
 
-  it('onFrame does not fire for a non-structural update, since nothing is repainted', () => {
+  // ADR 0006 test 45 / finding 4. `update({ period })` alone (the
+  // original version of this test) is non-structural, so `update()`
+  // never even reaches `renderer.ts`'s repaint branch — it passes
+  // whether or not the `if (f !== previousFrame)` guard exists at all,
+  // because nothing is painted either way. `update({ fg })` is the real
+  // case: it's structural, so `configure()` + `blit()` really do
+  // repaint (asserted below via `ctx.fill`), and the guard is what keeps
+  // `onFrame` silent when that repaint lands on the same frame index it
+  // started from.
+  it('onFrame does not fire for a repaint at the same frame index', () => {
     const onFrame = vi.fn();
-    const { canvas } = makeFakeCanvas();
+    const { canvas, ctx } = makeFakeCanvas();
     const instance = createDithered(canvas, baseOptions({ onFrame }));
     onFrame.mockClear();
+
+    // Non-structural: never reaches the repaint branch at all.
     instance.update({ period: 4000 });
+    expect(onFrame).not.toHaveBeenCalled();
+
+    // Structural, but the frame index doesn't move (nothing has ticked
+    // the clock): a real repaint happens, and onFrame must stay silent.
+    ctx.fill.mockClear();
+    instance.update({ fg: '#ff00ff' });
+    expect(ctx.fill).toHaveBeenCalled(); // confirms a repaint actually happened
     expect(onFrame).not.toHaveBeenCalled();
   });
 
@@ -2615,6 +2687,37 @@ describe('createDithered playback controls', () => {
     expect(() => instance.clearTime()).not.toThrow();
   });
 
+  // ADR 0006 test 44 / finding 1. The PRD's flagship use case:
+  // `time={scrollY / contentHeight}` is `NaN` on the first render,
+  // before layout. A non-finite `t` must not corrupt playback state —
+  // the displayed frame holds, neither callback fires, and a later
+  // finite `setTime` still works exactly as if the bad call never
+  // happened.
+  it('setTime(NaN) / setTime(Infinity) leave the displayed frame untouched and fire neither callback', () => {
+    const onFrame = vi.fn();
+    const onLoop = vi.fn();
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ onFrame, onLoop, frames: 10 }));
+
+    instance.setTime(0.35); // floor(3.5) = 3, the known-good baseline
+    onFrame.mockClear();
+    onLoop.mockClear();
+    ctx.clearRect.mockClear();
+
+    for (const bad of [NaN, Infinity, -Infinity]) {
+      instance.setTime(bad);
+      expect(onFrame).not.toHaveBeenCalled();
+      expect(onLoop).not.toHaveBeenCalled();
+      expect(ctx.clearRect).not.toHaveBeenCalled(); // nothing was repainted
+    }
+
+    // Still driveable afterwards: a subsequent finite `setTime` behaves
+    // normally, as if the non-finite calls above never happened.
+    instance.setTime(0.72); // floor(7.2) = 7
+    expect(onFrame).toHaveBeenCalledTimes(1);
+    expect(onFrame.mock.calls[0]![0]).toBe(7);
+  });
+
   it('clearTime re-applies `paused`: it does not resume playback while paused is true', () => {
     const { canvas } = makeFakeCanvas();
     const instance = createDithered(canvas, baseOptions({ paused: true }));
@@ -2760,5 +2863,36 @@ describe('createDithered playback controls', () => {
     // 0.133 = 0.516 -> frame 5, not 4.
     lastTick()(999_999 + 133);
     expect(lastFrame()).toBe(5);
+  });
+
+  // ADR 0006 test 51 / finding 9. Before ADR 0006, `update()`
+  // unconditionally called `halt()`; the structural/runtime split (§4)
+  // narrowed that to `isPaused || driven`, silently dropping the case
+  // where an update newly makes `reduced` true. `schedule()` at the call
+  // site after it is itself guarded against *scheduling a new* frame,
+  // but does nothing about a frame *already in flight* — so without also
+  // halting on `reduced`, the pending RAF runs one more time before the
+  // guard finally takes effect.
+  it('update() that newly forbids playback via reduced motion cancels the in-flight RAF', () => {
+    // matchMedia matches from the start, but `respectReducedMotion:
+    // false` means the instance ignores it and schedules normally.
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({ matches: true })),
+    );
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ respectReducedMotion: false }));
+    expect(env.rafCallbacks.length).toBe(1);
+
+    (cancelAnimationFrame as unknown as ReturnType<typeof vi.fn>).mockClear();
+    const rafCountBefore = env.rafCallbacks.length;
+
+    // Now `reduced` newly becomes true: `isPaused` and `driven` are both
+    // still false, so only a check against `reduced` itself can catch this.
+    instance.update({ respectReducedMotion: true });
+
+    expect(cancelAnimationFrame).toHaveBeenCalled();
+    // And nothing new was scheduled in its place.
+    expect(env.rafCallbacks.length).toBe(rafCountBefore);
   });
 });

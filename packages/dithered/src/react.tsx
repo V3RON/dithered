@@ -79,10 +79,12 @@ export interface DitheredProps extends Omit<
    * Pauses the internal clock. Applied in its own effect, separate from
    * every other prop — a scrub at 60 Hz never triggers a reconfigure
    * (resample / cache rebuild). Takes precedence over `progress` when
-   * both are set; clearing it back to `undefined` resumes the internal
-   * clock from wherever it was left, not from where it was interrupted.
+   * both are set; clearing it back to `undefined` *or* `null` resumes
+   * the internal clock from wherever it was left, not from where it was
+   * interrupted — `null` behaves exactly like an absent prop (useful for
+   * `time={someOptionalTime ?? null}`), it does not freeze playback.
    */
-  time?: number;
+  time?: number | null;
   /** Called after a frame is painted, with the frame index and loop phase in `[0, 1)`. */
   onFrame?: (frame: number, t: number) => void;
   /**
@@ -415,7 +417,9 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     }
     if (typeof progress === 'number') {
       instance.setPaused(true);
-      const frameCount = frames ?? 48;
+      // Reads `DEFAULTS.frames`, not a hard-coded `48` — this mapping
+      // must track the renderer's actual default, not duplicate it.
+      const frameCount = frames ?? DEFAULTS.frames;
       const clamped = Math.min(1, Math.max(0, progress));
       // The frame index is computed once, explicitly, and only then
       // turned into a phase that quantizes back to it exactly (ADR 0006
@@ -423,9 +427,12 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
       // equivalent but isn't: the product is quantized straight back by
       // `frameForPhase`, and the round trip loses a bit for most frame
       // counts (`progress: 1` at the default `frames: 48` lands on frame
-      // 46, not 47 — see finding 2).
-      const frame = Math.floor(clamped * (frameCount - 1));
-      instance.setTime(phaseForFrame(frame, frameCount));
+      // 46, not 47 — see finding 2). `frames: 0` is guarded explicitly:
+      // `phaseForFrame(0, 0)` is `Infinity`, which `setTime` would
+      // otherwise have to ignore via its own non-finite guard rather
+      // than never producing it in the first place.
+      const frame = frameCount > 0 ? Math.floor(clamped * (frameCount - 1)) : 0;
+      instance.setTime(frameCount > 0 ? phaseForFrame(frame, frameCount) : 0);
       return;
     }
     instance.clearTime();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { advancePhase, frameForPhase, loopsAt, phaseForFrame, wrapPhase } from './clock';
+import { advancePhase, frameForPhase, loopsAt, phaseForFrame, wrapFrame, wrapPhase } from './clock';
 
 describe('wrapPhase', () => {
   it('maps whole and half loop-unit values into [0, 1)', () => {
@@ -69,6 +69,31 @@ describe('frameForPhase', () => {
     expect(frameForPhase(0.5, 10)).toBe(5);
     expect(frameForPhase(0.99, 10)).toBe(9);
   });
+
+  // ADR 0006 test 43 / finding 1. `Math.min(frames - 1, NaN)` is `NaN`,
+  // so the top-edge clamp guards the float edge but not a non-finite
+  // input at all — without an explicit guard this reaches straight
+  // through to `pictures[NaN]` (`undefined`, on native) or a `drawImage`
+  // with non-finite args (a blank canvas, on web). `time={scrollY /
+  // contentHeight}` is `NaN` on the first render, before layout — the
+  // PRD's flagship use case.
+  it('is total: NaN, Infinity and -Infinity all return frame 0, never a non-integer or out-of-range index', () => {
+    for (const phase of [NaN, Infinity, -Infinity]) {
+      for (const frames of [1, 10, 48]) {
+        const f = frameForPhase(phase, frames);
+        expect(f).toBe(0);
+        expect(Number.isInteger(f)).toBe(true);
+      }
+    }
+  });
+
+  it('is total: frames <= 0 always returns frame 0, for any phase', () => {
+    for (const frames of [0, -1, -48]) {
+      for (const phase of [0, 0.5, -0.3, 1.7, NaN, Infinity]) {
+        expect(frameForPhase(phase, frames)).toBe(0);
+      }
+    }
+  });
 });
 
 describe('phaseForFrame', () => {
@@ -107,5 +132,31 @@ describe('loopsAt', () => {
     expect(loopsAt(-0.001)).toBe(-1);
     expect(loopsAt(-1)).toBe(-1);
     expect(loopsAt(-1.5)).toBe(-2);
+  });
+});
+
+describe('wrapFrame', () => {
+  it('is the identity for an already in-range frame', () => {
+    for (let k = 0; k < 10; k++) {
+      expect(wrapFrame(k, 10)).toBe(k);
+    }
+  });
+
+  // ADR 0006 §6 / finding 8: this is applied to `initialFrame` *before*
+  // it is converted to a phase by `phaseForFrame`, on both platforms, so
+  // an out-of-range `initialFrame` seeds the same `loopsAt` starting
+  // point (0) everywhere, rather than a bare `phaseForFrame(-1, frames)`
+  // seeding a phase below 0 (`loopsAt` starts at -1) on whichever
+  // platform forgets to wrap first.
+  it('wraps out-of-range frames into [0, frames)', () => {
+    expect(wrapFrame(-1, 48)).toBe(47);
+    expect(wrapFrame(48, 48)).toBe(0);
+    expect(wrapFrame(49, 48)).toBe(1);
+    expect(wrapFrame(-49, 48)).toBe(47);
+  });
+
+  it('rounds a non-integer frame before wrapping', () => {
+    expect(wrapFrame(2.6, 10)).toBe(3);
+    expect(wrapFrame(-0.6, 10)).toBe(9); // rounds to -1, then wraps
   });
 });
