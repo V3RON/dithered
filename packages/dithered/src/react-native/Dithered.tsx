@@ -9,11 +9,17 @@ import { useDitheredPictures } from './pictures';
 
 export interface DitheredProps extends Omit<
   DitheredOptions,
-  'shape' | 'brightness' | 'cache' | 'paused'
+  'shape' | 'brightness' | 'cache' | 'paused' | 'size'
 > {
   shape: Shape;
   /** Per-cell, per-frame brightness. Default `presets.gem()`. */
   brightness?: Brightness;
+  /**
+   * Height in dp; width follows the shape's aspect ratio. `'fill'` is a
+   * web-only concept — size the `<Canvas>` through `style` instead.
+   * Default 48.
+   */
+  size?: number;
   /** Freeze the animation on the current frame. Default false. */
   paused?: boolean;
   /**

@@ -272,6 +272,23 @@ Passing `'currentColor'` to `dithered/react-native` throws:
 dithered: 'currentColor' is not supported on native — pass an explicit color.
 ```
 
+## Responsive sizing
+
+Pass `size="fill"` to have the instance track its parent element instead of a fixed CSS-px height — useful for a hero or empty-state illustration that should fill its container:
+
+```tsx
+<div style={{ width: '100%', height: 240 }}>
+  <Dithered shape={shapes.rozenite} brightness={presets.gem()} size="fill" fg={ACCENT} />
+</div>
+```
+
+- The parent's **content box** is contain-fitted to the shape's aspect ratio: width still follows from height and the shape, exactly as with a numeric `size` — `'fill'` only changes where the height comes from. Give the parent an actual size (a fixed height, `flex: 1` in a sized flex column, `height: 100%` under a sized ancestor, ...); a parent that shrink-wraps its own content around the canvas has nothing to fit against.
+- Resizing is cheap: a resize only resamples cells if `shape`/`cols`/`rows` change (never for a plain resize), and the sprite-strip cache is only rebuilt once the size has moved by about one grid cell — smaller moves just rescale the existing sprite. A parent that collapses to zero size (`display: none`, a collapsed flex item, before layout) pauses the instance rather than erroring; it picks back up the moment the parent has real size again.
+- **Web only.** `size: 'fill'` needs a DOM parent to measure, so `dithered/native` narrows `size` to `number` at the type level and throws a clear error at runtime if it ever gets `'fill'` — size the Skia `<Canvas>` through its `style` prop instead.
+- Without a native `ResizeObserver` (very old browsers, or a bare non-browser environment), the instance takes one synchronous measurement on creation/update and does not track further resizes automatically; call `update({ size: 'fill' })` again to force a re-measure.
+
+`maxDpr` (default `3`) caps how high the backing store's resolution follows `devicePixelRatio` — the instance also re-checks `devicePixelRatio` itself, so dragging the window to a different-scale monitor or zooming the browser keeps the canvas crisp without any caller code, and `cache: 'auto'`'s `size <= 120` threshold is evaluated against the _resolved_ size, so a filled 400px hero correctly skips the sprite-strip cache while a filled 60px box still uses it.
+
 ## Determinate progress
 
 For a progress indicator rather than a loop, pass `progress` (`0`–`1`) to `Dithered`, or call `instance.setPaused(true)` + `instance.renderFrame(frame)` directly with the core API — both pause the animation and render exactly one frame:
@@ -335,7 +352,8 @@ Sampling which cells fall inside a shape needs a point-in-path test, and `Path2D
 
 ### Web
 
-- **Sprite-strip cache**: with `cache: 'auto'` (the default), instances at `size <= 120` pre-render every frame of the loop into an offscreen canvas once; steady-state playback then costs a single `drawImage` per frame instead of redrawing every cell.
+- **Sprite-strip cache**: with `cache: 'auto'` (the default), instances at `size <= 120` pre-render every frame of the loop into an offscreen canvas once; steady-state playback then costs a single `drawImage` per frame instead of redrawing every cell. The threshold is checked against the _resolved_ size, so `size="fill"` opts in or out correctly depending on how big it ends up.
+- **Responsive resizing** (`size="fill"`, and `devicePixelRatio` changes) never re-samples cells, and only rebuilds the sprite-strip cache once the backing-store size has moved by about one grid cell — see [Responsive sizing](#responsive-sizing).
 - **Pauses automatically** when the tab is hidden (`document.visibilitychange`) or the canvas scrolls out of the viewport (`IntersectionObserver`), and resumes when either condition clears.
 - **`prefers-reduced-motion`**: a single static frame is rendered and the animation loop never starts, unless `respectReducedMotion: false` is set.
 - Frame index is quantized to `frames` steps per `period`, and a repeated frame index is never redrawn.
@@ -354,23 +372,24 @@ Sampling which cells fall inside a shape needs a point-in-path test, and `Path2D
 
 | Option                 | Type                          | Default                   | Description                                                                              |
 | ---------------------- | ----------------------------- | ------------------------- | ---------------------------------------------------------------------------------------- |
-| `shape`                | `Shape`                       | —                         | Required. Silhouette to sample cells inside.                                             |
-| `brightness`           | `Brightness`                  | —                         | Required. Per-cell, per-frame brightness function.                                       |
-| `size`                 | `number`                      | `48`                      | Height in CSS px (web) or dp (native); width follows the shape's aspect ratio.           |
-| `cols`                 | `number`                      | `16`                      | Grid columns.                                                                            |
-| `rows`                 | `number`                      | derived from aspect ratio | Grid rows.                                                                               |
-| `matrix`               | `DitherMatrix`                | `'bayer4'`                | Ordered-dither threshold pattern — see [Dither matrices](#dither-matrices).              |
-| `frames`               | `number`                      | `48`                      | Frames per loop.                                                                         |
-| `period`               | `number`                      | `2000`                    | Loop duration, ms.                                                                       |
-| `fg`                   | `string \| readonly string[]` | `'#000'`                  | Fill color, or an ordered palette from darkest to brightest — see [Palettes](#palettes). |
-| `bg`                   | `string`                      | `'transparent'`           | Background fill, or `'transparent'`.                                                     |
-| `cache`                | `boolean \| 'auto'`           | `'auto'`                  | Web only. Pre-render the loop into a sprite strip. `'auto'` = on for `size <= 120`.      |
-| `paused`               | `boolean`                     | `false`                   | Freeze the animation.                                                                    |
-| `gap`                  | `number`                      | `0.09`                    | Gap between cells, as a fraction of cell size (min 0.6px).                               |
-| `radius`               | `number`                      | `0.14`                    | Corner radius, as a fraction of cell size.                                               |
-| `respectReducedMotion` | `boolean`                     | `true`                    | Render a single static frame under `prefers-reduced-motion`.                             |
-| `initialFrame`         | `number`                      | `0`                       | Frame drawn synchronously on create, so there is no blank flash.                         |
-| `hitTest`              | `HitTester`                   | `jsHitTester(shape)`      | Point-in-path test used to sample cells. See [Determinism](#determinism-jshittester).    |
+| `shape`                | `Shape`                       | —                         | Required. Silhouette to sample cells inside.                                                                                                                                      |
+| `brightness`           | `Brightness`                  | —                         | Required. Per-cell, per-frame brightness function.                                                                                                                                |
+| `size`                 | `number \| 'fill'`            | `48`                      | Height in CSS px (web) or dp (native); width follows the shape's aspect ratio. `'fill'` tracks the parent's content box — web only, see [Responsive sizing](#responsive-sizing). |
+| `maxDpr`               | `number`                      | `3`                       | Web only. Upper bound on the backing-store device pixel ratio.                                                                                                                    |
+| `cols`                 | `number`                      | `16`                      | Grid columns.                                                                                                                                                                     |
+| `rows`                 | `number`                      | derived from aspect ratio | Grid rows.                                                                                                                                                                        |
+| `matrix`               | `DitherMatrix`                | `'bayer4'`                | Ordered-dither threshold pattern — see [Dither matrices](#dither-matrices).                                                                                                       |
+| `frames`               | `number`                      | `48`                      | Frames per loop.                                                                                                                                                                  |
+| `period`               | `number`                      | `2000`                    | Loop duration, ms.                                                                                                                                                                |
+| `fg`                   | `string \| readonly string[]` | `'#000'`                  | Fill color, or an ordered palette from darkest to brightest — see [Palettes](#palettes).                                                                                          |
+| `bg`                   | `string`                      | `'transparent'`           | Background fill, or `'transparent'`.                                                                                                                                              |
+| `cache`                | `boolean \| 'auto'`           | `'auto'`                  | Web only. Pre-render the loop into a sprite strip. `'auto'` = on for `size <= 120`.                                                                                               |
+| `paused`               | `boolean`                     | `false`                   | Freeze the animation.                                                                                                                                                             |
+| `gap`                  | `number`                      | `0.09`                    | Gap between cells, as a fraction of cell size (min 0.6px).                                                                                                                        |
+| `radius`               | `number`                      | `0.14`                    | Corner radius, as a fraction of cell size.                                                                                                                                        |
+| `respectReducedMotion` | `boolean`                     | `true`                    | Render a single static frame under `prefers-reduced-motion`.                                                                                                                      |
+| `initialFrame`         | `number`                      | `0`                       | Frame drawn synchronously on create, so there is no blank flash.                                                                                                                  |
+| `hitTest`              | `HitTester`                   | `jsHitTester(shape)`      | Point-in-path test used to sample cells. See [Determinism](#determinism-jshittester).                                                                                             |
 
 ### `DitheredInstance`
 

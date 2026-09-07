@@ -269,6 +269,70 @@ function Gallery({ onSelect }: GalleryProps) {
 }
 
 // ---------------------------------------------------------------------------
+// Fill the box: a resizable container demonstrating `size="fill"` — drag the
+// bottom-right corner and the shape re-fits to the new box on every resize.
+// ---------------------------------------------------------------------------
+
+const fillBoxStyle: CSSProperties = {
+  resize: 'both',
+  overflow: 'hidden',
+  minWidth: 120,
+  minHeight: 120,
+  width: 320,
+  height: 200,
+  maxWidth: '100%',
+  background: '#0f1219',
+  border: `1px dashed ${ACCENT}`,
+  borderRadius: 8,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  padding: 12,
+};
+
+function FillBox() {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [box, setBox] = useState<{ width: number; height: number } | null>(null);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      setBox({
+        width: Math.round(entry.contentRect.width),
+        height: Math.round(entry.contentRect.height),
+      });
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <section style={panel}>
+      <h2 style={sectionTitle}>Fill the box</h2>
+      <p style={sectionHint}>
+        <code>size=&quot;fill&quot;</code> tracks its parent instead of a fixed height. Drag the
+        dashed box's bottom-right corner — the shape re-fits on every resize, no code involved.
+      </p>
+      <div ref={containerRef} style={fillBoxStyle}>
+        <Dithered
+          shape={shapes.rozenite}
+          brightness={presets.gem()}
+          size="fill"
+          fg={ACCENT}
+          label="A resizable dithered shape filling its container"
+        />
+      </div>
+      <p style={{ ...sectionHint, margin: '10px 0 0' }}>
+        Measured box: {box ? `${box.width} × ${box.height}px` : '—'}
+      </p>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Playground: live preview + controls + paste-your-SVG + advanced options +
 // a code snippet that always matches whatever's currently configured
 // ---------------------------------------------------------------------------
@@ -882,6 +946,7 @@ function App() {
     >
       <Hero />
       <Gallery onSelect={applyExample} />
+      <FillBox />
       <Playground
         ref={playgroundRef}
         shapeKey={shapeKey}

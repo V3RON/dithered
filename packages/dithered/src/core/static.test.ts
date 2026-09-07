@@ -4,7 +4,7 @@ import { sampleCells } from '../shape';
 import { shapes } from '../shapes';
 import { make2dCtx, makeFakeCanvas, stubAnimationGlobals, stubGetContext } from '../test-utils';
 import { computeGeometry, paintFrame } from './paint';
-import { resolveOptions, resolveRows, surfaceSize } from './options';
+import { resolveOptions, resolveRows, resolveSizePx, surfaceSize } from './options';
 import { svgPaintContext } from './svg-paint';
 import { renderToDataURL, renderToSvg, type RenderToSvgOptions } from './static';
 
@@ -29,7 +29,8 @@ describe('renderToSvg', () => {
   it('emits a well-formed <svg> root with the expected viewBox/width/height', () => {
     const svg = renderToSvg(BASE);
     const root = parseSvg(svg);
-    const { width, height } = surfaceSize(resolveOptions(BASE));
+    const opts = resolveOptions(BASE);
+    const { width, height } = surfaceSize(resolveSizePx(opts.size), opts.shape);
 
     expect(root.tagName.toLowerCase()).toBe('svg');
     expect(root.getAttribute('viewBox')).toBe(`0 0 ${width} ${height}`);
@@ -39,7 +40,7 @@ describe('renderToSvg', () => {
 
   it('emits exactly one <rect> per drawn cell, matching paintFrame driven into a recording context directly', () => {
     const opts = resolveOptions(BASE);
-    const { width, height } = surfaceSize(opts);
+    const { width, height } = surfaceSize(resolveSizePx(opts.size), opts.shape);
     const cells = sampleCells(opts.shape, opts.cols, opts.hitTest, resolveRows(opts));
     const geometry = computeGeometry(opts, width, height);
     const expectedCtx = svgPaintContext();
@@ -66,7 +67,7 @@ describe('renderToSvg', () => {
 
   it('emits one full-surface background rect when bg is set', () => {
     const opts = resolveOptions({ ...BASE, bg: '#fff' });
-    const { width, height } = surfaceSize(opts);
+    const { width, height } = surfaceSize(resolveSizePx(opts.size), opts.shape);
     const svg = renderToSvg({ ...BASE, bg: '#fff' });
     const root = parseSvg(svg);
     const bgRect = Array.from(root.querySelectorAll('rect')).find(

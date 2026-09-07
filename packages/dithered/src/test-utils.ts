@@ -182,16 +182,190 @@ export function stubGetContext(ctx: unknown) {
   };
 }
 
+/**
+ * A real `<canvas>` inside a real `<div>` parent (both actual jsdom
+ * elements, not plain-object stand-ins), for the fill-mode/`ResizeObserver`
+ * tests that need `canvas.parentElement`, `getComputedStyle`, and
+ * `clientWidth`/`clientHeight` to behave like the DOM. Pair with
+ * `stubGetContext` for `getContext`, and `setClientBox` to control the
+ * parent's measured size.
+ */
+export function makeCanvasWithParent() {
+  const parent = document.createElement('div');
+  const canvas = document.createElement('canvas');
+  parent.appendChild(canvas);
+  return { parent, canvas };
+}
+
+/**
+ * Overrides `clientWidth`/`clientHeight` on a real DOM element — jsdom
+ * never lays anything out, so these otherwise always read `0`.
+ */
+export function setClientBox(el: Element, box: { width: number; height: number }): void {
+  Object.defineProperty(el, 'clientWidth', { value: box.width, configurable: true });
+  Object.defineProperty(el, 'clientHeight', { value: box.height, configurable: true });
+}
+
 export interface IntersectionObserverInstance {
   callback: IntersectionObserverCallback;
   observe: ReturnType<typeof vi.fn>;
   disconnect: ReturnType<typeof vi.fn>;
 }
 
+export interface ResizeObserverInstance {
+  callback: ResizeObserverCallback;
+  observedTargets: Element[];
+  observe: ReturnType<typeof vi.fn>;
+  unobserve: ReturnType<typeof vi.fn>;
+  disconnect: ReturnType<typeof vi.fn>;
+  /**
+   * Synchronously invokes the observer's callback with one entry for
+   * `target` (defaulting to the first/only observed element), built from
+   * `box`. Populates both `contentBoxSize` and `contentRect` so either
+   * read path in the code under test works.
+   */
+  trigger(box: { width: number; height: number }, target?: Element): void;
+}
+
+/** Stubs the global `ResizeObserver` constructor, recording every instance created. */
+export function stubResizeObserver() {
+  const instances: ResizeObserverInstance[] = [];
+
+  vi.stubGlobal(
+    'ResizeObserver',
+    vi.fn(function (this: unknown, callback: ResizeObserverCallback) {
+      const observedTargets: Element[] = [];
+      const instance: ResizeObserverInstance = {
+        callback,
+        observedTargets,
+        observe: vi.fn((el: Element) => {
+          if (!observedTargets.includes(el)) observedTargets.push(el);
+        }),
+        unobserve: vi.fn((el: Element) => {
+          const i = observedTargets.indexOf(el);
+          if (i >= 0) observedTargets.splice(i, 1);
+        }),
+        disconnect: vi.fn(() => {
+          observedTargets.length = 0;
+        }),
+        trigger(box, target) {
+          const el = target ?? observedTargets[0];
+          if (!el) return;
+          const entry = {
+            target: el,
+            contentRect: {
+              width: box.width,
+              height: box.height,
+              x: 0,
+              y: 0,
+              top: 0,
+              left: 0,
+              right: box.width,
+              bottom: box.height,
+            },
+            contentBoxSize: [{ inlineSize: box.width, blockSize: box.height }],
+            borderBoxSize: [{ inlineSize: box.width, blockSize: box.height }],
+            devicePixelContentBoxSize: [{ inlineSize: box.width, blockSize: box.height }],
+          } as unknown as ResizeObserverEntry;
+          callback([entry], instance as unknown as ResizeObserver);
+        },
+      };
+      instances.push(instance);
+      return instance;
+    }),
+  );
+
+  return { instances };
+}
+
+function parseResolutionDpr(query: string): number | null {
+  const match = /\(resolution:\s*([\d.]+)dppx\)/.exec(query);
+  return match ? parseFloat(match[1]) : null;
+}
+
+type ChangeListener = (ev: { matches: boolean; media: string }) => void;
+
+export interface MediaQueryListLike {
+  media: string;
+  matches: boolean;
+  listeners: Set<ChangeListener>;
+  addEventListener: ReturnType<typeof vi.fn>;
+  removeEventListener: ReturnType<typeof vi.fn>;
+  addListener: ReturnType<typeof vi.fn>;
+  removeListener: ReturnType<typeof vi.fn>;
+}
+
 /**
- * Stubs the browser globals `createDithered`'s animation loop depends on
+ * Stubs `window.matchMedia` with something closer to the real thing than a
+ * flat `{ matches: false }`: it tracks every `MediaQueryList` it hands
+ * out, resolves `(resolution: Ndppx)` queries against the *current*
+ * `devicePixelRatio`, and defaults every other query (notably
+ * `prefers-reduced-motion`) to `matches: false`, matching the previous
+ * stub's behaviour for existing tests. Supports both the modern
+ * `addEventListener`/`removeEventListener` and the legacy Safari < 14
+ * `addListener`/`removeListener` pair.
+ */
+export function stubMatchMedia() {
+  const lists: MediaQueryListLike[] = [];
+
+  const fn = vi.fn((query: string) => {
+    const dprInQuery = parseResolutionDpr(query);
+    const currentDpr =
+      typeof window !== 'undefined' && typeof window.devicePixelRatio === 'number'
+        ? window.devicePixelRatio
+        : 1;
+    const listeners = new Set<ChangeListener>();
+    const mql: MediaQueryListLike = {
+      media: query,
+      matches: dprInQuery !== null ? dprInQuery === currentDpr : false,
+      listeners,
+      addEventListener: vi.fn((type: string, cb: ChangeListener) => {
+        if (type === 'change') listeners.add(cb);
+      }),
+      removeEventListener: vi.fn((type: string, cb: ChangeListener) => {
+        if (type === 'change') listeners.delete(cb);
+      }),
+      addListener: vi.fn((cb: ChangeListener) => listeners.add(cb)),
+      removeListener: vi.fn((cb: ChangeListener) => listeners.delete(cb)),
+    };
+    lists.push(mql);
+    return mql as unknown as MediaQueryList;
+  });
+
+  vi.stubGlobal('matchMedia', fn);
+
+  return {
+    lists,
+    /**
+     * Simulates `devicePixelRatio` becoming `newDpr`: updates every
+     * tracked `(resolution: ...)` query's `.matches` and dispatches
+     * `change` to whichever of its listeners are still attached — exactly
+     * what the real browser does to a now-stale query.
+     */
+    changeDpr(newDpr: number) {
+      vi.stubGlobal('devicePixelRatio', newDpr);
+      // Snapshot the lists *before* dispatching: the code under test
+      // re-arms (creates a fresh MediaQueryList) from inside the 'change'
+      // listener itself, which would otherwise push new entries into
+      // `lists` while this loop is still iterating it live.
+      for (const mql of [...lists]) {
+        const dprInQuery = parseResolutionDpr(mql.media);
+        if (dprInQuery === null) continue;
+        mql.matches = dprInQuery === newDpr;
+        for (const cb of [...mql.listeners]) {
+          cb({ matches: mql.matches, media: mql.media });
+        }
+      }
+    },
+  };
+}
+
+/**
+ * Stubs the browser globals `createDithered`'s animation loop and
+ * responsive-sizing code depend on
  * (`requestAnimationFrame`/`cancelAnimationFrame`, `matchMedia`,
- * `IntersectionObserver`). Call `restore()` in `afterEach`.
+ * `IntersectionObserver`, `ResizeObserver`). Call `restore()` in
+ * `afterEach`.
  */
 export function stubAnimationGlobals() {
   const rafCallbacks: FrameRequestCallback[] = [];
@@ -206,10 +380,7 @@ export function stubAnimationGlobals() {
     }),
   );
   vi.stubGlobal('cancelAnimationFrame', vi.fn());
-  vi.stubGlobal(
-    'matchMedia',
-    vi.fn(() => ({ matches: false })),
-  );
+  const media = stubMatchMedia();
   vi.stubGlobal(
     'IntersectionObserver',
     vi.fn(function (this: unknown, callback: IntersectionObserverCallback) {
@@ -222,10 +393,14 @@ export function stubAnimationGlobals() {
       return instance;
     }),
   );
+  const resize = stubResizeObserver();
 
   return {
     rafCallbacks,
     ioInstances,
+    resizeObserverInstances: resize.instances,
+    mediaQueries: media.lists,
+    changeDpr: media.changeDpr,
     restore: () => vi.unstubAllGlobals(),
   };
 }

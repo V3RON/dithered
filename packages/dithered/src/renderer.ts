@@ -1,13 +1,17 @@
 import {
+  DEFAULTS,
   assignDefined,
   clonePaletteOption,
   computeGeometry,
+  effectiveDpr,
+  fitSize,
   frameAt,
   hasCurrentColor,
   paintFrame,
   resolveOptions,
   resolvePalette,
   resolveRows,
+  resolveSizePx,
   surfaceSize,
   toPalette,
   type DitheredOptions,
@@ -16,7 +20,7 @@ import {
   type Palette,
   type ResolvedOptions,
 } from './core';
-import { sampleCells, type Cell } from './shape';
+import { aspectOf, sampleCells, type Cell } from './shape';
 
 // Re-exported so `dithered`'s public surface (and the deep import
 // `dithered/dist/renderer`) keeps working now that these live in core/.
@@ -34,10 +38,10 @@ export interface DitheredInstance {
    * current computed text color, and — only if the resolved palette
    * actually changed — rebuilds the sprite cache and repaints the current
    * frame. A no-op otherwise, so calling this on every render (e.g. from a
-   * `style`-keyed effect) is cheap. `configure()` already does this on
-   * create and on every `update()`; call this directly for the case ADR
-   * 0005 §5 leaves out of scope — an ambient theme change with no other
-   * option change to trigger `update()`.
+   * `style`-keyed effect) is cheap. `create()`/`update()` already do this
+   * on create and on every `update()`; call this directly for the case
+   * ADR 0005 §5 leaves out of scope — an ambient theme change with no
+   * other option change to trigger `update()`.
    */
   refreshColors(): void;
   /** Stops the loop and releases all listeners/observers. */
@@ -47,6 +51,11 @@ export interface DitheredInstance {
 /** Wraps a frame index into `[0, count)`, matching `wrapFrame`'s semantics in `core/static.ts`. */
 function wrapFrame(frame: number, count: number): number {
   return ((Math.round(frame) % count) + count) % count;
+}
+
+interface MeasuredBox {
+  width: number;
+  height: number;
 }
 
 function prefersReducedMotion(opts: ResolvedOptions): boolean {
@@ -68,6 +77,12 @@ function prefersReducedMotion(opts: ResolvedOptions): boolean {
  * into a single `drawImage` per frame, and playback pauses when the tab
  * is hidden, the canvas leaves the viewport, or `prefers-reduced-motion`
  * is set — falling back to a single static frame in that last case.
+ *
+ * `size: 'fill'` tracks the canvas's parent content box (contain-fit to
+ * the shape's aspect ratio) via `ResizeObserver`, and the backing store
+ * follows `devicePixelRatio` (clamped to `maxDpr`) even when it changes
+ * after creation — see the responsive-sizing ADR (0011) for the full
+ * design.
  */
 export function createDithered(
   canvas: HTMLCanvasElement,
@@ -107,6 +122,26 @@ export function createDithered(
   let dpr = 1;
   let cells: Cell[] = [];
   let sheet: HTMLCanvasElement | null = null;
+  // Device-pixel dimensions the current `sheet` (or, absent one, the last
+  // exact paint) was built at. Compared against `W`/`H` to decide whether
+  // a fill-mode resize can cheaply rescale the existing sprite via
+  // `drawImage` or needs a full rebuild — see `resizeTo`.
+  let builtW = 0;
+  let builtH = 0;
+
+  // --- responsive-size state (web only; see ADR 0011) -------------------
+  // The resolved CSS-px height in effect right now: `opts.size` itself
+  // when numeric, or the fill-fitted value when `opts.size === 'fill'`.
+  let sizePx = 0;
+  let dormant = false;
+  let resizeObserver: ResizeObserver | null = null;
+  let previousDisplay: string | undefined;
+  let lastBox: MeasuredBox | null = null;
+  let warnedNoParent = false;
+
+  // --- DPR tracking ------------------------------------------------------
+  let mql: MediaQueryList | null = null;
+  let lastEffectiveDpr = 1;
 
   let raf = 0;
   let currentFrame = -1;
@@ -151,9 +186,193 @@ export function createDithered(
     return changed;
   }
 
-  /** Rebuilds the sprite-strip cache (or clears it) from the current `cells`/`paintOpts`. */
+  function isFillMode(): boolean {
+    return opts.size === 'fill';
+  }
+
+  function rawDpr(): number {
+    const d = typeof window !== 'undefined' ? window.devicePixelRatio : 1;
+    return typeof d === 'number' && Number.isFinite(d) && d > 0 ? d : 1;
+  }
+
+  function warnNoParent(): void {
+    if (warnedNoParent) return;
+    warnedNoParent = true;
+    if (typeof console !== 'undefined') {
+      console.warn(
+        "dithered: size: 'fill' has no parent element to measure yet; using the default " +
+          `size (${DEFAULTS.size}) until update() is called again on a mounted canvas.`,
+      );
+    }
+  }
+
+  /** The parent's content box (client box minus padding), synchronously. */
+  function measureParentBox(): MeasuredBox | null {
+    const parent = canvas.parentElement;
+    if (!parent) return null;
+    if (typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') {
+      return { width: parent.clientWidth, height: parent.clientHeight };
+    }
+    let paddingX = 0;
+    let paddingY = 0;
+    try {
+      const cs = window.getComputedStyle(parent);
+      paddingX =
+        (parseFloat(cs.paddingLeft || '0') || 0) + (parseFloat(cs.paddingRight || '0') || 0);
+      paddingY =
+        (parseFloat(cs.paddingTop || '0') || 0) + (parseFloat(cs.paddingBottom || '0') || 0);
+    } catch {
+      // getComputedStyle can throw in some non-browser test environments.
+    }
+    return {
+      width: parent.clientWidth - paddingX,
+      height: parent.clientHeight - paddingY,
+    };
+  }
+
+  /** Extracts a `{width, height}` box from a `ResizeObserverEntry`. */
+  function boxFromEntry(entry: ResizeObserverEntry): MeasuredBox {
+    const boxes = entry.contentBoxSize;
+    if (boxes) {
+      const box = Array.isArray(boxes) ? boxes[0] : boxes;
+      if (box) return { width: box.inlineSize, height: box.blockSize };
+    }
+    const rect = entry.contentRect;
+    return { width: rect.width, height: rect.height };
+  }
+
+  /**
+   * Idempotent: creates the observer once ('fill' -> 'fill' keeps the same
+   * instance) and (re-)observes the current parent every time it's called,
+   * so a canvas that had no parent yet at the last attempt recovers the
+   * moment `update()` runs again after it's mounted.
+   */
+  function attachFillObserver(): void {
+    if (!resizeObserver) {
+      previousDisplay = canvas.style.display;
+      canvas.style.display = 'block';
+      if (typeof ResizeObserver !== 'undefined') {
+        resizeObserver = new ResizeObserver((entries) => {
+          if (destroyed || !isFillMode()) return;
+          const entry = entries[entries.length - 1];
+          if (!entry) return;
+          applyMeasurement(boxFromEntry(entry));
+        });
+      }
+      // else: documented — no ResizeObserver means one sync measurement
+      // that stays put until the next update().
+    }
+    const parent = canvas.parentElement;
+    if (resizeObserver && parent) resizeObserver.observe(parent);
+  }
+
+  function detachFillObserver(): void {
+    if (resizeObserver) {
+      resizeObserver.disconnect();
+      resizeObserver = null;
+    }
+    canvas.style.display = previousDisplay ?? '';
+    previousDisplay = undefined;
+    dormant = false;
+    lastBox = null;
+  }
+
+  /** Synchronous fill-size resolution used by create() and update(). */
+  function resolveFillSizeSync(): void {
+    const box = measureParentBox();
+    if (!box) {
+      warnNoParent();
+      dormant = false;
+      if (!(sizePx > 0)) sizePx = resolveSizePx(DEFAULTS.size);
+      return;
+    }
+    warnedNoParent = false; // a parent showed up; warn again if it later disappears
+    lastBox = box;
+    const fitted = fitSize(box.width, box.height, aspectOf(opts.shape));
+    if (fitted <= 0) {
+      dormant = true;
+      return;
+    }
+    dormant = false;
+    sizePx = fitted;
+  }
+
+  /** Applied on every accepted `ResizeObserver` delivery in fill mode. */
+  function applyMeasurement(box: MeasuredBox): void {
+    if (destroyed) return;
+    lastBox = box;
+    const fitted = fitSize(box.width, box.height, aspectOf(opts.shape));
+
+    if (fitted <= 0) {
+      if (!dormant) {
+        dormant = true;
+        halt();
+        canvas.style.width = '0px';
+        canvas.style.height = '0px';
+      }
+      return;
+    }
+
+    const wakingFromDormant = dormant;
+    // Epsilon guard: sub-pixel measurements (including the parent
+    // re-measuring its own now-written size, i.e. the feedback loop) are
+    // dropped before touching the DOM at all.
+    if (!wakingFromDormant && Math.abs(fitted - sizePx) < 0.5) return;
+
+    dormant = false;
+    resizeTo(fitted);
+    schedule();
+  }
+
+  /**
+   * Applies a new fitted size: writes CSS + backing-store dimensions, then
+   * rebuilds the sprite cache only if the device-pixel width moved by at
+   * least one cell (`builtW / cols`) since the cache was last built —
+   * otherwise `blit()` cheaply rescales the existing strip.
+   */
+  function resizeTo(fitted: number): void {
+    sizePx = fitted;
+    applySurface();
+    const cellThreshold = builtW > 0 ? builtW / opts.cols : 0;
+    if (builtW === 0 || Math.abs(W - builtW) >= cellThreshold) {
+      buildCache();
+    }
+    blit(currentFrame >= 0 ? currentFrame % opts.frames : opts.initialFrame);
+  }
+
+  // --- the three configure stages (see ADR 0011) ------------------------
+
+  /**
+   * Depends only on `shape`/`cols`/`rows`/`hitTest`/`matrix` — never on
+   * resize or DPR. The only stage that can throw from a bad candidate
+   * option (an invalid custom `matrix`, via `resolveMatrix`), and it never
+   * touches the canvas or any other module state — see `update()`.
+   */
+  function resample(): void {
+    cells = sampleCells(opts.shape, opts.cols, opts.hitTest, resolveRows(opts), opts.matrix);
+  }
+
+  /** Depends on the resolved size, DPR and shape aspect. */
+  function applySurface(): void {
+    const newDpr = effectiveDpr(rawDpr(), opts.maxDpr);
+    lastEffectiveDpr = newDpr;
+    const css = surfaceSize(sizePx, opts.shape);
+    canvas.style.width = css.width + 'px';
+    canvas.style.height = css.height + 'px';
+    const device = surfaceSize(sizePx, opts.shape, newDpr);
+    W = canvas.width = Math.round(device.width);
+    H = canvas.height = Math.round(device.height);
+    // Kept in sync with `W`/`H` here so a later `buildCache()`/`blit()`
+    // (which read them via closure) always sees this same surface's
+    // values.
+    cssW = css.width;
+    cssH = css.height;
+    dpr = newDpr;
+  }
+
+  /** Depends on cells, W/H, brightness, frames, colors, gap and radius. */
   function buildCache(): void {
-    const useCache = opts.cache === 'auto' ? opts.size <= 120 : opts.cache;
+    const useCache = opts.cache === 'auto' ? sizePx <= 120 : opts.cache;
     if (useCache) {
       // `W / cssW`, not `dpr`: that is the factor the browser actually
       // stretches the backing store by when painting it into the CSS
@@ -186,46 +405,8 @@ export function createDithered(
     } else {
       sheet = null;
     }
-  }
-
-  function configure(): void {
-    const newDpr = Math.min((typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1, 3);
-    const css = surfaceSize(opts);
-    const newW = Math.round(css.width * newDpr);
-    const newH = Math.round(css.height * newDpr);
-
-    // Sample first, before touching the canvas or any module state: an
-    // invalid `matrix` (or any other bad option) throws here, and
-    // `update()` relies on nothing having changed yet when that happens.
-    // `applyResolvedFg()` is deliberately below this line, not above it —
-    // it writes `paintOpts` from `opts`, and `opts` may still be a
-    // rejected `update()` candidate at this point (see `update()` below);
-    // running it before the throw would poison `paintOpts` with that
-    // candidate and leave it poisoned even after `update()` rolls `opts`
-    // back, since only `opts` is restored on catch.
-    const newCells = sampleCells(
-      opts.shape,
-      opts.cols,
-      opts.hitTest,
-      resolveRows(opts),
-      opts.matrix,
-    );
-    applyResolvedFg();
-
-    canvas.style.width = css.width + 'px';
-    canvas.style.height = css.height + 'px';
-    W = canvas.width = newW;
-    H = canvas.height = newH;
-    // `cssW`/`cssH`/`dpr` — see the field comments above — kept in sync
-    // with `W`/`H` here so a later `buildCache()`/`blit()` (which read
-    // them via closure) always sees this same configure()'s values.
-    cssW = css.width;
-    cssH = css.height;
-    dpr = newDpr;
-    cells = newCells;
-
-    buildCache();
-
+    builtW = W;
+    builtH = H;
     currentFrame = -1;
   }
 
@@ -234,10 +415,11 @@ export function createDithered(
     ctx.setTransform(W / cssW, 0, 0, H / cssH, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
     if (sheet) {
-      // The strip's slots are `W` (device pixels) wide, so the blit
-      // itself runs under the identity transform in device units.
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.drawImage(sheet, frame * W, 0, W, H, 0, 0, W, H);
+      // Sourcing at the strip's *build* resolution and destination at the
+      // *current* W/H means an unchanged resolution is a plain 1:1 blit,
+      // and a cheap-path resize since the last rebuild is a rescale — one
+      // code path for both.
+      ctx.drawImage(sheet, frame * builtW, 0, builtW, builtH, 0, 0, W, H);
     } else {
       paintFrame(
         ctx,
@@ -251,7 +433,7 @@ export function createDithered(
   }
 
   function schedule(): void {
-    if (destroyed || isPaused || !visible || reduced) return;
+    if (destroyed || isPaused || !visible || reduced || dormant) return;
     if (typeof document !== 'undefined' && document.hidden) return;
     if (raf) return;
     raf = requestAnimationFrame(tick);
@@ -273,7 +455,24 @@ export function createDithered(
   // release: an invalid `matrix` (or any other bad option) throws here, and
   // if the listener/observer below were already registered the throw would
   // escape with no `destroy()` to clean them up.
-  configure();
+  resample();
+  applyResolvedFg();
+
+  if (isFillMode()) {
+    attachFillObserver();
+    resolveFillSizeSync();
+  } else {
+    sizePx = resolveSizePx(opts.size);
+  }
+
+  if (dormant) {
+    canvas.style.width = '0px';
+    canvas.style.height = '0px';
+  } else {
+    applySurface();
+    buildCache();
+    blit(opts.initialFrame);
+  }
 
   const io =
     typeof IntersectionObserver !== 'undefined'
@@ -294,7 +493,56 @@ export function createDithered(
     document.addEventListener('visibilitychange', onVisibility);
   }
 
-  blit(opts.initialFrame);
+  // --- DPR change tracking -----------------------------------------------
+  // `matchMedia('(resolution: Ndppx)')` re-armed on every change is the
+  // standard trick for observing devicePixelRatio, since there is no
+  // direct event for it. Armed on the *raw* ratio, never the `maxDpr`
+  // clamped one — clamping first would build an already-false query that
+  // never transitions.
+  function onDprChange(): void {
+    if (destroyed) return;
+    armDpr(); // the old query is now stale; re-arm unconditionally.
+    const eff = effectiveDpr(rawDpr(), opts.maxDpr);
+    if (eff === lastEffectiveDpr) return; // raw moved, but the clamp absorbed it
+    if (dormant) {
+      lastEffectiveDpr = eff;
+      return; // nothing to redraw at 0x0; the next wake reconfigures anyway
+    }
+    applySurface();
+    buildCache();
+    blit(currentFrame >= 0 ? currentFrame % opts.frames : opts.initialFrame);
+  }
+
+  function disarmDpr(): void {
+    if (!mql) return;
+    const current = mql;
+    if (typeof current.removeEventListener === 'function') {
+      current.removeEventListener('change', onDprChange);
+    } else {
+      const legacy = current as unknown as { removeListener?: (cb: () => void) => void };
+      legacy.removeListener?.(onDprChange);
+    }
+    mql = null;
+  }
+
+  function armDpr(): void {
+    disarmDpr();
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    try {
+      const next = window.matchMedia(`(resolution: ${rawDpr()}dppx)`);
+      if (typeof next.addEventListener === 'function') {
+        next.addEventListener('change', onDprChange);
+      } else {
+        const legacy = next as unknown as { addListener?: (cb: () => void) => void };
+        legacy.addListener?.(onDprChange);
+      }
+      mql = next;
+    } catch {
+      mql = null;
+    }
+  }
+
+  armDpr();
   schedule();
 
   return {
@@ -305,6 +553,14 @@ export function createDithered(
     },
 
     update(patch: Partial<DitheredOptions>) {
+      const prevShape = opts.shape;
+      const prevCols = opts.cols;
+      const prevRows = opts.rows;
+      const prevMatrix = opts.matrix;
+      const prevHitTest = opts.hitTest;
+      const wasFill = isFillMode();
+      const patchHasSize = 'size' in patch && patch.size !== undefined;
+
       // Merge onto the *current* resolved options (not the static
       // DEFAULTS), and skip undefined patch values, so an explicit
       // `undefined` (e.g. a React wrapper forwarding an unset prop)
@@ -317,20 +573,29 @@ export function createDithered(
         fg: clonePaletteOption(patch.fg),
       });
 
+      const shapeChanged = candidate.shape !== prevShape;
+      const doResample =
+        shapeChanged ||
+        candidate.cols !== prevCols ||
+        candidate.rows !== prevRows ||
+        candidate.matrix !== prevMatrix ||
+        candidate.hitTest !== prevHitTest;
+      const nowFill = candidate.size === 'fill';
+
       // Try the candidate before committing to anything: an invalid
       // `matrix` (or any other bad option) must leave this instance
       // exactly as it was — same `opts`, same canvas surface, same
       // sprite cache, same rendered frame, same animation state —
-      // rather than getting bricked mid-merge. `configure()` writes
-      // `canvas.style.width/height`, `canvas.width/height`, `W`, `H`,
-      // `cells` and `sheet`, and both it (building the sprite strip) and
-      // the `blit()` below (when the cache is off) call the caller's
-      // `brightness`, which can throw for reasons that have nothing to
-      // do with `matrix`. So every field this sequence can touch is
-      // snapshotted up front, and the `try` covers the whole
-      // reconfigure-and-repaint sequence — not just `configure()` — so a
-      // throw from either leaves nothing half-migrated to the rejected
-      // configuration once the snapshot is restored in the `catch`.
+      // rather than getting bricked mid-merge. `resample()` — the only
+      // step below that can throw from the candidate itself — runs
+      // first and before anything else mutates the canvas or module
+      // state, so every field this sequence can touch is snapshotted up
+      // front, and the `try` covers the whole reconfigure-and-repaint
+      // sequence — not just `resample()` — so a throw from it, or from
+      // the caller's `brightness` (during `buildCache()`'s sprite-strip
+      // rebuild, or during `blit()` when the cache is off), leaves
+      // nothing half-migrated to the rejected configuration once the
+      // snapshot is restored in the `catch`.
       const previous = opts;
       const prevStyleWidth = canvas.style.width;
       const prevStyleHeight = canvas.style.height;
@@ -343,24 +608,64 @@ export function createDithered(
       const prevDpr = dpr;
       const prevCells = cells;
       const prevSheet = sheet;
+      const prevBuiltW = builtW;
+      const prevBuiltH = builtH;
       const prevCurrentFrame = currentFrame;
       const prevReduced = reduced;
       const prevIsPaused = isPaused;
+      const prevSizePx = sizePx;
+      const prevDormant = dormant;
       const wasScheduled = raf !== 0;
 
       opts = candidate;
       // Set only once `halt()` below has actually run, so the `catch` can
-      // tell "configure() itself threw, the loop was never touched" (no
-      // schedule() to restore) apart from "blit() threw after halt()
-      // already cancelled the frame" (schedule() must restore it).
+      // tell "resample()/applySurface()/buildCache() itself threw, the
+      // loop was never touched" (no schedule() to restore) apart from
+      // "blit() threw after halt() already cancelled the frame"
+      // (schedule() must restore it).
       let haltedForRepaint = false;
       try {
-        configure();
+        if (doResample) resample();
+        applyResolvedFg();
+
+        if (nowFill) {
+          // Idempotent — also recovers a canvas that had no parent to
+          // observe yet at the last attempt.
+          attachFillObserver();
+        }
+
+        if (nowFill && !wasFill) {
+          resolveFillSizeSync();
+        } else if (!nowFill && wasFill) {
+          detachFillObserver();
+          sizePx = resolveSizePx(opts.size);
+        } else if (nowFill && wasFill) {
+          // 'fill' -> 'fill': re-measure only when asked to (an explicit
+          // `size: 'fill'` patch) or when the aspect ratio changed; any
+          // other option change leaves the derived `sizePx` untouched.
+          if (patchHasSize || shapeChanged) {
+            resolveFillSizeSync();
+          }
+        } else {
+          sizePx = resolveSizePx(opts.size);
+        }
+
+        if (!dormant) {
+          applySurface();
+          buildCache();
+        }
+
         reduced = prefersReducedMotion(opts);
         isPaused = opts.paused;
         halt();
         haltedForRepaint = true;
-        blit(currentFrame >= 0 ? currentFrame % opts.frames : opts.initialFrame);
+
+        if (dormant) {
+          canvas.style.width = '0px';
+          canvas.style.height = '0px';
+        } else {
+          blit(currentFrame >= 0 ? currentFrame % opts.frames : opts.initialFrame);
+        }
         schedule();
       } catch (err) {
         opts = previous;
@@ -375,9 +680,13 @@ export function createDithered(
         dpr = prevDpr;
         cells = prevCells;
         sheet = prevSheet;
+        builtW = prevBuiltW;
+        builtH = prevBuiltH;
         currentFrame = prevCurrentFrame;
         reduced = prevReduced;
         isPaused = prevIsPaused;
+        sizePx = prevSizePx;
+        dormant = prevDormant;
         if (haltedForRepaint && wasScheduled) schedule();
         throw err;
       }
@@ -400,6 +709,11 @@ export function createDithered(
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', onVisibility);
       }
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+        resizeObserver = null;
+      }
+      disarmDpr();
     },
   };
 }
