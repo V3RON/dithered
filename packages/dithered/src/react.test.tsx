@@ -22,6 +22,16 @@ function lastInstance(): DitheredInstance {
   return results[results.length - 1]!.value as DitheredInstance;
 }
 
+// A stable reference, reused across the `currentColor` tests below, so
+// that rerendering with an unrelated prop change (or no prop change at
+// all) doesn't itself hand `brightness` a fresh identity — which would
+// fire the separate reconfigure effect (`update()` -> `configure()` ->
+// repaint) and mask whatever the refresh-effect-under-test does or
+// doesn't do on its own.
+function alwaysDraw() {
+  return true;
+}
+
 describe('Dithered', () => {
   let env: ReturnType<typeof stubAnimationGlobals>;
   let ctx: ReturnType<typeof make2dCtx>;
@@ -79,6 +89,30 @@ describe('Dithered', () => {
     expect(mockedCreateDithered).toHaveBeenCalledTimes(1);
   });
 
+  // `useStablePalette` exists so an inline palette literal (a fresh array
+  // every render for an unmemoized caller — the common case, since nobody
+  // wraps `fg={[...]}` in `useMemo`) doesn't itself trigger a reconfigure.
+  // Without it, `<Dithered fg={['#a00', '#0a0']} />` would resample cells
+  // and rebuild the sprite cache on every render of the parent, palette
+  // value unchanged or not.
+  it('re-rendering with an equal-by-value but new fg array does not call update()', () => {
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} fg={['#a00', '#0a0']} />);
+    const updateSpy = vi.spyOn(lastInstance(), 'update');
+
+    rerender(<Dithered shape={SQUARE_SHAPE} fg={['#a00', '#0a0']} />); // a fresh array, same values
+
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  it('re-rendering with a palette that actually changes value calls update()', () => {
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} fg={['#a00', '#0a0']} />);
+    const updateSpy = vi.spyOn(lastInstance(), 'update');
+
+    rerender(<Dithered shape={SQUARE_SHAPE} fg={['#a00', '#00f']} />);
+
+    expect(updateSpy).toHaveBeenCalled();
+  });
+
   it('toggling paused calls setPaused with the new value', () => {
     const { rerender } = render(<Dithered shape={SQUARE_SHAPE} paused={false} />);
     const setPausedSpy = vi.spyOn(lastInstance(), 'setPaused');
@@ -129,7 +163,7 @@ describe('Dithered', () => {
     render(
       <Dithered
         shape={SQUARE_SHAPE}
-        brightness={() => true}
+        brightness={alwaysDraw}
         fg="currentColor"
         style={{ color: 'rgb(1, 2, 3)' }}
       />,
@@ -140,11 +174,11 @@ describe('Dithered', () => {
     expect(ctx.fillStyle).not.toBe('currentColor');
   });
 
-  it('re-resolves currentColor when style changes (className/style-keyed effect)', () => {
+  it('re-resolves currentColor on rerender via refreshColors, not via a reconfigure', () => {
     const { rerender } = render(
       <Dithered
         shape={SQUARE_SHAPE}
-        brightness={() => true}
+        brightness={alwaysDraw}
         fg="currentColor"
         style={{ color: 'rgb(1, 2, 3)' }}
       />,
@@ -153,20 +187,66 @@ describe('Dithered', () => {
     const firstColor = getComputedStyle(canvas).color;
     expect(ctx.fillStyle).toBe(firstColor);
 
-    const refreshSpy = vi.spyOn(lastInstance(), 'refreshColors');
+    const instance = lastInstance();
+    const refreshSpy = vi.spyOn(instance, 'refreshColors');
+    const updateSpy = vi.spyOn(instance, 'update');
+
     rerender(
       <Dithered
         shape={SQUARE_SHAPE}
-        brightness={() => true}
+        brightness={alwaysDraw}
         fg="currentColor"
         style={{ color: 'rgb(4, 5, 6)' }}
       />,
     );
 
+    // `brightness` is the same stable reference on both renders, and so is
+    // every other prop the reconfigure effect depends on — so `update()`
+    // must not have fired for this rerender. If it had (as it would with
+    // an inline `() => true` brightness, a fresh identity every render),
+    // it would repaint in the new color as a side effect and this test
+    // would pass without `refreshColors` doing anything at all.
+    expect(updateSpy).not.toHaveBeenCalled();
     expect(refreshSpy).toHaveBeenCalled();
+
     const secondColor = getComputedStyle(canvas).color;
     expect(secondColor).not.toBe(firstColor);
     expect(ctx.fillStyle).toBe(secondColor);
+  });
+
+  it('re-resolves currentColor on a re-render caused only by an ancestor class change (Finding 1 repro)', () => {
+    // A real stylesheet with class selectors, exercising jsdom's actual
+    // CSS cascade rather than an inline `style` prop on the canvas
+    // itself — this is the theming mechanism the finding calls out as
+    // "the overwhelmingly common" one, and it changes none of
+    // `<Dithered>`'s own props (`className`, `style`, `fg`).
+    const sheet = document.createElement('style');
+    sheet.textContent = '.light { color: rgb(1, 1, 1); } .dark { color: rgb(9, 9, 9); }';
+    document.head.appendChild(sheet);
+
+    function App({ theme }: { theme: 'light' | 'dark' }) {
+      return (
+        <div className={theme}>
+          <Dithered shape={SQUARE_SHAPE} brightness={alwaysDraw} fg="currentColor" />
+        </div>
+      );
+    }
+
+    const { rerender } = render(<App theme="light" />);
+    const canvas = document.querySelector('canvas')!;
+    const firstColor = getComputedStyle(canvas).color;
+    expect(ctx.fillStyle).toBe(firstColor);
+
+    rerender(<App theme="dark" />);
+
+    const secondColor = getComputedStyle(canvas).color;
+    expect(secondColor).not.toBe(firstColor);
+    // The bug this guards against: keying the refresh effect on
+    // `[className, style, fg]` (all unchanged here — only an ancestor's
+    // class changed) would leave this stuck at `firstColor` forever.
+    expect(ctx.fillStyle).toBe(secondColor);
+
+    sheet.remove();
   });
 
   it('does not call refreshColors when fg has no currentColor token', () => {
@@ -178,5 +258,45 @@ describe('Dithered', () => {
     rerender(<Dithered shape={SQUARE_SHAPE} brightness={() => true} fg="#111111" className="x" />);
 
     expect(refreshSpy).not.toHaveBeenCalled();
+  });
+
+  it('instanceRef is populated with the DitheredInstance on mount and cleared on unmount', () => {
+    const instanceRef = createRef<DitheredInstance | null>();
+    const { unmount } = render(<Dithered shape={SQUARE_SHAPE} instanceRef={instanceRef} />);
+
+    expect(instanceRef.current).toBe(lastInstance());
+    expect(instanceRef.current).not.toBeNull();
+
+    unmount();
+    expect(instanceRef.current).toBeNull();
+  });
+
+  it('instanceRef exposes refreshColors as a usable escape hatch for currentColor', () => {
+    const instanceRef = createRef<DitheredInstance | null>();
+    render(
+      <Dithered
+        shape={SQUARE_SHAPE}
+        brightness={alwaysDraw}
+        fg="currentColor"
+        style={{ color: 'rgb(1, 2, 3)' }}
+        instanceRef={instanceRef}
+      />,
+    );
+    const canvas = document.querySelector('canvas')!;
+    canvas.style.color = 'rgb(4, 5, 6)';
+    const expected = getComputedStyle(canvas).color;
+
+    instanceRef.current?.refreshColors();
+
+    expect(ctx.fillStyle).toBe(expected);
+  });
+
+  it('the regular ref still forwards the canvas element when instanceRef is also passed', () => {
+    const ref = createRef<HTMLCanvasElement>();
+    const instanceRef = createRef<DitheredInstance | null>();
+    render(<Dithered ref={ref} shape={SQUARE_SHAPE} instanceRef={instanceRef} />);
+
+    expect(ref.current).toBeInstanceOf(HTMLCanvasElement);
+    expect(instanceRef.current).not.toBeInstanceOf(HTMLCanvasElement);
   });
 });

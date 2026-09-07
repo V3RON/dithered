@@ -227,7 +227,7 @@ const brightness = compose.blend(
 />
 ```
 
-**Quantization.** With a palette of `n` colors, a numeric brightness `b` dithers between two neighboring tones the same way single-color output dithers against `cell.threshold`, just spread across `n` bands instead of one: `b <= 0` (or `NaN`) skips the cell, `b >= 1` paints the brightest tone, and anything in between lands on the darker or brighter of its two neighboring tones depending on where it falls within its band relative to `cell.threshold`. A single color (a plain string, or a one-entry array) is exactly this rule at `n = 1`, so existing single-color output is unaffected — a string `fg` is not a special case of the palette code, it _is_ the palette code with `n = 1` (see `toneLevel` in `dithered`'s exports for the exact formula, and [ADR 0005](packages/dithered/docs/adrs/0005-multi-tone-palettes.md) for the proof). Boolean brightness keeps its usual meaning regardless of palette size: `true` paints the brightest tone, `false` skips the cell. The result depends on `brightness` actually spanning its full `0..1` range — a preset whose output is effectively binary will show fewer tones than the palette has, however many colors you give it.
+**Quantization.** With a palette of `n` colors, a numeric brightness `b` dithers between two neighboring tones the same way single-color output dithers against `cell.threshold`, just spread across `n` bands instead of one: `b <= 0` (or `NaN`) skips the cell, `b >= 1` paints the brightest tone, and anything in between lands on the darker or brighter of its two neighboring tones depending on where it falls within its band relative to `cell.threshold`. A single color (a plain string, or a one-entry array) produces exactly the same result as this rule does at `n = 1` — that's what makes existing single-color output unaffected — but the shipped code takes a separate, hand-written fast path for it (`fg: string`, and the one-entry-array case) rather than routing single colors through the general palette/`toneLevel` machinery: same predicate (`b > cell.threshold`) written out inline, so there's no per-cell palette lookup, bucketing, or allocation when there's only one color to paint (see `toneLevel` in `dithered`'s exports for the general formula, and [ADR 0005](packages/dithered/docs/adrs/0005-multi-tone-palettes.md) for the equivalence proof between the two). Boolean brightness keeps its usual meaning regardless of palette size: `true` paints the brightest tone, `false` skips the cell. The result depends on `brightness` actually spanning its full `0..1` range — a preset whose output is effectively binary will show fewer tones than the palette has, however many colors you give it.
 
 An empty palette (`fg: []`) has no sensible rendering and falls back to the default `'#000'` rather than throwing from inside the paint loop.
 
@@ -237,7 +237,24 @@ An empty palette (`fg: []`) has no sensible rendering and falls back to the defa
 <Dithered shape={shapes.circle} brightness={presets.pulse()} fg="currentColor" />
 ```
 
-This is **web only** (`dithered/react` and plain `createDithered`; there is no computed style to resolve on native). It re-resolves whenever `createDithered`'s `update()` runs, and `dithered/react`'s `<Dithered>` also re-resolves it whenever `className`/`style`/`fg` change — so a `style={{ color: ... }}` swap that re-themes the canvas picks up the new color automatically. For a plain `createDithered` instance, or an ambient theme change with no other prop update, call `instance.refreshColors()` yourself; it only repaints when the resolved color actually changed. Passing `'currentColor'` to `dithered/react-native` throws:
+This is **web only** (`dithered/react` and plain `createDithered`; there is no computed style to resolve on native). It re-resolves whenever `createDithered`'s `update()` runs, and whenever `dithered/react`'s `<Dithered>` re-renders at all — so a `style={{ color: ... }}` swap on `<Dithered>` itself, or a theme class toggled on an _ancestor_ element (the common case, and the reason this isn't limited to `className`/`style`/`fg` changing on `<Dithered>` directly), both pick up the new color automatically as long as they cause `<Dithered>` to re-render. `refreshColors()` no-ops when the resolved color hasn't actually changed, so this costs nothing when there's nothing to do.
+
+For a plain `createDithered` instance, or a theme change that doesn't cause `<Dithered>` to re-render at all (no state change reaches it), call `refreshColors()` yourself. From `dithered/react`, reach the instance with the `instanceRef` prop — an escape hatch alongside the regular `ref`, which keeps forwarding the canvas element unchanged:
+
+```tsx
+const instanceRef = useRef<DitheredInstance | null>(null);
+// ...
+<Dithered
+  shape={shapes.circle}
+  brightness={presets.pulse()}
+  fg="currentColor"
+  instanceRef={instanceRef}
+/>;
+// later, e.g. from a MutationObserver or an event that doesn't re-render this tree:
+instanceRef.current?.refreshColors();
+```
+
+Passing `'currentColor'` to `dithered/react-native` throws:
 
 ```
 dithered: 'currentColor' is not supported on native — pass an explicit color.
@@ -300,7 +317,7 @@ For a progress indicator rather than a loop, pass `progress` (`0`–`1`) to `Dit
 | `refreshColors()`                           | Re-resolve `'currentColor'` in `fg` and repaint if it changed. Web only — see [Palettes](#palettes). |
 | `destroy()`                                 | Stop the loop and release all listeners/observers.                                                   |
 
-`dithered/react`'s `Dithered` component accepts the same options as props (`shape`/`brightness` still required), plus `label` (accessible label, default `'Loading'`, `''` hides it from assistive tech), `className`, `style`, and `progress` — see [Determinate progress](#determinate-progress) and [React](#quick-start) above. `dithered/react-native`'s takes the same props with `style: StyleProp<ViewStyle>` in place of `className`/`style`, no `cache`, and an extra `cells` — see [React Native](#react-native) above.
+`dithered/react`'s `Dithered` component accepts the same options as props (`shape`/`brightness` still required), plus `label` (accessible label, default `'Loading'`, `''` hides it from assistive tech), `className`, `style`, `progress`, and `instanceRef` (a `Ref<DitheredInstance | null>`, populated on mount and cleared on unmount — an escape hatch onto the instance, e.g. for calling `refreshColors()`; the regular `ref` keeps forwarding the canvas element, unchanged) — see [Determinate progress](#determinate-progress) and [React](#quick-start) above. `dithered/react-native`'s takes the same props with `style: StyleProp<ViewStyle>` in place of `className`/`style`, no `cache`, and an extra `cells` — see [React Native](#react-native) above.
 
 ### Sampling
 

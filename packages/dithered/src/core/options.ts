@@ -95,8 +95,31 @@ export function assignDefined<T extends object>(base: T, patch: Partial<T>): T {
   return result;
 }
 
+/**
+ * Copies a caller-supplied `fg` array so it is never retained by
+ * reference. ADR 0005 §1 normalizes `fg` into a palette "once, at the
+ * edge" — this is that edge for a mutable `string[]`. Without it,
+ * `createDithered(canvas, { fg: callerArray, ... })` (or
+ * `instance.update({ fg: callerArray })`) followed by a later
+ * `callerArray[i] = ...` would silently change what gets painted on some
+ * future frame, with no `update()` call in sight — and whether that
+ * mutation is observed immediately, on the next reconfigure, or never
+ * would depend on whether the instance caches its sprite strip, which is
+ * exactly the kind of behavior-varies-by-unrelated-setting bug a public
+ * API shouldn't have. A `string` needs no copy: strings are immutable, so
+ * aliasing one is harmless.
+ */
+export function clonePaletteOption(
+  fg: string | string[] | undefined,
+): string | string[] | undefined {
+  return Array.isArray(fg) ? [...fg] : fg;
+}
+
 export function resolveOptions(options: DitheredOptions): ResolvedOptions {
-  return assignDefined(DEFAULTS as ResolvedOptions, options);
+  return assignDefined(DEFAULTS as ResolvedOptions, {
+    ...options,
+    fg: clonePaletteOption(options.fg),
+  });
 }
 
 /** The grid row count, deriving one from the shape's aspect ratio when unset. */

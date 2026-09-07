@@ -1,5 +1,6 @@
 import {
   assignDefined,
+  clonePaletteOption,
   computeGeometry,
   frameAt,
   hasCurrentColor,
@@ -244,8 +245,11 @@ export function createDithered(
       // Merge onto the *current* resolved options (not the static
       // DEFAULTS), and skip undefined patch values, so an explicit
       // `undefined` (e.g. a React wrapper forwarding an unset prop)
-      // leaves the current value in place instead of resetting it.
-      opts = assignDefined<ResolvedOptions>(opts, patch);
+      // leaves the current value in place instead of resetting it. A
+      // caller-supplied `fg` array is cloned first — same reasoning as
+      // `resolveOptions`, see `clonePaletteOption` — so this instance
+      // never aliases the caller's array.
+      opts = assignDefined<ResolvedOptions>(opts, { ...patch, fg: clonePaletteOption(patch.fg) });
       reduced = prefersReducedMotion(opts);
       isPaused = opts.paused;
       halt();

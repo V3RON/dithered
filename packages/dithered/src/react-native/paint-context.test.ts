@@ -234,4 +234,38 @@ describe('paintFrame through skiaPaintContext', () => {
     // re-created or mutated out from under the first draw.
     expect(paints[0]).toBe(paints[1]);
   });
+
+  // The test above uses boolean brightness, so every drawn cell lands on
+  // the same (brightest) tone — it can't tell a per-tone paint mix-up
+  // apart from a working implementation, since there's only one tone in
+  // play. This uses a numeric brightness ramp that puts three *different*
+  // tones in one frame, so each drawn rrect must carry its own tone's
+  // color and its own cached `SkPaint` — not, say, whatever paint was
+  // last assigned, or all three sharing one paint.
+  it('gives each of several tones in one frame its own paint and color', () => {
+    const { canvas, draws, paints } = fakeCanvas();
+    const cells: Cell[] = [
+      { i: 0, j: 0, u: -0.33, v: 0, threshold: 0.5 },
+      { i: 1, j: 0, u: 0, v: 0, threshold: 0.5 },
+      { i: 2, j: 0, u: 0.33, v: 0, threshold: 0.5 },
+    ];
+    // Same quantization table as `renderer.test.ts`'s multi-tone tests:
+    // b=0.4 -> level 1 ('#a00'), b=0.6 -> level 2 ('#0a0'), b=0.95 ->
+    // level 3 ('#00a') -- three distinct tones, one cell each.
+    const brightnessByCell = [0.4, 0.6, 0.95];
+    const opts = resolveOptions({
+      shape: SQUARE_SHAPE,
+      brightness: (cell) => brightnessByCell[cell.i],
+      cols: 3,
+      bg: 'transparent',
+      fg: ['#a00', '#0a0', '#00a'],
+    });
+
+    paintFrame(skiaPaintContext(canvas), cells, opts.brightness, 0, computeGeometry(opts, 30, 10));
+
+    expect(draws.map((d) => d.color)).toEqual(['color:#a00', 'color:#0a0', 'color:#00a']);
+    // Three distinct tones -> three distinct cached paints, each used for
+    // exactly the one draw of its own color.
+    expect(new Set(paints).size).toBe(3);
+  });
 });

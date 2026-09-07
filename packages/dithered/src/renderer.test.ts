@@ -216,6 +216,64 @@ describe('paintFrame: single-color call-sequence snapshot', () => {
 });
 
 // ---------------------------------------------------------------------------
+// paintFrame: numeric brightness straddling the threshold
+//
+// Both the `fg: string` fast path (paint.ts's first branch) and the
+// one-entry-array fast path (the `tones === 1` branch) hand-duplicate `b >
+// cell.threshold` rather than calling `toneLevel`. Nothing that only
+// exercises `toneLevel` directly (see palette.test.ts) or boolean
+// brightness (the call-sequence snapshot above, and the "always 1"/
+// "always 0" tests) pins that predicate down for either branch — this
+// does, for both, and asserts they agree with each other.
+// ---------------------------------------------------------------------------
+
+describe('paintFrame: numeric brightness straddling the threshold', () => {
+  const threshold = 0.5;
+  const cell: Cell = { i: 0, j: 0, u: 0, v: 0, threshold };
+  const EPS = 1e-9;
+
+  function drewCell(fg: string | string[], b: number): boolean {
+    const { ctx } = makeRecordingCtx();
+    paintFrame(ctx, [cell], () => b, 0, {
+      cellSize: 10,
+      gap: 1,
+      radius: 2,
+      fg,
+      bg: 'transparent',
+      width: 10,
+      height: 10,
+    });
+    return ctx.fill.mock.calls.length > 0;
+  }
+
+  const branches: Array<{ label: string; fg: string | string[] }> = [
+    { label: 'fg: string', fg: '#000' },
+    { label: 'fg: [one color]', fg: ['#000'] },
+  ];
+
+  for (const { label, fg } of branches) {
+    it(`${label}: does not draw when b === cell.threshold`, () => {
+      expect(drewCell(fg, threshold)).toBe(false);
+    });
+
+    it(`${label}: draws when b is just above cell.threshold`, () => {
+      expect(drewCell(fg, threshold + EPS)).toBe(true);
+    });
+
+    it(`${label}: does not draw when b is just below cell.threshold`, () => {
+      expect(drewCell(fg, threshold - EPS)).toBe(false);
+    });
+  }
+
+  it('the string and one-entry-array branches agree cell-for-cell across a brightness sweep', () => {
+    const sweep = [0, 0.1, 0.25, threshold - EPS, threshold, threshold + EPS, 0.75, 0.9, 1];
+    for (const b of sweep) {
+      expect(drewCell('#000', b)).toBe(drewCell(['#000'], b));
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // paintFrame: multi-tone palettes
 // ---------------------------------------------------------------------------
 
@@ -488,6 +546,50 @@ describe('createDithered', () => {
     expect(strip.cellColors).toEqual(uncached.cellColors);
     expect(strip.cellColors.every((c) => palette.includes(c as string))).toBe(true);
   });
+
+  // Finding 5: the palette must be copied at the edge (`resolveOptions`
+  // for create, `update()`'s patch merge for reconfigure), not aliased.
+  // Without that copy, a caller mutating the array they passed in would
+  // silently change what gets painted -- immediately for `cache: false`
+  // (the very next repaint reads the array's current contents), or on
+  // the next reconfigure for `cache: true` (the mutation only reaches a
+  // freshly rebuilt strip) -- with no `update({ fg: ... })` call naming
+  // the new color anywhere in sight.
+  it('does not observe a later mutation of the caller-supplied fg array (cache: false)', () => {
+    const palette = ['#a00', '#0a0'];
+    const rec = makeColorRecordingCtx();
+    const stub = stubGetContext(rec.ctx);
+    const canvas = document.createElement('canvas');
+
+    const instance = createDithered(canvas, baseOptions({ fg: palette, cache: false }));
+    rec.cellColors.length = 0; // discard the initial paint
+
+    palette[1] = '#ff00ff'; // mutate the array `createDithered` was given
+    instance.renderFrame(1); // any repaint, with no `update()` call
+
+    expect(rec.cellColors).not.toContain('#ff00ff');
+    expect(rec.cellColors).toContain('#0a0');
+
+    stub.restore();
+  });
+
+  it('does not observe a later mutation of the caller-supplied fg array (cache: true)', () => {
+    const palette = ['#a00', '#0a0'];
+    const rec = makeColorRecordingCtx();
+    const stub = stubGetContext(rec.ctx);
+    const canvas = document.createElement('canvas');
+
+    const instance = createDithered(canvas, baseOptions({ fg: palette, cache: true, frames: 1 }));
+
+    palette[1] = '#ff00ff'; // mutate the array `createDithered` was given
+    rec.cellColors.length = 0;
+    instance.update({}); // reconfigures (rebuilds the strip) without touching fg
+
+    expect(rec.cellColors).not.toContain('#ff00ff');
+    expect(rec.cellColors).toContain('#0a0');
+
+    stub.restore();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -560,6 +662,29 @@ describe('createDithered: currentColor', () => {
 
     expect(ctx.fillStyle).toBe(expected);
     expect(ctx.fill).toHaveBeenCalled();
+  });
+
+  // Every other `refreshColors` test in this file uses `cache: false`, so
+  // none of them exercise the cache-rebuild half of `refreshColors` — even
+  // though `cache: 'auto'` (on for `size <= 120`, the default) means most
+  // real instances *are* cached. With `cache: true`, `blit()` draws the
+  // sprite strip via `drawImage` rather than calling `paintFrame` on the
+  // main context directly, and `drawImage` never touches `fillStyle` — so
+  // the only way this test's final `fillStyle` can be the *new* resolved
+  // color is if `refreshColors()` actually rebuilds the strip (paints
+  // through the shared context, which is what sets `fillStyle`) before
+  // blitting it. Deleting that rebuild would leave `blit()` drawing the
+  // *stale* strip, and `fillStyle` would be left at whatever the very
+  // first (old-color) strip build set it to.
+  it('refreshColors() rebuilds the sprite cache when the resolved color changes (cache: true)', () => {
+    canvas.style.color = 'rgb(10, 20, 30)';
+    const instance = createDithered(canvas, baseOptions({ fg: 'currentColor', cache: true }));
+
+    canvas.style.color = 'rgb(70, 80, 90)';
+    const expected = getComputedStyle(canvas).color;
+    instance.refreshColors();
+
+    expect(ctx.fillStyle).toBe(expected);
   });
 
   it('resolves only the currentColor entry in a mixed palette', () => {

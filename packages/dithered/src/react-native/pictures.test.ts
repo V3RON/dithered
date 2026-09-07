@@ -1,5 +1,6 @@
 import { renderHook } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
+import type { Cell } from '../shape';
 
 interface FakeRect {
   x: number;
@@ -7,26 +8,70 @@ interface FakeRect {
   width: number;
   height: number;
 }
+interface FakeRRect {
+  rect: FakeRect;
+  rx: number;
+  ry: number;
+}
+interface FakePaint {
+  color: string;
+  antiAlias: boolean;
+  setAntiAlias(on: boolean): void;
+  setColor(color: string): void;
+}
+type Draw =
+  { op: 'rect'; rect: FakeRect; color: string } | { op: 'rrect'; rrect: FakeRRect; color: string };
 
-// `createPicture`'s draw callback is never invoked here — these tests are
-// about the currentColor guard and the memo's dependency shape, neither of
-// which touches actual drawing (that's `paint-context.test.ts`'s job), so
-// there is no need to mock a fake `SkCanvas` for it.
+// Unlike a minimal `createPicture` stub that just echoes back `bounds`,
+// this one actually **invokes the draw callback** against a fake
+// `SkCanvas` and records what got drawn, in the color it was drawn with.
+// That's what lets the "palette reaches drawing" describe block below
+// exercise the real `computeGeometry` -> `paintFrame` ->
+// `skiaPaintContext` chain end-to-end from `useDitheredPictures`, rather
+// than only checking the `currentColor` guard and the memo's dependency
+// shape (which don't need any of this and remain the only things the
+// other two describe blocks below care about).
 vi.mock('@shopify/react-native-skia', () => ({
   Skia: {
+    Paint: (): FakePaint => {
+      const paint: FakePaint = {
+        color: '',
+        antiAlias: false,
+        setAntiAlias(on) {
+          paint.antiAlias = on;
+        },
+        setColor(color) {
+          paint.color = color;
+        },
+      };
+      return paint;
+    },
+    Color: (color: string) => `color:${color}`,
     XYWHRect: (x: number, y: number, width: number, height: number): FakeRect => ({
       x,
       y,
       width,
       height,
     }),
+    RRectXY: (rect: FakeRect, rx: number, ry: number): FakeRRect => ({ rect, rx, ry }),
   },
-  createPicture: vi.fn((_draw: (canvas: unknown) => void, bounds: FakeRect) => ({ bounds })),
+  createPicture: vi.fn((draw: (canvas: unknown) => void, bounds: FakeRect) => {
+    const draws: Draw[] = [];
+    const canvas = {
+      drawRect: (rect: FakeRect, paint: FakePaint) =>
+        draws.push({ op: 'rect', rect, color: paint.color }),
+      drawRRect: (rrect: FakeRRect, paint: FakePaint) =>
+        draws.push({ op: 'rrect', rrect, color: paint.color }),
+    };
+    draw(canvas);
+    return { bounds, draws };
+  }),
 }));
 
 // Real hit-testing is `./hit-test.test.ts`'s job; these tests are about the
-// currentColor guard and the memo's dependency shape, so every sampled
-// point is accepted.
+// currentColor guard, the memo's dependency shape, and (below) that a
+// palette actually reaches drawing — none of which need real point-in-path
+// testing — so every sampled point is accepted.
 vi.mock('./hit-test', () => ({
   skiaHitTester: () => () => true,
 }));
@@ -99,5 +144,50 @@ describe('useDitheredPictures: memo stability', () => {
     rerender({ fg: ['#111', '#333'] });
 
     expect(result.current.pictures).not.toBe(first);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// useDitheredPictures: a palette reaches drawing, end-to-end
+//
+// The two describe blocks above never invoke `createPicture`'s draw
+// callback, so neither proves a palette actually flows from
+// `useDitheredPictures`'s options through `computeGeometry`/`paintFrame`
+// into what gets drawn (the PRD's "Skia pictures support palettes"
+// acceptance criterion). This does, through the real hook and the real
+// `computeGeometry` + `paintFrame` + `skiaPaintContext` chain — only
+// `createPicture` and the `Skia.*` primitives it and `skiaPaintContext`
+// call are faked, and the fake now records what was drawn.
+// ---------------------------------------------------------------------------
+
+describe('useDitheredPictures: palette reaches drawing end-to-end', () => {
+  it('paints multiple tones of a real palette through a recorded picture', () => {
+    // Pre-sampled cells (skipping the shape hit-test) with fixed
+    // thresholds, so the expected tone for each brightness value is
+    // unambiguous — same quantization table as
+    // `paint-context.test.ts`'s multi-tone test: b=0.4 -> level 1
+    // ('#a00'), b=0.6 -> level 2 ('#0a0'), b=1 -> level 3 ('#00a').
+    const cells: Cell[] = [
+      { i: 0, j: 0, u: -0.33, v: 0, threshold: 0.5 },
+      { i: 1, j: 0, u: 0, v: 0, threshold: 0.5 },
+      { i: 2, j: 0, u: 0.33, v: 0, threshold: 0.5 },
+    ];
+    const brightnessByCell = [0.4, 0.6, 1];
+
+    const { result } = renderHook(() =>
+      useDitheredPictures({
+        shape: SQUARE_SHAPE,
+        brightness: (cell) => brightnessByCell[cell.i],
+        cols: 3,
+        rows: 1,
+        frames: 1,
+        cells,
+        fg: ['#a00', '#0a0', '#00a'],
+        bg: 'transparent',
+      }),
+    );
+
+    const [picture] = result.current.pictures as unknown as { draws: Draw[] }[];
+    expect(picture.draws.map((d) => d.color)).toEqual(['color:#a00', 'color:#0a0', 'color:#00a']);
   });
 });
