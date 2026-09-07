@@ -15,6 +15,15 @@ export {
   toPalette,
   toneLevel,
 } from './core';
+export type { DitherMatrix, ResolvedMatrix } from './matrix';
+export {
+  BAYER_2,
+  BAYER_8,
+  BLUE_NOISE_16,
+  bayerMatrix,
+  resolveMatrix,
+  thresholdFor,
+} from './matrix';
 export type { DitheredInstance } from './renderer';
 export { createDithered } from './renderer';
 export { presets, gem, sweep, pulse, rain, wave, fill, gameOfLife } from './presets';

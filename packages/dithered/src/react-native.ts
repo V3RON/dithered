@@ -22,6 +22,15 @@ export {
   toPalette,
   toneLevel,
 } from './core';
+export type { DitherMatrix, ResolvedMatrix } from './matrix';
+export {
+  BAYER_2,
+  BAYER_8,
+  BLUE_NOISE_16,
+  bayerMatrix,
+  resolveMatrix,
+  thresholdFor,
+} from './matrix';
 export { presets, gem, sweep, pulse, rain, wave, fill, gameOfLife } from './presets';
 export type { MixAmount, CellPredicate } from './compose';
 export { compose, blend, mask, timeScale, reverse, offset, invert, clamp } from './compose';

@@ -2,7 +2,7 @@
 
 [Live demo →](https://v3ron.github.io/dithered/)
 
-`dithered` renders an animated ordered (Bayer) dither pattern masked to an SVG silhouette: it samples a coarse grid of cells inside a shape and, each frame, draws or skips a rounded square per cell by comparing a caller-supplied brightness value against a 4x4 Bayer threshold. The project started as a generalization of the Rozenite loading spinner into a standalone animated-shape primitive.
+`dithered` renders an animated ordered dither pattern masked to an SVG silhouette: it samples a coarse grid of cells inside a shape and, each frame, draws or skips a rounded square per cell by comparing a caller-supplied brightness value against a threshold from the configured dither matrix (a 4x4 Bayer threshold by default). The project started as a generalization of the Rozenite loading spinner into a standalone animated-shape primitive.
 
 The library is a platform-free core plus thin per-platform renderers, in three entry points:
 
@@ -56,7 +56,7 @@ function LoadingIndicator() {
 }
 ```
 
-The props are the web component's, minus the DOM-only ones: `className` and `style: CSSProperties` become `style: StyleProp<ViewStyle>`, `label` maps to `accessibilityLabel` rather than `role="status"`, `cache` is gone (see [Performance notes](#performance-notes)), and `cells` is new. Everything else — `shape`, `brightness`, `size`, `cols`, `rows`, `frames`, `period`, `fg`, `bg`, `gap`, `radius`, `paused`, `progress`, `initialFrame`, `respectReducedMotion` — behaves identically, so a shared component can spread the same props object at both.
+The props are the web component's, minus the DOM-only ones: `className` and `style: CSSProperties` become `style: StyleProp<ViewStyle>`, `label` maps to `accessibilityLabel` rather than `role="status"`, `cache` is gone (see [Performance notes](#performance-notes)), and `cells` is new. Everything else — `shape`, `brightness`, `size`, `cols`, `rows`, `matrix`, `frames`, `period`, `fg`, `bg`, `gap`, `radius`, `paused`, `progress`, `initialFrame`, `respectReducedMotion` — behaves identically, so a shared component can spread the same props object at both. (`matrix` is ignored when you also pass pre-sampled `cells` — see [Performance notes](#performance-notes).)
 
 To draw into a Skia canvas you already own, `dithered/react-native` also exports the pieces: `useDitheredPictures(options)` returns one `SkPicture` per frame plus the canvas size, and `skiaPaintContext(canvas)` adapts an `SkCanvas` to the `PaintContext` that `paintFrame` draws through.
 
@@ -283,19 +283,20 @@ For a progress indicator rather than a loop, pass `progress` (`0`–`1`) to `Dit
 - Recordings are in dp. Skia scales to the device pixel ratio itself and the output is vector, so there is nothing to re-record per device.
 - **Pauses automatically** when the app leaves the foreground (`AppState`). There is no `IntersectionObserver` equivalent, so a scrolled-away instance keeps playing — cheaply, on the UI thread.
 - **Reduced motion** comes from Reanimated's `useReducedMotion()`, honoured unless `respectReducedMotion: false` is set.
-- Pass `cells` (from `sampleCells`) to skip the shape hit-test at mount if you are creating many instances of the same shape and grid.
+- Pass `cells` (from `sampleCells`) to skip the shape hit-test at mount if you are creating many instances of the same shape and grid. `matrix` is ignored when `cells` is supplied — the thresholds are already baked into those cells, the same way `cols`/`rows` already behave alongside `cells`.
 
 ## API
 
 ### `DitheredOptions`
 
 | Option                 | Type                          | Default                   | Description                                                                              |
-| ---------------------- | ----------------------------- | ------------------------- | ---------------------------------------------------------------------------------------- |
+| ---------------------- | ----------------------------- | ------------------------- | ----------------------------------------------------------------------------------------- |
 | `shape`                | `Shape`                       | —                         | Required. Silhouette to sample cells inside.                                             |
 | `brightness`           | `Brightness`                  | —                         | Required. Per-cell, per-frame brightness function.                                       |
 | `size`                 | `number`                      | `48`                      | Height in CSS px (web) or dp (native); width follows the shape's aspect ratio.           |
 | `cols`                 | `number`                      | `16`                      | Grid columns.                                                                            |
 | `rows`                 | `number`                      | derived from aspect ratio | Grid rows.                                                                               |
+| `matrix`               | `DitherMatrix`                | `'bayer4'`                | Ordered-dither threshold pattern — see [Dither matrices](#dither-matrices).              |
 | `frames`               | `number`                      | `48`                      | Frames per loop.                                                                         |
 | `period`               | `number`                      | `2000`                    | Loop duration, ms.                                                                       |
 | `fg`                   | `string \| readonly string[]` | `'#000'`                  | Fill color, or an ordered palette from darkest to brightest — see [Palettes](#palettes). |
@@ -321,13 +322,46 @@ For a progress indicator rather than a loop, pass `progress` (`0`–`1`) to `Dit
 
 ### Sampling
 
-`sampleCells(shape, cols, hitTest, rows?)` returns the cells inside a shape. The point-in-path test is injected because no platform provides one portably: use `domHitTester(shape, ctx?)` from `dithered` (backed by `Path2D`) or `skiaHitTester(shape)` from `dithered/react-native` (backed by `SkPath.contains`).
+`sampleCells(shape, cols, hitTest, rows?, matrix?)` returns the cells inside a shape. The point-in-path test is injected because no platform provides one portably: use `domHitTester(shape, ctx?)` from `dithered` (backed by `Path2D`) or `skiaHitTester(shape)` from `dithered/react-native` (backed by `SkPath.contains`). `matrix` defaults to `'bayer4'` and picks the dither threshold pattern — see [Dither matrices](#dither-matrices).
 
 ```ts
 import { sampleCells, domHitTester, shapes } from 'dithered';
 
 const cells = sampleCells(shapes.heart, 16, domHitTester(shapes.heart));
 ```
+
+## Dither matrices
+
+Every cell's `threshold` comes from a tiled **dither matrix**, picked with the `matrix` option (default `'bayer4'`, the classic 4x4 ordered-dither table):
+
+```tsx
+<Dithered shape={shapes.heart} brightness={presets.pulse()} matrix="bayer8" />
+```
+
+| `matrix`      | What it is                                                                |
+| ------------- | ------------------------------------------------------------------------- |
+| `'bayer2'`    | 2x2 Bayer matrix. Very coarse; mostly useful as a building block.         |
+| `'bayer4'`    | 4x4 Bayer matrix. The default — matches every release before this option. |
+| `'bayer8'`    | 8x8 Bayer matrix, generated from `'bayer4'` by the same recurrence.       |
+| `'blueNoise'` | A precomputed 16x16 blue-noise table (void-and-cluster).                  |
+| a 2D array    | Your own threshold pattern — see below.                                   |
+
+At the default `cols = 16`, the 4x4 `'bayer4'` tile repeats four times across the grid and reads as fine grain. At `cols >= 32` it repeats often enough that the eye resolves the tile itself, and the output starts looking like a checkerboard rather than a dither. Reach for `'bayer8'` (repeats less often, still has Bayer's crisp geometric look) or `'blueNoise'` (no repeating axis-aligned structure at all, so it hides tiling best) once you turn `cols` up.
+
+### Custom matrices
+
+A custom matrix is any rectangular 2D array of numbers, tiled across the grid the same way the built-ins are. How its entries are read is decided once, from the whole array:
+
+- **Every entry an integer** → the array is read as **ranks**: entry `v` becomes threshold `(v + 0.5) / n`, where `n` is the array's entry count (width × height) — the same formula the library has always used for `BAYER_4`. Ranks don't need to be a permutation; ties and gaps are fine.
+- **Any entry non-integer** → every entry is read as a **threshold** directly, and must lie in `0..1`. No `+0.5` shift is applied — you've already said exactly where the threshold is.
+
+This means an all-integer matrix like `[[0, 1], [1, 0]]` is read as **ranks** (giving thresholds `0.125`/`0.375`), not as ready-made 0/1 thresholds — because the rule is "are these integers", not "do these look like a 0..1 range". Write `[[0.25, 0.75], [0.75, 0.25]]` (a non-integer array) if you want exactly those two thresholds.
+
+A ragged array (rows of different lengths), a non-finite entry, or a rank/threshold outside its valid range throws a clear `dithered: ` error naming the offending row or cell — validation happens once when the matrix is resolved, not per cell.
+
+As with `shape` and `brightness`, a custom `matrix` array is compared by identity in the React wrapper's reconfigure effect: hoist it to module scope (or memoize it) rather than passing a fresh array literal as a prop, or every render triggers a resample.
+
+`dithered`'s `bayer2`/`bayer4`/`bayer8`/`blueNoise` tables, plus `bayerMatrix(order)` (which generates any power-of-two Bayer matrix) and the lower-level `resolveMatrix`/`thresholdFor` helpers `sampleCells` is built on, are all exported if you want to build on them directly. The blue-noise table is generated offline by `packages/dithered/scripts/blue-noise.mjs` (`pnpm --filter dithered generate:blue-noise`) and committed as source — regenerate it only if you're changing the generator itself.
 
 ## Repository layout
 

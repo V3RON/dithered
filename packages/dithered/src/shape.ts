@@ -1,3 +1,10 @@
+import { resolveMatrix, thresholdFor, type DitherMatrix } from './matrix';
+
+// Re-exported so existing deep imports of `BAYER_4` from `shape.ts` keep
+// working now that the matrices live in `matrix.ts`.
+export { BAYER_4 } from './matrix';
+export type { DitherMatrix } from './matrix';
+
 /**
  * A silhouette shape: an SVG path `d` string plus the viewBox it was
  * authored in. Cells are sampled in viewBox units, then interpreted in
@@ -18,7 +25,7 @@ export interface Cell {
   u: number;
   /** Cell centre, normalized down the shape's height, -0.5..0.5. */
   v: number;
-  /** Bayer 4x4 ordered-dither threshold for this cell, in (0, 1). */
+  /** Ordered-dither threshold for this cell (see `matrix` in `DitheredOptions`), in (0, 1). */
   threshold: number;
 }
 
@@ -32,14 +39,6 @@ export interface Cell {
  * @see `domHitTester` in `dithered` and `skiaHitTester` in `dithered/react-native`.
  */
 export type HitTester = (x: number, y: number) => boolean;
-
-/** Classic 4x4 Bayer ordered-dither matrix. */
-export const BAYER_4: readonly (readonly number[])[] = [
-  [0, 8, 2, 10],
-  [12, 4, 14, 6],
-  [3, 11, 1, 9],
-  [15, 7, 13, 5],
-];
 
 /** Aspect ratio (width / height) of a shape's viewBox. */
 export function aspectOf(shape: Shape): number {
@@ -56,15 +55,19 @@ export function defaultRowsFor(shape: Shape, cols: number): number {
  * keeping only the cells whose centre `hitTest` accepts.
  *
  * `rows` defaults to a value that keeps cells roughly square given the
- * shape's aspect ratio.
+ * shape's aspect ratio. `matrix` picks the ordered-dither threshold
+ * pattern tiled across the grid (default `'bayer4'`) — resolved once up
+ * front, so an invalid custom matrix throws here rather than per cell.
  */
 export function sampleCells(
   shape: Shape,
   cols: number,
   hitTest: HitTester,
   rows: number = defaultRowsFor(shape, cols),
+  matrix: DitherMatrix = 'bayer4',
 ): Cell[] {
   const { x, y, width, height } = shape.viewBox;
+  const resolved = resolveMatrix(matrix);
 
   const cells: Cell[] = [];
   for (let j = 0; j < rows; j++) {
@@ -77,7 +80,7 @@ export function sampleCells(
           j,
           u: (i + 0.5) / cols - 0.5,
           v: (j + 0.5) / rows - 0.5,
-          threshold: (BAYER_4[j % 4][i % 4] + 0.5) / 16,
+          threshold: thresholdFor(resolved, i, j),
         });
       }
     }

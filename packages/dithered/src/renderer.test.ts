@@ -617,6 +617,46 @@ describe('createDithered', () => {
 
     stub.restore();
   });
+
+  // Regression for the missing-dependency failure mode: `update({ matrix })`
+  // must actually resample, not just carry the new option through untouched.
+  it('update({ matrix: "bayer8" }) resamples: the same fixed brightness draws a different cell count', () => {
+    // cols=8 on a square shape makes rows=8 too, so the grid is 8x8 in
+    // both cases: bayer4 tiles 2x2, bayer8 matches it exactly. 0.53 sits
+    // between two bayer4 quantization levels and two different bayer8
+    // ones, so the two matrices draw a different number of cells.
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ cols: 8, brightness: () => 0.53 }));
+
+    ctx.fill.mockClear();
+    instance.renderFrame(0);
+    const bayer4Draws = ctx.fill.mock.calls.length;
+
+    instance.update({ matrix: 'bayer8' });
+    ctx.fill.mockClear();
+    instance.renderFrame(0);
+    const bayer8Draws = ctx.fill.mock.calls.length;
+
+    expect(bayer4Draws).toBeGreaterThan(0);
+    expect(bayer8Draws).not.toBe(bayer4Draws);
+  });
+
+  it('createDithered with an invalid matrix throws at create time, not at first frame', () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    expect(() =>
+      createDithered(
+        canvas,
+        baseOptions({
+          matrix: [
+            [0, 1, 2],
+            [1, 2],
+          ],
+        }),
+      ),
+    ).toThrow(/ragged/);
+    // Nothing should have been drawn — the throw happens before the first blit.
+    expect(ctx.fill).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -16,8 +16,10 @@ import { skiaPaintContext } from './paint-context';
 
 export interface DitheredPicturesOptions extends DitheredOptions {
   /**
-   * Pre-sampled cells, skipping the shape hit-test. Must match `cols` and
-   * `rows` — see `sampleCells`.
+   * Pre-sampled cells, skipping the shape hit-test. Must match `cols`,
+   * `rows` and `matrix` — see `sampleCells`. When `cells` is supplied,
+   * `matrix` is ignored: the thresholds are already baked into those
+   * cells, the same way `cols`/`rows` already behave alongside `cells`.
    */
   cells?: readonly Cell[];
 }
@@ -64,6 +66,7 @@ export function useDitheredPictures(options: DitheredPicturesOptions): DitheredP
     size,
     cols,
     rows,
+    matrix,
     frames,
     fg,
     bg,
@@ -90,6 +93,7 @@ export function useDitheredPictures(options: DitheredPicturesOptions): DitheredP
       size,
       cols,
       rows,
+      matrix,
       frames,
       fg,
       bg,
@@ -101,7 +105,7 @@ export function useDitheredPictures(options: DitheredPicturesOptions): DitheredP
 
     const cells =
       providedCells ??
-      sampleCells(opts.shape, opts.cols, skiaHitTester(opts.shape), resolveRows(opts));
+      sampleCells(opts.shape, opts.cols, skiaHitTester(opts.shape), resolveRows(opts), opts.matrix);
 
     const geometry = computeGeometry(opts, width, height);
     const bounds = Skia.XYWHRect(0, 0, width, height);
@@ -116,5 +120,5 @@ export function useDitheredPictures(options: DitheredPicturesOptions): DitheredP
     // none of them change what is drawn, only when. `fg` is also absent —
     // `fgKey` (its value, not its identity) is the real dependency.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shape, brightness, providedCells, size, cols, rows, frames, fgKey, bg, gap, radius]);
+  }, [shape, brightness, providedCells, size, cols, rows, matrix, frames, fgKey, bg, gap, radius]);
 }

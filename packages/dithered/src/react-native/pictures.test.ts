@@ -21,17 +21,43 @@ interface FakePaint {
   setColor(color: string): void;
 }
 type Draw =
-  { op: 'rect'; rect: FakeRect; color: string } | { op: 'rrect'; rrect: FakeRRect; color: string };
+  | { op: 'rect'; rect: FakeRect; color: string }
+  | { op: 'rrect'; rrect: FakeRRect; color: string };
 
-// Unlike a minimal `createPicture` stub that just echoes back `bounds`,
-// this one actually **invokes the draw callback** against a fake
-// `SkCanvas` and records what got drawn, in the color it was drawn with.
-// That's what lets the "palette reaches drawing" describe block below
-// exercise the real `computeGeometry` -> `paintFrame` ->
-// `skiaPaintContext` chain end-to-end from `useDitheredPictures`, rather
-// than only checking the `currentColor` guard and the memo's dependency
-// shape (which don't need any of this and remain the only things the
-// other two describe blocks below care about).
+interface FakePicture {
+  draw: (canvas: unknown) => void;
+  bounds: FakeRect;
+}
+
+function fakeCanvas() {
+  const draws: Draw[] = [];
+  const canvas = {
+    drawRect: vi.fn((rect: FakeRect, paint: FakePaint) =>
+      draws.push({ op: 'rect', rect, color: paint.color }),
+    ),
+    drawRRect: vi.fn((rrect: FakeRRect, paint: FakePaint) =>
+      draws.push({ op: 'rrect', rrect, color: paint.color }),
+    ),
+  };
+  return { canvas, draws };
+}
+
+/**
+ * Runs every recorded picture's draw callback and counts the lit cells.
+ * `pictures` is typed as `SkPicture[]` by `useDitheredPictures`, but the
+ * mocked `createPicture` below actually hands back the `FakePicture`
+ * shape — real in tests, opaque in production.
+ */
+function countDraws(pictures: readonly unknown[]): number {
+  let total = 0;
+  for (const picture of pictures as readonly FakePicture[]) {
+    const { canvas, draws } = fakeCanvas();
+    picture.draw(canvas);
+    total += draws.length;
+  }
+  return total;
+}
+
 vi.mock('@shopify/react-native-skia', () => ({
   Skia: {
     Paint: (): FakePaint => {
@@ -56,23 +82,17 @@ vi.mock('@shopify/react-native-skia', () => ({
     }),
     RRectXY: (rect: FakeRect, rx: number, ry: number): FakeRRect => ({ rect, rx, ry }),
   },
-  createPicture: vi.fn((draw: (canvas: unknown) => void, bounds: FakeRect) => {
-    const draws: Draw[] = [];
-    const canvas = {
-      drawRect: (rect: FakeRect, paint: FakePaint) =>
-        draws.push({ op: 'rect', rect, color: paint.color }),
-      drawRRect: (rrect: FakeRRect, paint: FakePaint) =>
-        draws.push({ op: 'rrect', rrect, color: paint.color }),
-    };
-    draw(canvas);
-    return { bounds, draws };
-  }),
+  // The real `createPicture` hands the draw callback a live `SkCanvas` and
+  // returns an opaque `SkPicture`. The stand-in below just keeps the
+  // callback around so a test can invoke it against a fake canvas later —
+  // which is what both `countDraws` and the palette test below do.
+  createPicture: vi.fn((draw: (canvas: unknown) => void, bounds: FakeRect) => ({ draw, bounds })),
 }));
 
 // Real hit-testing is `./hit-test.test.ts`'s job; these tests are about the
-// currentColor guard, the memo's dependency shape, and (below) that a
-// palette actually reaches drawing — none of which need real point-in-path
-// testing — so every sampled point is accepted.
+// currentColor guard, the memo's dependency shape, and that a palette or
+// matrix option actually reaches drawing — none of which need real
+// point-in-path testing — so every sampled point is accepted.
 vi.mock('./hit-test', () => ({
   skiaHitTester: () => () => true,
 }));
@@ -165,14 +185,14 @@ describe('useDitheredPictures: memo stability', () => {
 // ---------------------------------------------------------------------------
 // useDitheredPictures: a palette reaches drawing, end-to-end
 //
-// The two describe blocks above never invoke `createPicture`'s draw
+// The two describe blocks above never invoke a recorded picture's `draw`
 // callback, so neither proves a palette actually flows from
 // `useDitheredPictures`'s options through `computeGeometry`/`paintFrame`
 // into what gets drawn (the PRD's "Skia pictures support palettes"
 // acceptance criterion). This does, through the real hook and the real
 // `computeGeometry` + `paintFrame` + `skiaPaintContext` chain — only
 // `createPicture` and the `Skia.*` primitives it and `skiaPaintContext`
-// call are faked, and the fake now records what was drawn.
+// call are faked.
 // ---------------------------------------------------------------------------
 
 describe('useDitheredPictures: palette reaches drawing end-to-end', () => {
@@ -202,7 +222,75 @@ describe('useDitheredPictures: palette reaches drawing end-to-end', () => {
       }),
     );
 
-    const [picture] = result.current.pictures as unknown as { draws: Draw[] }[];
-    expect(picture.draws.map((d) => d.color)).toEqual(['color:#a00', 'color:#0a0', 'color:#00a']);
+    const [picture] = result.current.pictures as unknown as FakePicture[];
+    const { canvas, draws } = fakeCanvas();
+    picture.draw(canvas);
+    expect(draws.map((d) => d.color)).toEqual(['color:#a00', 'color:#0a0', 'color:#00a']);
+  });
+});
+
+describe('useDitheredPictures — matrix', () => {
+  it('passes matrix through to sampling: bayer8 clears a fixed brightness differently than the bayer4 default', () => {
+    // cols=8 on a square shape makes an 8x8 grid: bayer4 tiles 2x2, bayer8
+    // matches it exactly, so 0.53 (between quantization levels for both,
+    // but different ones) draws a different cell count under each.
+    const brightness = () => 0.53;
+
+    const { result: bayer4 } = renderHook(() =>
+      useDitheredPictures({ shape: SQUARE_SHAPE, brightness, cols: 8, frames: 1 }),
+    );
+    const { result: bayer8 } = renderHook(() =>
+      useDitheredPictures({
+        shape: SQUARE_SHAPE,
+        brightness,
+        cols: 8,
+        frames: 1,
+        matrix: 'bayer8',
+      }),
+    );
+
+    const bayer4Draws = countDraws(bayer4.current.pictures);
+    const bayer8Draws = countDraws(bayer8.current.pictures);
+
+    expect(bayer4Draws).toBeGreaterThan(0);
+    expect(bayer8Draws).not.toBe(bayer4Draws);
+  });
+
+  it('re-records (a new pictures array) when matrix changes, but not when it stays the same', () => {
+    const brightness = () => true;
+    const { result, rerender } = renderHook(
+      ({ matrix }: { matrix: 'bayer4' | 'bayer8' }) =>
+        useDitheredPictures({ shape: SQUARE_SHAPE, brightness, cols: 4, frames: 1, matrix }),
+      { initialProps: { matrix: 'bayer4' } },
+    );
+    const first = result.current.pictures;
+
+    rerender({ matrix: 'bayer4' });
+    expect(result.current.pictures).toBe(first);
+
+    rerender({ matrix: 'bayer8' });
+    expect(result.current.pictures).not.toBe(first);
+  });
+
+  it('an invalid matrix throws rather than silently sampling with the default', () => {
+    // React logs the error to console as well as re-throwing it (there's
+    // no error boundary in this render tree); silence that expected noise.
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(() =>
+        renderHook(() =>
+          useDitheredPictures({
+            shape: SQUARE_SHAPE,
+            brightness: () => true,
+            matrix: [
+              [0, 1, 2],
+              [1, 2],
+            ],
+          }),
+        ),
+      ).toThrow(/ragged/);
+    } finally {
+      consoleSpy.mockRestore();
+    }
   });
 });

@@ -170,7 +170,13 @@ export function createDithered(
     W = canvas.width = Math.round(device.width);
     H = canvas.height = Math.round(device.height);
 
-    cells = sampleCells(opts.shape, opts.cols, domHitTester(opts.shape, ctx), resolveRows(opts));
+    cells = sampleCells(
+      opts.shape,
+      opts.cols,
+      domHitTester(opts.shape, ctx),
+      resolveRows(opts),
+      opts.matrix,
+    );
 
     buildCache();
 

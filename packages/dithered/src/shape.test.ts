@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { BAYER_4, aspectOf, defaultRowsFor, sampleCells, type Shape } from './shape';
+import { BLUE_NOISE_16 } from './matrix';
+import { rozenite } from './shapes';
 
 const SQUARE: Shape = {
   path: 'M0 0 H10 V10 H0 Z',
@@ -121,5 +123,132 @@ describe('defaultRowsFor', () => {
   it('never returns fewer than one row', () => {
     const veryWide: Shape = { path: '', viewBox: { x: 0, y: 0, width: 1000, height: 1 } };
     expect(defaultRowsFor(veryWide, 4)).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sampleCells + matrix — the default-output guarantee
+// ---------------------------------------------------------------------------
+
+// A small corner of `rozenite`'s viewBox, so the snapshots below stay
+// readable while still exercising the real shape and its aspect ratio.
+const { x: rx, y: ry, width: rw, height: rh } = rozenite.viewBox;
+const corner = (px: number, py: number) => px < rx + rw / 6 && py < ry + rh / 6;
+
+describe('sampleCells default matrix (no regression)', () => {
+  it('at cols = 16 (the default), thresholds match the committed snapshot and the today-formula', () => {
+    const cells = sampleCells(rozenite, 16, corner);
+    expect(cells.map((c) => c.threshold)).toMatchInlineSnapshot(`
+      [
+        0.03125,
+        0.53125,
+        0.15625,
+        0.78125,
+        0.28125,
+        0.90625,
+        0.21875,
+        0.71875,
+        0.09375,
+        0.96875,
+        0.46875,
+        0.84375,
+      ]
+    `);
+    for (const c of cells) {
+      expect(c.threshold).toBeCloseTo((BAYER_4[c.j % 4][c.i % 4] + 0.5) / 16, 10);
+    }
+  });
+
+  it('at cols = 33, a size the 4x4 tile does not evenly divide, thresholds still match the today-formula', () => {
+    const cells = sampleCells(rozenite, 33, corner);
+    expect(cells.map((c) => c.threshold)).toMatchInlineSnapshot(`
+      [
+        0.03125,
+        0.53125,
+        0.15625,
+        0.65625,
+        0.03125,
+        0.78125,
+        0.28125,
+        0.90625,
+        0.40625,
+        0.78125,
+        0.21875,
+        0.71875,
+        0.09375,
+        0.59375,
+        0.21875,
+        0.96875,
+        0.46875,
+        0.84375,
+        0.34375,
+        0.96875,
+        0.03125,
+        0.53125,
+        0.15625,
+        0.65625,
+        0.03125,
+        0.78125,
+        0.28125,
+        0.90625,
+        0.40625,
+        0.78125,
+        0.21875,
+        0.71875,
+        0.09375,
+        0.59375,
+        0.21875,
+        0.96875,
+        0.46875,
+        0.84375,
+        0.34375,
+        0.96875,
+      ]
+    `);
+    for (const c of cells) {
+      expect(c.threshold).toBeCloseTo((BAYER_4[c.j % 4][c.i % 4] + 0.5) / 16, 10);
+    }
+  });
+});
+
+describe('sampleCells with a matrix argument', () => {
+  it("'bayer8' and blueNoise both produce thresholds in (0, 1), differing from the bayer4 default", () => {
+    const defaultCells = sampleCells(rozenite, 16, corner);
+    const bayer8Cells = sampleCells(rozenite, 16, corner, undefined, 'bayer8');
+    const blueNoiseCells = sampleCells(rozenite, 16, corner, undefined, BLUE_NOISE_16);
+
+    for (const cells of [bayer8Cells, blueNoiseCells]) {
+      expect(cells).toHaveLength(defaultCells.length);
+      for (const c of cells) {
+        expect(c.threshold).toBeGreaterThan(0);
+        expect(c.threshold).toBeLessThan(1);
+      }
+    }
+
+    expect(bayer8Cells.map((c) => c.threshold)).not.toEqual(defaultCells.map((c) => c.threshold));
+    expect(blueNoiseCells.map((c) => c.threshold)).not.toEqual(
+      defaultCells.map((c) => c.threshold),
+    );
+  });
+
+  it('tiles a custom matrix across the grid', () => {
+    const custom = [
+      [0, 1],
+      [2, 3],
+    ];
+    // Rank mode, entry count 4: threshold = (v + 0.5) / 4.
+    const expectedThresholds = custom.map((row) => row.map((v) => (v + 0.5) / 4));
+    const cells = sampleCells(SQUARE, 4, ACCEPT_ALL, 4, custom);
+    for (const c of cells) {
+      expect(c.threshold).toBe(expectedThresholds[c.j % 2][c.i % 2]);
+    }
+  });
+
+  it('throws for a ragged custom matrix', () => {
+    const ragged = [
+      [0, 1, 2],
+      [1, 2],
+    ];
+    expect(() => sampleCells(SQUARE, 4, ACCEPT_ALL, 4, ragged)).toThrow(/ragged/);
   });
 });

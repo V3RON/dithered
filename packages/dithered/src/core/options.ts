@@ -1,4 +1,5 @@
 import { aspectOf, defaultRowsFor, type Cell, type Shape } from '../shape';
+import type { DitherMatrix } from '../matrix';
 
 /**
  * Per-cell, per-frame brightness. `t` is the loop phase in `[0, 1)`.
@@ -18,6 +19,14 @@ export interface DitheredOptions {
   cols?: number;
   /** Grid rows. Defaults to a value derived from the shape's aspect ratio. */
   rows?: number;
+  /**
+   * Ordered-dither threshold pattern: `'bayer2'`, `'bayer4'`, `'bayer8'`,
+   * `'blueNoise'`, or a custom 2D array of numbers (see `DitherMatrix`).
+   * Reach for `'bayer8'` or `'blueNoise'` at high `cols`, where the 4x4
+   * Bayer tile repeats often enough to read as a checkerboard rather than
+   * grain. Default `'bayer4'`.
+   */
+  matrix?: DitherMatrix;
   /** Frames per loop. Default 48. */
   frames?: number;
   /** Loop duration in ms. Default 2000. */
@@ -68,6 +77,7 @@ export const DEFAULTS: Omit<ResolvedOptions, 'shape' | 'brightness'> & { fg: str
   size: 48,
   cols: 16,
   rows: 0, // 0 means "derive from aspect ratio" (see resolveRows)
+  matrix: 'bayer4',
   frames: 48,
   period: 2000,
   fg: '#000',
