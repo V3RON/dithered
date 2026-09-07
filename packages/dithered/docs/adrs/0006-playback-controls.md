@@ -79,6 +79,8 @@ function advancePhase(phase: number, dtMs: number, period: number, speed: number
 function frameForPhase(phase: number, frames: number): number;
 /** Signed cumulative loop count for a phase. */
 function loopsAt(phase: number): number;
+/** The phase that `frameForPhase` maps back to exactly this frame. */
+function phaseForFrame(frame: number, frames: number): number;
 ```
 
 `wrapPhase` is `((p % 1) + 1) % 1`, guarding negative input.
@@ -86,6 +88,19 @@ function loopsAt(phase: number): number;
 can return a value close enough to 1 that `p * frames` rounds up to
 `frames` in floating point, and an out-of-range index reads `undefined`
 out of the native picture array. `loopsAt` is `Math.floor(phase)`.
+
+`phaseForFrame` is `(frame + 0.5) / frames` — **the centre of the
+frame's phase band, not its leading edge** — and it exists because
+`frame / frames` does not survive the round trip. `frameForPhase(k / n, n)`
+returns `k - 1` whenever `k / n` rounds down in binary: at the default
+`frames = 48` that is 16 of the 48 valid indices (1, 4, 7, 10, …, 47).
+Anything that starts from a frame _index_ and needs a phase — seeding
+`initialFrame`, and mapping `progress` (§8) — must go through
+`phaseForFrame`, never through a bare division. The half-frame offset it
+introduces is invisible: it shifts a free-running loop's frame
+boundaries by half a frame against nothing the caller can observe, and
+`setTime` (the one API where an exact phase is meaningful) does not use
+it.
 
 **`frameAt(nowMs, period, frames)` is kept, unchanged and still
 exported.** It is public API on both entry points and is covered by
@@ -133,7 +148,9 @@ Semantics fixed here:
   emitted from the same place that decides to paint, so a frame that is
   skipped as a repeat cannot fire it. A forced repaint at the _same_
   index (what `update()` does after a reconfigure) is silent. The
-  initial paint at `initialFrame` does fire.
+  initial paint at `initialFrame` does fire — **on both platforms**;
+  native emits it from a mount effect, already on the JS thread, rather
+  than through `runOnJS`.
 - **`onFrame`'s `t` is `wrapPhase(phase)`**, not `frame / frames` — the
   caller gets the true sub-frame phase, which is what a scroll- or
   gesture-driven consumer wants. It is in `[0, 1)`.
@@ -268,11 +285,26 @@ painted, whether the phase came from the accumulator, a number, or a
 shared value.
 
 The frame callback is deactivated whenever `externalPhase.value !== null`,
-matching the PRD ("the internal loop is halted"). Its `dt` is
-`info.timeSincePreviousFrame ?? 0`, which is `null` on the first frame
-after every (re)activation — that is exactly the "reset the clock on
-resume" behaviour the web side has to implement explicitly, and it means
-a pause/resume or a background/foreground cycle cannot jump the phase.
+matching the PRD ("the internal loop is halted").
+
+`dt` comes from `info.timestamp` differenced against a `lastTimestamp`
+shared value the component owns, seeded `null` and reset to `null`
+wherever the web driver resets `lastNow` (deactivation, external time
+taking over). It deliberately does **not** use
+`info.timeSincePreviousFrame`: Reanimated's Babel plugin emits a fresh
+worklet object for an inline callback on every render, and
+`useFrameCallback` keys its registration effect on that identity, so the
+callback is torn down and re-registered _once per render_ — which resets
+its internal start time and makes `timeSincePreviousFrame` report `null`
+again. A component whose parent re-renders every frame (a scroll handler
+in an ancestor, say) would therefore see `dt = 0` forever and freeze.
+Differencing an absolute timestamp is immune to re-registration, and it
+makes the native clock structurally identical to the web one — same
+state, same reset points, same parity story.
+
+The worklet identity is additionally stabilised with `useCallback` over
+its real dependencies, so an unrelated parent render does not churn the
+frame-callback registration at all.
 
 The alternative — closing over the caller's `SharedValue` directly
 inside the frame callback — was rejected in §Alternatives.
@@ -300,19 +332,41 @@ renderer, which the package does not have.
 
 ### 8. `progress` becomes sugar over `setTime`
 
-Per the PRD, on both wrappers:
+Per the PRD, on both wrappers, `progress` selects a frame and pins the
+instance there with playback paused. The PRD writes that as
+`setTime(progress * (frames - 1) / frames)`. Taken literally that is
+wrong, because the product is quantized straight back by
+`frameForPhase` and the round trip loses a bit:
+`(1 × 47) / 48 × 48 = 46.99999999999999`, so `progress = 1` at the
+default frame count lands on frame **46** rather than 47 — and 83 of the
+first 512 frame counts, 48 among them, are affected. `frames = 36,
+progress = 0.2` is off by two frames.
+
+So the frame index is computed once, explicitly, and _then_ turned into
+a phase that quantizes back to it exactly:
 
 ```
-progress → setTime(clamp01(progress) * (frames - 1) / frames)  // and pause
+frame → Math.floor(clamp01(progress) * (frames - 1))
+setTime(phaseForFrame(frame, frames))   // and pause
 ```
 
-This is a **small, intentional behaviour change**: `progress` previously
-selected `Math.round(p * (frames - 1))`, and now selects
-`Math.floor(p * (frames - 1))`. `progress = 0.5` with `frames = 48` moves
-from frame 24 to frame 23. The endpoints are unchanged (`0 → 0`,
-`1 → frames - 1`), and flooring is what free-running playback does, so
-the two now agree instead of being off by half a frame. The
-`frames = 1` degenerate case maps every `progress` to frame 0, as before.
+This is the PRD's mapping, made exact rather than approximated through a
+float product. It remains a **small, intentional behaviour change**
+against the old code: `progress` previously selected
+`Math.round(p * (frames - 1))` and now selects
+`Math.floor(p * (frames - 1))`, so `progress = 0.5` with `frames = 48`
+moves from frame 24 to frame 23. The endpoints really are unchanged
+(`0 → 0`, `1 → frames - 1`) — that is now a property of the code rather
+than an aspiration — and flooring is what free-running playback does, so
+the two agree instead of being off by half a frame. The `frames = 1`
+degenerate case maps every `progress` to frame 0, as before.
+
+`initialFrame` is seeded the same way (`phase = phaseForFrame(initialFrame,
+frames)`) on both platforms, for the same reason: a bare
+`initialFrame / frames` paints frame `initialFrame - 1` for a third of
+its valid values, and on native it also disagrees with the exact
+`currentFrame` seed, making the indicator step backwards one frame on
+the first tick after mount.
 
 `progress` and `time` are both external drivers; if both are passed,
 **`time` wins** and `progress` is ignored (with a doc note). Mixing them
@@ -406,6 +460,11 @@ zero, not a release of control).
   more, so this is not breaking in practice.
 - `onFrame` on native costs a `runOnJS` per _changed_ frame when it is
   attached. Documented as "not for per-frame work", per the PRD.
+- Two frame-index-to-phase conversions (`initialFrame`, `progress`) now
+  go through `phaseForFrame`'s half-frame offset rather than a bare
+  division. That is the correct conversion, but it is a rule a future
+  edit can forget: a bare `k / frames` looks right and is wrong for a
+  third of its inputs.
 - One more piece of instance state (`externalPhase` / the driven flag)
   that `paused`, reduced motion, visibility and `update()` all have to
   agree about. The rule is written down once: while a `time` source is
@@ -425,18 +484,18 @@ zero, not a release of control).
 
 ### Files to change
 
-| File                                                                         | Change                                                                                                                                                                                                                                                                                                                                               |
-| ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/core/options.ts`                                                        | Add `speed` (default `1`), `onFrame`, `onLoop` to `DitheredOptions`; narrow `ResolvedOptions` to keep the callbacks optional; add `speed: 1` to `DEFAULTS`.                                                                                                                                                                                          |
-| `src/core/paint.ts`                                                          | Re-express `frameAt` via `frameForPhase`; document it as a wall-clock convenience, not the playback path. Behaviour unchanged.                                                                                                                                                                                                                       |
-| `src/core/index.ts`                                                          | Export the clock helpers and any new types.                                                                                                                                                                                                                                                                                                          |
-| `src/renderer.ts`                                                            | Accumulator loop (`phase`, `lastNow`, reset `lastNow` on every halt/resume); `setTime`/`clearTime` on `DitheredInstance`; `onFrame`/`onLoop` dispatch from the single paint decision point; structural-vs-runtime split in `update()`; `initialFrame` seeds `phase = initialFrame / frames`.                                                         |
-| `src/react.tsx`                                                              | `time`, `speed`, `onFrame`, `onLoop` props; latest-ref trampolines; `time` effect separate from the reconfigure effect; `progress` re-expressed via `setTime`; `time` beats `progress`.                                                                                                                                                              |
-| `src/native/Dithered.tsx`                                                    | `externalPhase` shared value + the two write paths (effect for numbers, `useAnimatedReaction` for shared values); one workletized `applyPhase`; accumulator in the frame callback using `timeSincePreviousFrame ?? 0`; `speed`; `runOnJS` trampolines for `onFrame`/`onLoop`; deactivate the callback while externally driven; `progress` via phase. |
-| `src/index.ts`                                                               | Export clock helpers and the new option/callback types.                                                                                                                                                                                                                                                                                              |
-| `src/native.ts`                                                              | Same, plus the `playback.ts` worklet helpers.                                                                                                                                                                                                                                                                                                        |
-| `README.md` (repo root — the library's README; `packages/dithered` has none) | Document `speed`, `onFrame`, `onLoop`, `setTime`/`clearTime`, the `time` prop on both wrappers, the shared-value form on native, and the `progress` rounding change.                                                                                                                                                                                 |
-| `packages/playground-web/main.tsx`                                           | A scrub-slider example: a range input driving `time`, next to a free-running instance, plus a `speed` control on the existing playground form.                                                                                                                                                                                                       |
+| File                                                                         | Change                                                                                                                                                                                                                                                                                                                                                                                        |
+| ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/core/options.ts`                                                        | Add `speed` (default `1`), `onFrame`, `onLoop` to `DitheredOptions`; narrow `ResolvedOptions` to keep the callbacks optional; add `speed: 1` to `DEFAULTS`.                                                                                                                                                                                                                                   |
+| `src/core/paint.ts`                                                          | Re-express `frameAt` via `frameForPhase`; document it as a wall-clock convenience, not the playback path. Behaviour unchanged.                                                                                                                                                                                                                                                                |
+| `src/core/index.ts`                                                          | Export the clock helpers and any new types.                                                                                                                                                                                                                                                                                                                                                   |
+| `src/renderer.ts`                                                            | Accumulator loop (`phase`, `lastNow`, reset `lastNow` on every halt/resume); `setTime`/`clearTime` on `DitheredInstance`; `onFrame`/`onLoop` dispatch from the single paint decision point; structural-vs-runtime split in `update()`; `initialFrame` seeds `phase = initialFrame / frames`.                                                                                                  |
+| `src/react.tsx`                                                              | `time`, `speed`, `onFrame`, `onLoop` props; latest-ref trampolines; `time` effect separate from the reconfigure effect; `progress` re-expressed via `setTime`; `time` beats `progress`.                                                                                                                                                                                                       |
+| `src/native/Dithered.tsx`                                                    | `externalPhase` shared value + the two write paths (effect for numbers, `useAnimatedReaction` for shared values); one workletized `applyPhase`; accumulator in the frame callback, differencing `info.timestamp` against an owned `lastTimestamp` shared value; `speed`; `runOnJS` trampolines for `onFrame`/`onLoop`; deactivate the callback while externally driven; `progress` via phase. |
+| `src/index.ts`                                                               | Export clock helpers and the new option/callback types.                                                                                                                                                                                                                                                                                                                                       |
+| `src/native.ts`                                                              | Same, plus the `playback.ts` worklet helpers.                                                                                                                                                                                                                                                                                                                                                 |
+| `README.md` (repo root — the library's README; `packages/dithered` has none) | Document `speed`, `onFrame`, `onLoop`, `setTime`/`clearTime`, the `time` prop on both wrappers, the shared-value form on native, and the `progress` rounding change.                                                                                                                                                                                                                          |
+| `packages/playground-web/main.tsx`                                           | A scrub-slider example: a range input driving `time`, next to a free-running instance, plus a `speed` control on the existing playground form.                                                                                                                                                                                                                                                |
 
 ### Tests to write
 
@@ -488,6 +547,31 @@ zero, not a release of control).
 35. An inline `onFrame` that changes identity every render does not trigger `update()`, and the _latest_ callback is the one invoked.
 36. `progress` still pins a frame and pauses; endpoints `0` and `1` map to frame `0` and `frames - 1`.
 37. `time` takes precedence when both `time` and `progress` are passed.
+
+**Added after the first adversarial review** (these are the cases the
+original list was blind to — every one of them corresponds to a real bug
+the review found, so none may be asserted against a frame count where
+the arithmetic happens to be exact):
+
+38. `frameForPhase(phaseForFrame(k, n), n) === k` for **every** `k` in
+    `[0, n)` and every `n` in `1..512`. This is the round-trip property
+    the whole of §1's `phaseForFrame` exists to guarantee; a sampled
+    version of it is not good enough.
+39. `progress = 1` paints frame `frames - 1`, and `progress = 0` paints
+    frame `0`, asserted on the **painted index** (not on the argument
+    `setTime` received) and swept over frame counts that include 48, 36,
+    3, 12, 19, 27, 46, 47 and 54.
+40. `initialFrame: k` paints frame `k` for every `k` in `[0, frames)`, at
+    `frames` values including 48, 60 and 36 — not only at counts where
+    `k / frames` is exactly representable.
+41. `update({ speed })` does not resurrect a `paused` value the caller
+    overrode with `setPaused()`: mount `paused: true`, `setPaused(false)`,
+    `update({ speed: 2 })`, assert playback is still running.
+42. The web driver's own `tick` — driven through a real `createDithered`
+    over a fixed `dt` timeline — produces the same frame sequence as the
+    native UI helpers over that same timeline. Test #30 as written
+    compares the UI helpers to the core helpers they were already proven
+    equal to, which is the same expression twice.
 
 ### Checks
 
