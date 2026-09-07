@@ -72,6 +72,15 @@ describe('shapeFromSvgLite', () => {
     expect(shapeFromSvgLite(svg)).toEqual(shapeFromSvg(svg));
   });
 
+  it('leaves an out-of-range numeric character reference unexpanded instead of throwing (regression: finding 2)', () => {
+    // "&#x110000;" is one past 0x10FFFF, the highest Unicode code point —
+    // String.fromCodePoint throws a RangeError for it, which must not
+    // escape as a raw, unprefixed error the way it used to.
+    const svg = '<svg viewBox="0 0 10 10"><path d="M0 0 Z&#x110000;"/></svg>';
+    expect(() => shapeFromSvgLite(svg)).not.toThrow(RangeError);
+    expect(shapeFromSvgLite(svg).path).toBe('M0 0 Z&#x110000;');
+  });
+
   it('reads the viewBox', () => {
     expect(shapeFromSvgLite(TWO_PATH_SVG).viewBox).toEqual({
       x: 0,

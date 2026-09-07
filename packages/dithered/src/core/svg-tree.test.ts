@@ -80,6 +80,40 @@ describe('collectGeometry: basic concatenation', () => {
     const { path: d } = collectGeometry(tree, 'test');
     expect(d).toBe('M 0 0 H 10 V 10 H 0 Z M60 60 h20 v20 h-20 z');
   });
+
+  it('preserves the relative reading of pairs after a leading moveto with an implicit repeat (regression: finding 1)', () => {
+    // "m20 20 60 0 0 60-60 0z" is the SVGO-optimized form of a 60x60
+    // square at (20,20): a leading relative moveto followed by three
+    // more coordinate pairs with no command letter, which SVG reads as
+    // implicit *relative* linetos (SVG 1.1 §8.3.2) even though the
+    // leading moveto itself is absolute. Naively rewriting only the "m"
+    // to "M" would make those later pairs absolute too, collapsing the
+    // square to a thin sliver mostly outside the viewBox.
+    const tree = root([path('m20 20 60 0 0 60-60 0z')]);
+    const { path: d } = collectGeometry(tree, 'test');
+    expect(d).toBe('M20 20 l60 0 0 60-60 0z');
+
+    const tester = jsHitTester({ path: d, viewBox: { x: 0, y: 0, width: 100, height: 100 } });
+    expect(tester(50, 50)).toBe(true); // centre of the 20..80 square
+    expect(tester(5, 5)).toBe(false); // outside it — the sliver bug read as ~solid
+  });
+
+  it('preserves the implicit-repeat fix as the second of two concatenated elements', () => {
+    const tree = root([path('M0 0 h1 v1 h-1 z'), path('m20 20 60 0 0 60-60 0z')]);
+    const { path: d } = collectGeometry(tree, 'test');
+    expect(d).toBe('M0 0 h1 v1 h-1 z M20 20 l60 0 0 60-60 0z');
+
+    const tester = jsHitTester({ path: d, viewBox: { x: 0, y: 0, width: 100, height: 100 } });
+    expect(tester(50, 50)).toBe(true); // centre of the second square
+    expect(tester(90, 90)).toBe(false); // outside it
+  });
+
+  it('leaves a leading absolute moveto with an implicit repeat untouched', () => {
+    // Same coordinates as above but already absolute-M, as most design
+    // tools emit — must round-trip byte-identical, per ADR 0010 §4.
+    const tree = root([path('M20 20 60 0 0 60-60 0z')]);
+    expect(collectGeometry(tree, 'test').path).toBe('M20 20 60 0 0 60-60 0z');
+  });
 });
 
 describe('collectGeometry: skip rules', () => {

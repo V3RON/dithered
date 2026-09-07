@@ -176,15 +176,18 @@ const ENTITY_RE = /&(?:#x([0-9a-fA-F]+)|#([0-9]+)|([a-zA-Z]+));/g;
  *    character — `&#xA;` is the one that actually shows up in hand-written
  *    `d` data — comes through as the literal character it names, not
  *    collapsed to a space the way a literal newline in the source is. An
- *    unrecognized named entity (there is no DTD here to define one) is left
- *    as written, rather than throwing, matching this scanner's general
+ *    unrecognized named entity (there is no DTD here to define one), or a
+ *    numeric reference to a code point outside Unicode's range, is left as
+ *    written, rather than throwing, matching this scanner's general
  *    tolerance of malformed input.
  */
 function normalizeAttrValue(value: string): string {
   const whitespaceNormalized = value.replace(/[\t\n\r]/g, ' ');
   return whitespaceNormalized.replace(ENTITY_RE, (match, hex, dec, name) => {
-    if (hex !== undefined) return String.fromCodePoint(parseInt(hex, 16));
-    if (dec !== undefined) return String.fromCodePoint(parseInt(dec, 10));
+    const codePoint =
+      hex !== undefined ? parseInt(hex, 16) : dec !== undefined ? parseInt(dec, 10) : undefined;
+    if (codePoint !== undefined)
+      return codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : match;
     return PREDEFINED_ENTITIES[name] ?? match;
   });
 }

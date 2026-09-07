@@ -1,5 +1,5 @@
 import type { FillRule } from '../shape';
-import { parsePath, serializePath, toAbsolute, transformSegments } from './path';
+import { parsePath, readNumberToken, serializePath, toAbsolute, transformSegments } from './path';
 import { basicShapeToPath } from './svg-shapes';
 import { IDENTITY, isIdentity, multiply, parseTransform, type Matrix } from './transform';
 
@@ -174,15 +174,46 @@ function geometryPath(tag: string, node: SvgNode): string | null {
  * same `m` would instead resolve against the *previous* element's current
  * point, displacing the whole subpath (see ADR 0010's Consequences).
  *
- * Only the leading command letter changes; the coordinates that follow it
- * are untouched and every command after the first keeps whatever form it
- * was written in, so already-absolute path data (what `basicShapeToPath`
- * emits, and what most design tools emit) round-trips byte-identical.
+ * Per SVG 1.1 §8.3.2, though, only that first coordinate pair is absolute:
+ * any further pairs following a lone leading `m` are an *implicit repeat*,
+ * read as relative linetos. Simply swapping the command letter to `M`
+ * would silently make those absolute too, so when such a repeat is
+ * present an explicit `l` is inserted right after the leading pair —
+ * `l`'s own implicit repeats stay relative, so this preserves every later
+ * pair's original (relative) meaning. Everything else — the coordinates
+ * themselves, and every command after the first — is untouched, so
+ * already-absolute path data (what `basicShapeToPath` emits, and what
+ * most design tools emit) round-trips byte-identical, and so does a
+ * leading `m` with only a single pair.
  */
 function forceAbsoluteLeadingMoveto(d: string): string {
   const leading = d.match(/^\s*/)?.[0].length ?? 0;
   if (d[leading] !== 'm') return d;
-  return d.slice(0, leading) + 'M' + d.slice(leading + 1);
+
+  const isSeparator = (ch: string | undefined) =>
+    ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === ',';
+  const skipSeparators = (i: number) => {
+    while (isSeparator(d[i])) i++;
+    return i;
+  };
+
+  // Locate the end of the leading pair so an "l" can be inserted after it
+  // if an implicit repeat follows. Malformed data (too few numbers) is
+  // left to fail later, in `parsePath`, exactly as an `M`-leading path
+  // with the same problem already does — this rewrite doesn't validate.
+  const first = readNumberToken(d, skipSeparators(leading + 1));
+  const second = first && readNumberToken(d, skipSeparators(first.end));
+  if (!second) return d.slice(0, leading) + 'M' + d.slice(leading + 1);
+
+  const afterPair = skipSeparators(second.end);
+  const hasImplicitRepeat = readNumberToken(d, afterPair) !== null;
+  return (
+    d.slice(0, leading) +
+    'M' +
+    d.slice(leading + 1, afterPair) +
+    (hasImplicitRepeat ? 'l' : '') +
+    d.slice(afterPair)
+  );
 }
 
 function parseNodeTransform(node: SvgNode, label: string): Matrix {

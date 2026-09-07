@@ -138,7 +138,7 @@ A few things are skipped rather than drawn: `<defs>`, `<clipPath>`, `<mask>`, `<
 import { shapeFromSvgLite } from 'dithered/react-native';
 ```
 
-It handles well-formed SVG as design tools emit it — comments and CDATA are skipped, attributes may be single- or double-quoted, tag names are matched case-insensitively — but it is not an XML parser: entity references are not expanded, and a `>` inside an attribute value will confuse it. On the web, prefer `shapeFromSvg`.
+It handles well-formed SVG as design tools emit it — comments and CDATA are skipped, attributes may be single- or double-quoted, tag names are matched case-insensitively, numeric and predefined character references are expanded — but it is not an XML parser: an undefined named entity is left as written, there's no DTD or validation, and a `>` inside an attribute value will confuse it. On the web, prefer `shapeFromSvg`.
 
 A `Shape` is plain data (`{ path, viewBox, fillRule? }`), so the other option is to convert once at build time and commit the result — which is all `shapes.ts` is:
 
