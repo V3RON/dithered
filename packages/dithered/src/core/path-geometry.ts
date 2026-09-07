@@ -382,7 +382,13 @@ export function flattenPath(commands: readonly PathCommand[], tolerance: number)
         cur = { x: cmd.x, y: cmd.y };
         break;
       case 'Z':
+        // Close off the current subpath (a following drawing command
+        // without an intervening `M` starts a *new* subpath at the
+        // closed subpath's start point, per spec) rather than letting
+        // later points bleed into this one's polygon.
+        if (current.length > 1) subpaths.push(current);
         cur = start;
+        current = [cur];
         break;
     }
   }

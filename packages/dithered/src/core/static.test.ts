@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createDithered } from '../renderer';
 import { sampleCells } from '../shape';
 import { shapes } from '../shapes';
@@ -146,34 +146,57 @@ describe('renderToDataURL', () => {
 });
 
 describe('no drift between createDithered and renderToSvg', () => {
-  it('draws the same cell rects for identical options (the no-drift guarantee)', () => {
-    const options: RenderToSvgOptions = { ...BASE, cols: 4 };
-    const env = stubAnimationGlobals();
-    try {
-      const { canvas, ctx } = makeFakeCanvas();
-      // `createDithered` already blits `initialFrame` (0) synchronously on
-      // create, so no explicit `renderFrame` call is needed here.
-      createDithered(canvas, { ...options, cache: false });
+  // Deliberately the library's own defaults (`shapes.rozenite`, `size:
+  // 48`, `cols: 16`), not `shapes.square` at `size: 40, cols: 4`: that
+  // fixture is aspect-ratio 1 with an integer surface width, so it is
+  // exactly the one configuration where `Math.round`'s rounding and the
+  // gap floor's unit both happen to be no-ops — the assertion below would
+  // pass unconditionally on it even with the pre-fix absolute 0.6px
+  // floor. `rozenite` is non-square (aspect != 1) and its surface width
+  // at `size: 48` (33.60179977502813) is not an integer, so both of those
+  // effects are actually exercised, at every `devicePixelRatio` the web
+  // renderer can run at.
+  it.each([1, 2, 3])(
+    'draws the same cell rects, scaled by devicePixelRatio, for identical options (the no-drift guarantee) at dpr=%s',
+    (dpr) => {
+      const options: RenderToSvgOptions = {
+        shape: shapes.rozenite,
+        brightness: ALL_ON,
+        size: 48,
+        cols: 16,
+      };
+      const env = stubAnimationGlobals();
+      vi.stubGlobal('devicePixelRatio', dpr);
+      try {
+        const { canvas, ctx } = makeFakeCanvas();
+        // `createDithered` already blits `initialFrame` (0) synchronously on
+        // create, so no explicit `renderFrame` call is needed here.
+        createDithered(canvas, { ...options, cache: false });
 
-      // `make2dCtx` has no `roundRect`, so `paintFrame` falls back to
-      // `rect()` — the per-cell squares createDithered actually drew.
-      const round = (n: number) => Math.round(n * 1000) / 1000;
-      const canvasRects = ctx.rect.mock.calls
-        .map(([x, y, w, h]: number[]) => `${round(x)},${round(y)},${round(w)},${round(h)}`)
-        .sort();
+        // `make2dCtx` has no `roundRect`, so `paintFrame` falls back to
+        // `rect()` — the per-cell squares createDithered actually drew, in
+        // device px. Divide by `dpr` to compare against the SVG's CSS px.
+        const round = (n: number) => Math.round(n * 1000) / 1000;
+        const canvasRects = ctx.rect.mock.calls
+          .map(
+            ([x, y, w, h]: number[]) =>
+              `${round(x / dpr)},${round(y / dpr)},${round(w / dpr)},${round(h / dpr)}`,
+          )
+          .sort();
 
-      const root = parseSvg(renderToSvg(options));
-      const svgRects = Array.from(root.querySelectorAll('rect'))
-        .map((r) => {
-          const n = (attr: string) => Number(r.getAttribute(attr));
-          return `${n('x')},${n('y')},${n('width')},${n('height')}`;
-        })
-        .sort();
+        const root = parseSvg(renderToSvg(options));
+        const svgRects = Array.from(root.querySelectorAll('rect'))
+          .map((r) => {
+            const n = (attr: string) => round(Number(r.getAttribute(attr)));
+            return `${n('x')},${n('y')},${n('width')},${n('height')}`;
+          })
+          .sort();
 
-      expect(canvasRects).toEqual(svgRects);
-      expect(canvasRects.length).toBeGreaterThan(0);
-    } finally {
-      env.restore();
-    }
-  });
+        expect(canvasRects).toEqual(svgRects);
+        expect(canvasRects.length).toBeGreaterThan(0);
+      } finally {
+        env.restore();
+      }
+    },
+  );
 });

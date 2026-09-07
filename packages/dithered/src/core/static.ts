@@ -57,9 +57,12 @@ export function renderToSvg(options: RenderToSvgOptions): string {
  * `renderToSvg`'s output as a `data:image/svg+xml;utf8,...` URL, ready to
  * use as a favicon `href`, an `<img src>`, or a CSS `background-image`.
  *
- * Percent-encodes `%` first, then `#`, `<`, `>`, `"`, `'` and whitespace
- * — enough to survive interpolation into a CSS `url(...)` unquoted, and
- * to keep `fg`'s default `#` from being read as a URL fragment. A full
+ * Percent-encodes `%` first, then `#`, `<`, `>`, `"`, `'`, `(`, `)` and
+ * whitespace — enough to survive interpolation into a CSS `url(...)`
+ * unquoted, and to keep `fg`'s default `#` from being read as a URL
+ * fragment. The parentheses matter as much as `#` does: an unquoted CSS
+ * `url()` token ends at the first `)`, so an `fg`/`bg` of e.g.
+ * `rgb(130, 50, 255)` would otherwise truncate the declaration. A full
  * `encodeURIComponent` would also work but roughly triples the length of
  * a favicon-sized SVG.
  */
@@ -69,7 +72,7 @@ export function renderToDataURL(options: RenderToSvgOptions): string {
 }
 
 function encodeForDataUrl(svg: string): string {
-  return svg.replace(/[%#<>"'\s]/g, (ch) => {
+  return svg.replace(/[%#<>"'()\s]/g, (ch) => {
     switch (ch) {
       case '%':
         return '%25';
@@ -83,6 +86,10 @@ function encodeForDataUrl(svg: string): string {
         return '%22';
       case "'":
         return '%27';
+      case '(':
+        return '%28';
+      case ')':
+        return '%29';
       default:
         return encodeURIComponent(ch);
     }

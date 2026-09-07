@@ -51,17 +51,28 @@ export function frameAt(nowMs: number, period: number, frames: number): number {
   return Math.floor((phase / period) * frames) % frames;
 }
 
-/** Derives the per-cell drawing geometry for a surface of `width` x `height`. */
+/**
+ * Derives the per-cell drawing geometry for a surface of `width` x
+ * `height`. `scale` is the ratio of `width`/`height`'s unit to the
+ * renderer's reference unit (CSS px on web, dp on native) — it applies
+ * only to the 0.6px minimum gap, so that floor means the same physical
+ * size regardless of how finely the caller's unit subdivides a pixel.
+ * `createDithered` passes `dpr` (its unit is device px); every other
+ * caller passes the default 1. This is what makes
+ * `computeGeometry(opts, w * s, h * s, 0, s)` equal
+ * `computeGeometry(opts, w, h)` scaled by `s` in every field.
+ */
 export function computeGeometry(
   opts: ResolvedOptions,
   width: number,
   height: number,
   ox = 0,
+  scale = 1,
 ): PaintGeometry {
   const cellSize = width / opts.cols;
   return {
     cellSize,
-    gap: Math.max(0.6, cellSize * opts.gap),
+    gap: Math.max(0.6 * scale, cellSize * opts.gap),
     radius: cellSize * opts.radius,
     fg: opts.fg,
     bg: opts.bg,

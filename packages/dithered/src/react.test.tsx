@@ -363,7 +363,17 @@ describe('Dithered SSR fallback', () => {
     const html = renderToString(<Dithered shape={SQUARE_SHAPE} brightness={() => true} />);
 
     expect(html).toContain('<canvas');
-    expect(html).toMatch(/background-image:\s*url\(data:image\/svg\+xml;utf8,/);
+    const match = html.match(/background-image:\s*url\((data:image\/svg\+xml;utf8,[^)]*)\)/);
+    expect(match).not.toBeNull();
+
+    // A regression that rendered a well-formed but empty `<svg
+    // …></svg>` — the exact "blank SSR canvas" this fallback exists to
+    // prevent — would satisfy the prefix-only check this replaces;
+    // decode the payload and require actual drawn cells.
+    const dataUrl = match![1];
+    const svg = decodeURIComponent(dataUrl.slice('data:image/svg+xml;utf8,'.length));
+    const rectCount = (svg.match(/<rect\b/g) ?? []).length;
+    expect(rectCount).toBeGreaterThan(0);
   });
 
   it('ssrFallback={false} omits the background-image', () => {

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { arcToCubics, flattenPath, parsePath, pathToPolygons, type PathCommand } from './path-geometry';
+import {
+  arcToCubics,
+  flattenPath,
+  parsePath,
+  pathToPolygons,
+  type PathCommand,
+  type Point,
+} from './path-geometry';
 
 describe('parsePath', () => {
   it('parses an absolute moveto + lineto', () => {
@@ -225,26 +232,86 @@ describe('arcToCubics', () => {
     expect(arcToCubics(5, 5, 10, 10, 0, false, true, 5, 5)).toEqual([]);
   });
 
-  it('scales up out-of-range radii per SVG F.6.6', () => {
-    // Endpoints 20 apart, radius 1 is far too small to span them; the arc
-    // must still land exactly on the requested endpoint after scaling.
-    const commands = arcToCubics(-10, 0, 1, 1, 0, false, true, 10, 0);
+  it('scales up out-of-range radii per SVG F.6.6, reshaping the curve rather than only its snapped endpoint', () => {
+    // Endpoints 20 apart on the x-axis; radius 1 is far too small to span
+    // them, so F.6.6 must scale rx/ry up to 10 (exactly half the chord)
+    // before building the arc — the resulting curve is a radius-10
+    // semicircle bulging ~10 units off the chord. `arcToCubics` always
+    // snaps its *final* endpoint onto the requested (x, y) regardless of
+    // radius, so asserting only that endpoint (as this test used to)
+    // passes even with the scaling step deleted; an unscaled radius-1 arc
+    // would stay within ~1 unit of the chord everywhere else. Assert on
+    // the curve's shape instead, via its flattened points.
+    const start = { x: -10, y: 0 };
+    const commands = arcToCubics(start.x, start.y, 1, 1, 0, false, true, 10, 0);
     const last = commands[commands.length - 1] as Extract<PathCommand, { type: 'C' }>;
     expect(last.x).toBeCloseTo(10);
     expect(last.y).toBeCloseTo(0);
+
+    const polygon = flattenPath([{ type: 'M', x: start.x, y: start.y }, ...commands], 0.01)[0];
+    const maxDistFromChord = Math.max(...polygon.map((p) => Math.abs(p.y)));
+    expect(maxDistFromChord).toBeGreaterThan(8);
   });
 
-  it.each([
-    [false, false],
-    [false, true],
-    [true, false],
-    [true, true],
-  ])('largeArc=%s sweep=%s always lands exactly on the endpoint', (largeArc, sweep) => {
-    const commands = arcToCubics(10, 0, 8, 8, 0, largeArc, sweep, -10, 0);
-    expect(commands.length).toBeGreaterThan(0);
-    const last = commands[commands.length - 1] as Extract<PathCommand, { type: 'C' }>;
-    expect(last.x).toBeCloseTo(-10);
-    expect(last.y).toBeCloseTo(0);
+  describe('largeArc/sweep flag combinations', () => {
+    // rx=60, ry=45, rotated 40°, from (10,20) to (60,40) — chosen so the
+    // four flag combinations produce genuinely different curves, unlike
+    // the `(8,8,0,·,·,-10,0)` fixture this replaces, whose F.6.6 scaling
+    // collapsed to the same semicircle for every `largeArc`/`sweep` pair
+    // (only the endpoint snap made those four calls look distinct). Two
+    // properties distinguish the four here: `largeArc` picks the major
+    // vs. minor arc of the ellipse (very different arc length), and
+    // `sweep` picks which side of the chord the arc bulges to (opposite
+    // sign of the cross product of chord-vector and chord-to-midpoint).
+    const start = { x: 10, y: 20 };
+    const end = { x: 60, y: 40 };
+
+    function flattenArc(largeArc: boolean, sweep: boolean): Point[] {
+      const commands = arcToCubics(start.x, start.y, 60, 45, 40, largeArc, sweep, end.x, end.y);
+      return flattenPath([{ type: 'M', x: start.x, y: start.y }, ...commands], 0.01)[0];
+    }
+
+    function arcLength(polygon: Point[]): number {
+      let length = 0;
+      for (let i = 1; i < polygon.length; i++) {
+        length += Math.hypot(polygon[i].x - polygon[i - 1].x, polygon[i].y - polygon[i - 1].y);
+      }
+      return length;
+    }
+
+    it.each([
+      [false, false],
+      [false, true],
+      [true, false],
+      [true, true],
+    ])('largeArc=%s sweep=%s lands exactly on the endpoint', (largeArc, sweep) => {
+      const polygon = flattenArc(largeArc, sweep);
+      const last = polygon[polygon.length - 1];
+      expect(last.x).toBeCloseTo(end.x);
+      expect(last.y).toBeCloseTo(end.y);
+    });
+
+    it('largeArc selects the major arc, not the minor one', () => {
+      for (const sweep of [false, true]) {
+        expect(arcLength(flattenArc(true, sweep))).toBeGreaterThan(200);
+        expect(arcLength(flattenArc(false, sweep))).toBeLessThan(100);
+      }
+    });
+
+    it('sweep selects which side of the chord the arc bulges to', () => {
+      const cross = (largeArc: boolean, sweep: boolean): number => {
+        const polygon = flattenArc(largeArc, sweep);
+        const mid = polygon[Math.floor(polygon.length / 2)];
+        const chordX = end.x - start.x;
+        const chordY = end.y - start.y;
+        const midX = mid.x - start.x;
+        const midY = mid.y - start.y;
+        return chordX * midY - chordY * midX;
+      };
+      for (const largeArc of [false, true]) {
+        expect(Math.sign(cross(largeArc, false))).not.toBe(Math.sign(cross(largeArc, true)));
+      }
+    });
   });
 
   it('sweep flag controls which side of the chord the arc bulges toward', () => {
@@ -309,6 +376,27 @@ describe('flattenPath', () => {
     expect(subpaths[0]).toEqual([
       { x: 10, y: 10 },
       { x: 20, y: 20 },
+    ]);
+  });
+
+  it('closes the current polygon at Z, so a drawing command with no intervening M starts a new subpath at the closed start point', () => {
+    // Regression for a bug where `flattenPath`'s `Z` case reset the
+    // current point but never closed off `current`, so `L5 -20` after the
+    // `Z` was appended to the square's polygon instead of starting a new
+    // one — producing a single five-point polygon with a bogus spike
+    // above the square rather than two separate polygons.
+    const subpaths = flattenPath(parsePath('M0 0 L10 0 L10 10 L0 10 Z L5 -20'), 0.01);
+    expect(subpaths).toEqual([
+      [
+        { x: 0, y: 0 },
+        { x: 10, y: 0 },
+        { x: 10, y: 10 },
+        { x: 0, y: 10 },
+      ],
+      [
+        { x: 0, y: 0 },
+        { x: 5, y: -20 },
+      ],
     ]);
   });
 

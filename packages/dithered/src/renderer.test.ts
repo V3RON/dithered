@@ -477,6 +477,65 @@ describe('createDithered', () => {
     expect(ctx.clearRect).toHaveBeenCalledTimes(1);
   });
 
+  // Regression: `blit` used to index the sprite strip/paint phase with the
+  // raw frame number, unlike `core/static.ts`'s `wrapFrame` and
+  // `native/Dithered.tsx`'s local copy of it. An out-of-range
+  // `initialFrame` (or `renderFrame` argument) therefore disagreed with
+  // the React SSR fallback (which does wrap, via `renderToDataURL`) and,
+  // worse, indexed past the sprite strip entirely when caching was on —
+  // `drawImage`'s source rect landed outside the strip and painted
+  // nothing.
+  // `document.createElement('canvas')` (the sprite-strip cache) is a real
+  // `HTMLCanvasElement` under jsdom, whose `getContext('2d')` returns
+  // `null` (no "canvas" package installed) unless stubbed — hence
+  // `stubGetContext`, on top of `makeFakeCanvas`'s own plain-object canvas
+  // for the visible one.
+  it('wraps an out-of-range initialFrame into [0, frames) rather than indexing past the sprite strip', () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const strip = stubGetContext(make2dCtx());
+    try {
+      createDithered(canvas, baseOptions({ cache: true, frames: 48, initialFrame: 50 }));
+
+      // 50 wraps to 50 % 48 = 2; the cached sprite strip's per-frame
+      // source slot is `frame * canvas.width`.
+      expect(ctx.drawImage).toHaveBeenCalledTimes(1);
+      const [, sx] = ctx.drawImage.mock.calls[0];
+      expect(sx).toBe(2 * canvas.width);
+    } finally {
+      strip.restore();
+    }
+  });
+
+  it("wraps a negative initialFrame the same way core/static.ts's wrapFrame does", () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const strip = stubGetContext(make2dCtx());
+    try {
+      createDithered(canvas, baseOptions({ cache: true, frames: 48, initialFrame: -1 }));
+
+      // -1 wraps to 47, matching `((Math.round(-1) % 48) + 48) % 48`.
+      const [, sx] = ctx.drawImage.mock.calls[0];
+      expect(sx).toBe(47 * canvas.width);
+    } finally {
+      strip.restore();
+    }
+  });
+
+  it('renderFrame also wraps an out-of-range frame index', () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const strip = stubGetContext(make2dCtx());
+    try {
+      const instance = createDithered(canvas, baseOptions({ cache: true, frames: 48 }));
+      ctx.drawImage.mockClear();
+
+      instance.renderFrame(50);
+
+      const [, sx] = ctx.drawImage.mock.calls[0];
+      expect(sx).toBe(2 * canvas.width);
+    } finally {
+      strip.restore();
+    }
+  });
+
   // Regression: a caller (notably the React wrapper, which always builds a
   // full options object from its props) may pass a key with an explicit
   // `undefined` value rather than omitting it. That must fall back to the

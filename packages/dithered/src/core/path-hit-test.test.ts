@@ -58,16 +58,53 @@ describe('pointInPolygons', () => {
     expect(pointInPolygons([SQUARE, HOLE_OPPOSITE_WINDING], 1, 1, 'evenodd')).toBe(true);
   });
 
-  it('classifies a point aligned with a vertex deterministically, not by throwing or NaN', () => {
-    expect(() => pointInPolygons([SQUARE], 0, 0)).not.toThrow();
-    expect(typeof pointInPolygons([SQUARE], 0, 0)).toBe('boolean');
+  it('classifies a point on a left edge as inside and the matching point on a right edge as outside', () => {
+    // The ADR's own example of the half-open-in-y rule's effect: a vertex
+    // (or edge) is treated consistently, so the two vertical edges of the
+    // same square do not classify symmetrically.
+    expect(pointInPolygons([SQUARE], 0, 5)).toBe(true);
+    expect(pointInPolygons([SQUARE], 10, 5)).toBe(false);
   });
 
-  it('classifies a point aligned with a horizontal edge deterministically', () => {
+  it('classifies a point aligned with a vertex deterministically, per the half-open rule', () => {
+    // (0,0) is a "pass-through" vertex whose non-horizontal neighbour
+    // (0,10) sits above the ray: exactly one of its two edges is counted
+    // as a crossing under `p0.y > y !== p1.y > y`, so the corner reads as
+    // inside. (10,10) is the same shape of vertex on the opposite corner
+    // and reads as outside. Using `>=` on both sides (the classic
+    // double-counting mistake) either cancels or duplicates these
+    // crossings and flips both answers — this pins the exact rule, not
+    // just that *some* boolean comes back.
+    expect(pointInPolygons([SQUARE], 0, 0)).toBe(true);
+    expect(pointInPolygons([SQUARE], 10, 10)).toBe(false);
+  });
+
+  it('classifies a point aligned with a horizontal edge per the half-open rule', () => {
     // y = 0 coincides with the top edge (0,0)-(10,0), which is horizontal
-    // and therefore never counted as a crossing under the half-open rule.
-    expect(() => pointInPolygons([SQUARE], 5, 0)).not.toThrow();
-    expect(typeof pointInPolygons([SQUARE], 5, 0)).toBe('boolean');
+    // and therefore never counted as a crossing under the half-open rule;
+    // containment at that y is decided entirely by the two vertical
+    // edges, the same way it is for the bottom edge at y = 10.
+    expect(pointInPolygons([SQUARE], 5, 0)).toBe(true);
+    expect(pointInPolygons([SQUARE], 5, 10)).toBe(false);
+  });
+
+  it('classifies a point on an edge shared between two subpaths consistently with each polygon alone', () => {
+    // Two squares sharing the edge x = 10 ([0,10]x[0,10] and
+    // [10,20]x[0,10]), probed at (10, 5): a coincident-edge case the ADR
+    // calls out explicitly. `SQUARE` alone treats x = 10 as its (outside)
+    // right edge; `SQUARE_RIGHT` alone treats x = 10 as its (inside) left
+    // edge. Testing them together must be consistent with each shape's
+    // own boundary rule, not silently double-count or drop the shared edge.
+    const SQUARE_RIGHT: Point[] = [
+      { x: 10, y: 0 },
+      { x: 20, y: 0 },
+      { x: 20, y: 10 },
+      { x: 10, y: 10 },
+    ];
+    expect(pointInPolygons([SQUARE], 10, 5)).toBe(false);
+    expect(pointInPolygons([SQUARE_RIGHT], 10, 5)).toBe(true);
+    expect(pointInPolygons([SQUARE, SQUARE_RIGHT], 10, 5, 'nonzero')).toBe(true);
+    expect(pointInPolygons([SQUARE, SQUARE_RIGHT], 10, 5, 'evenodd')).toBe(true);
   });
 
   it('defaults to nonzero', () => {
