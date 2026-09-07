@@ -155,6 +155,38 @@ export function createDithered(
   // instance doesn't spam the console on every resize/update.
   let warnedCacheTooLarge = false;
 
+  // A large resolved size (easiest to reach via `size: 'fill'`) times
+  // `frames` can exceed the canvas dimension limit browsers silently clamp
+  // to; past that the strip would allocate as blank and every frame would
+  // blit nothing. 32767 is Firefox's limit -- the tightest of the major
+  // engines (Chrome's is considerably higher) -- so it's the realistic
+  // floor rather than a value picked to merely "feel safe": a strip under
+  // it is one every shipping browser can actually rasterize. Compared
+  // against the *strip* width (`W * frames`) and the frame height (`H`)
+  // separately, not a combined-area budget (review finding 3: the
+  // previous 16384 value tripped for perfectly ordinary default-configured
+  // instances -- a retina-DPR instance on a moderately wide shape).
+  const MAX_STRIP_DIMENSION = 32767;
+
+  /** Whether a sprite strip at the current W/H/frames would exceed a safe canvas size. */
+  function tooLargeForStrip(): boolean {
+    return W * opts.frames > MAX_STRIP_DIMENSION || H > MAX_STRIP_DIMENSION;
+  }
+
+  /**
+   * Whether the sprite-strip cache should exist right now, given the
+   * resolved `cache` policy and the size cap above. Shared by `buildCache()`
+   * (which acts on it) and `resizeTo()` (which needs to know whether the
+   * *actual* cache state disagrees with the policy, to decide whether a
+   * cheap-path resize must still force a rebuild -- see review finding 3's
+   * secondary issue: comparing against the cap-unaware policy alone left
+   * `cacheStateStale` permanently true whenever the cap was in effect).
+   */
+  function shouldUseCache(): boolean {
+    const requestedCache = opts.cache === 'auto' ? sizePx <= 120 : opts.cache;
+    return requestedCache && !tooLargeForStrip();
+  }
+
   // --- DPR tracking ------------------------------------------------------
   let mql: MediaQueryList | null = null;
   let lastEffectiveDpr = 1;
@@ -411,7 +443,7 @@ export function createDithered(
     // threshold (cheap path); without this check the stale strip would
     // silently keep being rescaled (or stay absent) past the boundary
     // (review finding 4).
-    const useCacheNow = opts.cache === 'auto' ? sizePx <= 120 : opts.cache;
+    const useCacheNow = shouldUseCache();
     const cacheStateStale = useCacheNow !== (sheet !== null);
     // `pendingRebuild` forces this even under the threshold: a resample or
     // an option change (e.g. `fg`) picked up while dormant has no surface
@@ -460,17 +492,18 @@ export function createDithered(
 
   /** Depends on cells, W/H, brightness, frames, colors, gap and radius. */
   function buildCache(): void {
-    const requestedCache = opts.cache === 'auto' ? sizePx <= 120 : opts.cache;
-    // A large resolved size (easiest to reach via `size: 'fill'`) times
-    // `frames` can exceed the canvas dimension limit browsers silently clamp
-    // to (~16k-32k depending on engine); past that the strip would allocate
-    // as blank and every frame would blit nothing. Fall back to direct
-    // painting instead of an invisible instance (review finding 9).
-    const MAX_STRIP_DIMENSION = 16384;
-    const tooLargeForStrip = W * opts.frames > MAX_STRIP_DIMENSION || H > MAX_STRIP_DIMENSION;
+    // Only warn when the caller explicitly opted into a strip (`cache:
+    // true`): under `cache: 'auto'` the cap tripping just means "this
+    // particular resolved size doesn't get a strip", which is exactly what
+    // `'auto'` is supposed to decide silently — the same way it silently
+    // opts out above the 120px size threshold. Warning here too used to
+    // fire for perfectly ordinary default-configured instances (e.g. a
+    // retina-DPR instance on a moderately wide shape) with a remedy
+    // ("pass `cache: false`") that makes no sense to a caller who never
+    // asked for a cache (review findings 3 and 10).
     if (
-      requestedCache &&
-      tooLargeForStrip &&
+      opts.cache === true &&
+      tooLargeForStrip() &&
       typeof console !== 'undefined' &&
       !warnedCacheTooLarge
     ) {
@@ -481,7 +514,7 @@ export function createDithered(
           '(or a smaller `size`) to avoid this check.',
       );
     }
-    const useCache = requestedCache && !tooLargeForStrip;
+    const useCache = shouldUseCache();
     if (useCache) {
       // `W / cssW`, not `dpr`: that is the factor the browser actually
       // stretches the backing store by when painting it into the CSS
@@ -680,6 +713,14 @@ export function createDithered(
     },
 
     update(patch: Partial<DitheredOptions>) {
+      // A destroyed instance is final: without this guard, `update()` in
+      // fill mode would call `attachFillObserver()`, which finds the
+      // `destroy()`-cleared `fillArmed` false and re-arms from scratch --
+      // re-capturing `previousDisplay`, writing `display: block` back onto
+      // a node the caller believes is released, and constructing a second,
+      // never-disconnected `ResizeObserver` (review finding 2).
+      if (destroyed) return;
+
       const prevShape = opts.shape;
       const prevCols = opts.cols;
       const prevRows = opts.rows;
@@ -693,7 +734,10 @@ export function createDithered(
       const prevRadius = opts.radius;
       const prevCache = opts.cache;
       const prevMaxDpr = opts.maxDpr;
+      const prevInitialFrame = opts.initialFrame;
       const wasFill = isFillMode();
+      const wasDormant = dormant;
+      const wasReduced = reduced;
       const patchHasSize = 'size' in patch && patch.size !== undefined;
 
       // Merge onto the *current* resolved options (not the static
@@ -819,9 +863,29 @@ export function createDithered(
           sizePx = resolveSizePx(opts.size);
         }
 
+        // `respectReducedMotion`/`prefers-reduced-motion` toggling into
+        // effect has to force a repaint to `initialFrame` (the documented
+        // "single static frame"), not leave whatever frame happened to be
+        // showing when the loop halts. `initialFrame` itself changing is
+        // also expected to still visibly repaint, matching the pre-split
+        // `update()` behaviour, even though it typically doesn't change
+        // *which* frame is shown against an already-running instance
+        // (review finding 7).
+        const nextReduced = prefersReducedMotion(opts);
+        const reducedChanged = nextReduced !== wasReduced;
+        const initialFrameChanged = opts.initialFrame !== prevInitialFrame;
+        const forceRepaint = reducedChanged || initialFrameChanged;
+
         // Captured before `buildCache()` clobbers `currentFrame` — see the
-        // identical comment in `resizeTo` (review finding 2).
-        const frameToShow = currentFrame >= 0 ? currentFrame % opts.frames : opts.initialFrame;
+        // identical comment in `resizeTo` (review finding 2). While
+        // reduced motion is (now) in effect, the frame shown is always
+        // `initialFrame` — the documented single static frame — never
+        // whatever the loop happened to leave `currentFrame` on.
+        const frameToShow = nextReduced
+          ? opts.initialFrame
+          : currentFrame >= 0
+            ? currentFrame % opts.frames
+            : opts.initialFrame;
 
         // Run only the stages this patch actually touches (ADR 0011's
         // three-stage table), rather than unconditionally reapplying the
@@ -837,8 +901,30 @@ export function createDithered(
           // the one-cell threshold (review finding 1, scenario B).
           pendingRebuild = true;
         } else {
+          // The fill-state resolution above may have just woken the
+          // instance out of dormancy (`detachFillObserver()` on 'fill' ->
+          // number, or `resolveFillSizeSync()` on a reparent/shape change
+          // while dormant). Neither of those is itself "the surface
+          // changed" by the checks below when the size it wakes to
+          // happens to equal the retained `sizePx` -- and dormancy always
+          // leaves the canvas at CSS `0px`, so without this the canvas
+          // would restart its animation loop at a correct backing-store
+          // size but permanently zero CSS size (review finding 1).
+          const wokeFromDormant = wasDormant && !dormant;
+          // In an environment with no `matchMedia` (or one that throws),
+          // `mql` never gets armed and there is no listener to catch a
+          // DPR change — the ADR's documented "degrades to no DPR
+          // tracking" fallback. Recover just that path here, gated on
+          // `mql === null` so it's a no-op cost everywhere DPR tracking
+          // is actually live (review finding 6).
+          const dprMayHaveChanged =
+            mql === null && effectiveDpr(rawDpr(), opts.maxDpr) !== lastEffectiveDpr;
           const surfaceChanged =
-            shapeChanged || opts.maxDpr !== prevMaxDpr || sizePx !== prevSizePx;
+            shapeChanged ||
+            opts.maxDpr !== prevMaxDpr ||
+            sizePx !== prevSizePx ||
+            wokeFromDormant ||
+            dprMayHaveChanged;
           const cacheAffectingChanged =
             doResample ||
             surfaceChanged ||
@@ -852,10 +938,10 @@ export function createDithered(
             opts.cache !== prevCache;
           if (surfaceChanged) applySurface();
           if (cacheAffectingChanged) buildCache();
-          repainted = surfaceChanged || cacheAffectingChanged;
+          repainted = surfaceChanged || cacheAffectingChanged || forceRepaint;
         }
 
-        reduced = prefersReducedMotion(opts);
+        reduced = nextReduced;
         isPaused = opts.paused;
         halt();
         haltedForRepaint = true;
@@ -923,6 +1009,18 @@ export function createDithered(
       // double-invoked mount effect, or any remount) captures the *already
       // corrupted* `display: block` as the "previous" value on the next
       // create, permanently losing the real original (review finding 1).
+      // Restore the last resolved CSS size before tearing down fill state:
+      // dormancy writes `0px x 0px` and retains it until the next wake, so
+      // a `destroy()` that happens to land while dormant would otherwise
+      // leave the canvas permanently zero-sized for a caller who keeps the
+      // node around after destroying the instance (review finding 11).
+      // Checked before `detachFillObserver()`, which itself resets
+      // `dormant` as part of leaving fill mode.
+      if (dormant) {
+        const css = surfaceSize(sizePx, opts.shape);
+        canvas.style.width = css.width + 'px';
+        canvas.style.height = css.height + 'px';
+      }
       // Idempotent: a second `destroy()` finds `fillArmed` already false.
       if (fillArmed) {
         detachFillObserver();
