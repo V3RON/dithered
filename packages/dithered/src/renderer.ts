@@ -135,9 +135,22 @@ export function createDithered(
   let sizePx = 0;
   let dormant = false;
   let resizeObserver: ResizeObserver | null = null;
+  // True once `attachFillObserver()` has captured `previousDisplay` and set
+  // `display: block` — gated on this rather than on `resizeObserver` being
+  // non-null, since the latter stays `null` forever when the global
+  // `ResizeObserver` is unavailable, which would otherwise re-capture
+  // `previousDisplay` (already 'block' by then) on every call.
+  let fillArmed = false;
   let previousDisplay: string | undefined;
-  let lastBox: MeasuredBox | null = null;
+  // The element `resizeObserver` currently observes, so a reparented
+  // canvas can `unobserve` the old parent instead of accumulating targets.
+  let observedParent: Element | null = null;
   let warnedNoParent = false;
+  // Set when an `update()` (or a DPR change) arrives while dormant: the
+  // patch's surface/cache-affecting work can't run against a 0x0 backing
+  // store, so it's deferred and forced through on the next wake regardless
+  // of the one-cell threshold (see `resizeTo` and review finding 1).
+  let pendingRebuild = false;
 
   // --- DPR tracking ------------------------------------------------------
   let mql: MediaQueryList | null = null;
@@ -248,7 +261,8 @@ export function createDithered(
    * moment `update()` runs again after it's mounted.
    */
   function attachFillObserver(): void {
-    if (!resizeObserver) {
+    if (!fillArmed) {
+      fillArmed = true;
       previousDisplay = canvas.style.display;
       canvas.style.display = 'block';
       if (typeof ResizeObserver !== 'undefined') {
@@ -263,7 +277,15 @@ export function createDithered(
       // that stays put until the next update().
     }
     const parent = canvas.parentElement;
-    if (resizeObserver && parent) resizeObserver.observe(parent);
+    // Re-observing every call is what lets a canvas mounted after the last
+    // attempt recover; unobserving the previous parent first is what stops
+    // a reparented canvas from being driven by two boxes at once (a stray
+    // resize of the old parent would otherwise still reach `applyMeasurement`).
+    if (resizeObserver && observedParent !== parent) {
+      if (observedParent) resizeObserver.unobserve(observedParent);
+      if (parent) resizeObserver.observe(parent);
+      observedParent = parent;
+    }
   }
 
   function detachFillObserver(): void {
@@ -271,10 +293,11 @@ export function createDithered(
       resizeObserver.disconnect();
       resizeObserver = null;
     }
+    observedParent = null;
+    fillArmed = false;
     canvas.style.display = previousDisplay ?? '';
     previousDisplay = undefined;
     dormant = false;
-    lastBox = null;
   }
 
   /** Synchronous fill-size resolution used by create() and update(). */
@@ -283,11 +306,14 @@ export function createDithered(
     if (!box) {
       warnNoParent();
       dormant = false;
-      if (!(sizePx > 0)) sizePx = resolveSizePx(DEFAULTS.size);
+      // Always the numeric default here — not "leave sizePx alone" — so a
+      // `number -> 'fill'` transition on a detached canvas actually matches
+      // the warning it just logged instead of silently keeping the old
+      // numeric size (see review finding 6).
+      sizePx = resolveSizePx(DEFAULTS.size);
       return;
     }
     warnedNoParent = false; // a parent showed up; warn again if it later disappears
-    lastBox = box;
     const fitted = fitSize(box.width, box.height, aspectOf(opts.shape));
     if (fitted <= 0) {
       dormant = true;
@@ -300,7 +326,6 @@ export function createDithered(
   /** Applied on every accepted `ResizeObserver` delivery in fill mode. */
   function applyMeasurement(box: MeasuredBox): void {
     if (destroyed) return;
-    lastBox = box;
     const fitted = fitSize(box.width, box.height, aspectOf(opts.shape));
 
     if (fitted <= 0) {
@@ -332,12 +357,21 @@ export function createDithered(
    */
   function resizeTo(fitted: number): void {
     sizePx = fitted;
+    // Captured *before* `buildCache()` runs: it always resets `currentFrame`
+    // to -1, which would otherwise make this ternary dead and silently
+    // snap a paused/determinate instance back to `initialFrame` on every
+    // resize that crosses a cell boundary (see review finding 2).
+    const frameToShow = currentFrame >= 0 ? currentFrame % opts.frames : opts.initialFrame;
     applySurface();
     const cellThreshold = builtW > 0 ? builtW / opts.cols : 0;
-    if (builtW === 0 || Math.abs(W - builtW) >= cellThreshold) {
+    // `pendingRebuild` forces this even under the threshold: a resample or
+    // an option change (e.g. `fg`) picked up while dormant has no surface
+    // to apply to yet, and waking at the *same* device size would otherwise
+    // never rebuild the now-stale cache (see review finding 1, scenario B).
+    if (pendingRebuild || builtW === 0 || Math.abs(W - builtW) >= cellThreshold) {
       buildCache();
     }
-    blit(currentFrame >= 0 ? currentFrame % opts.frames : opts.initialFrame);
+    blit(frameToShow);
   }
 
   // --- the three configure stages (see ADR 0011) ------------------------
@@ -408,6 +442,7 @@ export function createDithered(
     builtW = W;
     builtH = H;
     currentFrame = -1;
+    pendingRebuild = false;
   }
 
   function blit(f: number): void {
@@ -504,13 +539,21 @@ export function createDithered(
     armDpr(); // the old query is now stale; re-arm unconditionally.
     const eff = effectiveDpr(rawDpr(), opts.maxDpr);
     if (eff === lastEffectiveDpr) return; // raw moved, but the clamp absorbed it
+    lastEffectiveDpr = eff;
     if (dormant) {
-      lastEffectiveDpr = eff;
-      return; // nothing to redraw at 0x0; the next wake reconfigures anyway
+      // Nothing to redraw at 0x0. Force a full rebuild through the next
+      // wake instead of leaving it to the one-cell threshold — a modest
+      // DPR move can be smaller than one cell and would otherwise leave
+      // the strip built at a stale resolution indefinitely (review finding 7).
+      pendingRebuild = true;
+      return;
     }
+    // Captured before `buildCache()` clobbers `currentFrame` — see the
+    // identical comment in `resizeTo` (review finding 2).
+    const frameToShow = currentFrame >= 0 ? currentFrame % opts.frames : opts.initialFrame;
     applySurface();
     buildCache();
-    blit(currentFrame >= 0 ? currentFrame % opts.frames : opts.initialFrame);
+    blit(frameToShow);
   }
 
   function disarmDpr(): void {
@@ -615,6 +658,11 @@ export function createDithered(
       const prevIsPaused = isPaused;
       const prevSizePx = sizePx;
       const prevDormant = dormant;
+      const prevPendingRebuild = pendingRebuild;
+      const prevFillArmed = fillArmed;
+      const prevPreviousDisplay = previousDisplay;
+      const prevObservedParent = observedParent;
+      const prevWarnedNoParent = warnedNoParent;
       const wasScheduled = raf !== 0;
 
       opts = candidate;
@@ -625,6 +673,11 @@ export function createDithered(
       // (schedule() must restore it).
       let haltedForRepaint = false;
       try {
+        // Cells depend only on shape/cols/rows/hitTest/matrix (ADR 0011),
+        // never on the (possibly currently absent) surface, so a resample
+        // is safe and correct to run immediately regardless of dormancy —
+        // deferring it would lose it permanently, since waking only re-runs
+        // `applySurface()`/`buildCache()` (review finding 1, scenario A).
         if (doResample) resample();
         applyResolvedFg();
 
@@ -650,7 +703,17 @@ export function createDithered(
           sizePx = resolveSizePx(opts.size);
         }
 
-        if (!dormant) {
+        // Captured before `buildCache()` clobbers `currentFrame` — see the
+        // identical comment in `resizeTo` (review finding 2).
+        const frameToShow = currentFrame >= 0 ? currentFrame % opts.frames : opts.initialFrame;
+
+        if (dormant) {
+          // Everything but the resample above needs a surface (brightness,
+          // colors, frames, gap, radius -> the sprite cache): defer it,
+          // forcing a full rebuild through on the next wake regardless of
+          // the one-cell threshold (review finding 1, scenario B).
+          pendingRebuild = true;
+        } else {
           applySurface();
           buildCache();
         }
@@ -664,7 +727,7 @@ export function createDithered(
           canvas.style.width = '0px';
           canvas.style.height = '0px';
         } else {
-          blit(currentFrame >= 0 ? currentFrame % opts.frames : opts.initialFrame);
+          blit(frameToShow);
         }
         schedule();
       } catch (err) {
@@ -687,6 +750,11 @@ export function createDithered(
         isPaused = prevIsPaused;
         sizePx = prevSizePx;
         dormant = prevDormant;
+        pendingRebuild = prevPendingRebuild;
+        fillArmed = prevFillArmed;
+        previousDisplay = prevPreviousDisplay;
+        observedParent = prevObservedParent;
+        warnedNoParent = prevWarnedNoParent;
         if (haltedForRepaint && wasScheduled) schedule();
         throw err;
       }

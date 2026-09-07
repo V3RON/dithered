@@ -290,6 +290,15 @@ const fillBoxStyle: CSSProperties = {
   padding: 12,
 };
 
+// Stable identity across renders: `FillBox`'s own `ResizeObserver` calls
+// `setBox` on every delivery (for the "measured box" readout), which
+// re-renders the component on every drag frame. An inline `presets.gem()`
+// in the JSX below would rebuild its identity on each of those renders,
+// which the `Dithered` wrapper treats as a `brightness` change and
+// reconfigures for — rebuilding the sprite strip on every pointermove and
+// defeating the exact optimization this demo exists to show off.
+const FILL_BOX_BRIGHTNESS = presets.gem();
+
 function FillBox() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [box, setBox] = useState<{ width: number; height: number } | null>(null);
@@ -319,7 +328,7 @@ function FillBox() {
       <div ref={containerRef} style={fillBoxStyle}>
         <Dithered
           shape={shapes.rozenite}
-          brightness={presets.gem()}
+          brightness={FILL_BOX_BRIGHTNESS}
           size="fill"
           fg={ACCENT}
           label="A resizable dithered shape filling its container"
