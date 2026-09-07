@@ -162,20 +162,63 @@ Step count follows the steady-state cadence,
 `steps = clamp(round(duration / (period / frames)), 2, 240)`, so a morph ticks
 at the same rate as the loop it interrupts. The cap bounds recording cost for
 a long `duration`. The transition array is played once, in order, then dropped
-and the new steady-state array takes over.
+and the new steady-state array takes over. Each step `i` is recorded at
+progress `p = i / (steps - 1)` — `i = 0` is exactly `p = 0`, `i = steps - 1` is
+exactly `p = 1` — so _selecting_ a step during playback has to use the same
+denominator, `round(t * (steps - 1))`, not `floor(t * steps)`: the two
+denominators disagree by one step, and the wrong one runs playback ahead of
+`t`, freezing on the finished target for the last fraction of the morph.
+
+The steady-state `SkPicture[]` a completed morph hands off to must not be
+rebuilt from the target config until the morph itself is done with the
+canvas — recording is comparatively cheap, but it is not free, and (more
+importantly) `useDitheredPictures` and the frame callback that reads its
+output both live on ordinary React state/props: if the steady array already
+reflected the target the instant `shape`/`brightness` changed, the UI-thread
+loop's steady branch — which has no morph state to gate it while one is
+merely _queued_ behind `onLoopEnd` — would paint that target on its very next
+tick, before any morph frame existed to justify it. The steady array is
+therefore built from whatever config is _currently backing playback_, which
+stays pinned to the outgoing config for as long as an episode (queued or
+active) is unresolved and only advances once it ends — mirroring, on native,
+the same "outgoing stays fixed, target is applied only on completion" split
+`opts`/`ActiveTransition`/`PendingTransition` give the web renderer for free
+by construction.
 
 ### 6. `finishLoop()` and `onLoopEnd`
 
 `finishLoop()` returns a promise that resolves the next time playback wraps to
-phase 0, resolved from the playback tick (when the computed frame index wraps
-below the previous one) rather than from a timer, so it lines up with what was
-actually drawn.
+phase 0, resolved from the playback tick rather than from a timer, so it lines
+up with what was actually drawn. Wrap detection itself is purely a wall-clock
+comparison — `Math.floor(nowMs / period)` against the same quantity computed
+on the previous tick — never the painted frame index: a frame index is
+written by more than steady playback (`update()` holds it across a phase
+change, `renderFrame()` sets it to whatever the caller asks, a morph doesn't
+touch it at all while it's running), so a decrease there does not reliably
+mean a loop boundary was crossed.
+
+That wall-clock baseline is tagged with the `period` it was captured under,
+and a comparison against a baseline captured under a _different_ `period`
+(one changed since) is treated the same as having no baseline at all — no
+wrap reported, baseline reset — rather than compared anyway, which could
+manufacture a false wrap or hide a real one. This tag lives independently of
+`configure()`: an earlier version reset the whole baseline on every
+`configure()` regardless of _why_ it ran, which swallowed any wrap that fell
+in the same rAF gap as an unrelated reconfigure (a transition landing on the
+same `period` is the common case) — delaying `finishLoop()`/a queued
+`onLoopEnd` morph by up to a full `period`, or indefinitely under reconfigures
+frequent enough to always land inside that gap.
 
 A promise that can never settle is worse than one that settles early, so
 pending resolvers are also drained — resolved, never rejected — whenever the
 loop stops advancing: `setPaused(true)`, tab hidden, canvas off-screen,
 reduced motion, or `destroy()`. Resolution therefore means "the loop is not
-mid-cycle any more", not "a full cycle was drawn"; the README says so.
+mid-cycle any more", not "a full cycle was drawn"; the README says so. This
+applies uniformly regardless of _which_ call is what actually stops the
+loop — `update()`/`cutToTarget()` landing on a patch that halts it (an
+explicit `paused: true`, or reduced motion having turned on since the last
+check) drain exactly like `setPaused(true)` does, not only the calls that are
+always a halt by construction.
 
 `transition.onLoopEnd` is **not** implemented as `await finishLoop()` before
 starting the morph. It has its own mechanism: a `transitionTo` call with
@@ -232,6 +275,27 @@ call never has.
   instantly (its target becomes the current steady state, its promise
   resolves) and starts the new morph from there. Blends are never nested, so
   the state stays bounded no matter how fast a caller flips props.
+- `renderFrame(frame)` "draws a specific frame directly, bypassing the
+  animation loop" — bypassing wins over a transition too: it settles one in
+  flight or queued first (the same cut-short path a halt uses), then paints
+  `frame` against the now fully-resolved, mutually consistent target. A bare
+  paint against a mid-transition instance would mix the outgoing shape's
+  cells/brightness with the target's already-resized surface (the resize
+  happens at morph start, per §5) — the wrong cell count at the wrong pitch,
+  not a recognizable point on the morph curve.
+- `paused` and an option change landing in the same render/commit is decided
+  by the state that commit actually ends on, not the state from just before
+  it: unpausing and changing `shape` together starts a real morph (there is a
+  loop to overlay it on by the time the change lands); pausing and changing
+  `shape` together still cuts immediately (there is not, once it lands) — the
+  same rule regardless of which prop a caller happens to have changed in
+  which commit, and the same on `dithered/react` and `dithered/native`. On
+  native, where `holding` is computed straight from each render's own props,
+  this falls out for free. `dithered/react` drives the imperative core
+  through two separate effects (pausing, and reconfigure/`transitionTo`) — to
+  get the same answer there, the pausing effect is declared _before_ the
+  reconfigure effect, so `setPaused()` has already landed on the instance by
+  the time `transitionTo()` reads whether the loop is advancing.
 
 ### 8. Where the code lives
 
@@ -239,6 +303,21 @@ Everything about _what_ to draw at progress `p` is a pure function in
 `src/core/transition.ts`. The web renderer and the native hook each own only
 the scheduling and the surface. That is what makes the "identical props on
 both platforms" acceptance criterion structural rather than a promise.
+
+The one place the two platform wrappers deliberately diverge from the core is
+how `patch.transition` gets built. `renderer.ts`'s own merge
+(`mergeTransitionOption`) is sticky — a `transitionTo({ transition: {
+duration: 600 } })` after an earlier call that set `onLoopEnd: true` keeps
+`onLoopEnd: true`, the same rule every other field in a patch follows. That is
+correct for the _imperative_ API, where a caller who didn't mention a field
+plainly meant "leave it". It is wrong for the _declarative_ `transition` prop
+on `dithered/react`/`dithered/native`: a fresh render's props are supposed to
+be the whole truth, and a component whose `transition={{ duration: 400 }}`
+can never turn a previously-set `onLoopEnd: true` back off is a one-way door.
+Both wrappers resolve the prop against `TRANSITION_DEFAULTS` on every render,
+before it ever reaches `update()`/`transitionTo()`, so the object the core
+sees always has every field populated — the sticky merge underneath it never
+actually has anything to fall back to, and the two rules never collide.
 
 ## Alternatives considered
 

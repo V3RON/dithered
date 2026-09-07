@@ -3226,22 +3226,67 @@ describe('createDithered transitions', () => {
     expect(resolved).toBe(true);
   });
 
-  it('a decreasing `currentFrame` that is not a real wrap does not fire finishLoop()/onLoopWrap', async () => {
-    // Regression test: the previous wrap check was
-    // `currentFrame >= 0 && f < currentFrame` — comparing the *painted
-    // frame index* rather than the wall clock. `currentFrame` is written
-    // by more than the steady playback tick (`update()` holds it across
-    // a phase change, `renderFrame()` sets it to whatever the caller
-    // asks for), so a decrease there does not mean a loop boundary was
-    // actually crossed. Shortening `period` via `update()` while holding
-    // the phase is enough to trigger a same-tick decrease that is not a
-    // wrap: `frameAt` under the *new*, shorter period reads a lower frame
-    // for the *same* wall-clock instant than the frame `update()` just
-    // held over from the old one.
+  it('an update() that changes `period` does not produce a spurious wrap or swallow a genuine one (finding 5)', async () => {
+    // Regression test, adapted for the phase-accumulator model: the
+    // original finding was that the old absolute `frameAt(nowMs, period,
+    // frames)` model could read a *lower* frame index for the same
+    // wall-clock instant right after `period` shrank, looking exactly
+    // like a wrap that never happened. `phase` has no such failure mode —
+    // it is a relative accumulator with no fixed relationship to
+    // wall-clock zero (ADR 0006), so a `period` change by itself can never
+    // look like a wrap. This test pins that down and, symmetrically,
+    // checks a *genuine* wrap under the new period is still detected.
     const { canvas } = makeFakeCanvas();
     const instance = createDithered(canvas, baseOptions()); // period 1000, frames 10
 
-    mockNow = 900; // frame 9.
+    mockNow = 900;
+    fire(900); // first tick after create(): dt=0, just establishes the baseline.
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+
+    // Halves the period while holding the current phase.
+    instance.update({ period: 500 });
+
+    // dt=10ms out of the new 500ms period — nowhere near a full loop.
+    mockNow = 910;
+    fire(910);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    // dt=490ms more crosses the 1.0 phase boundary under the new,
+    // shorter period: a genuine wrap, correctly detected after the change.
+    mockNow = 1400;
+    fire(1400);
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
+  it('a transition landing does not swallow a wrap crossed shortly after it (finding 5)', async () => {
+    // Regression test, adapted for the phase-accumulator model: the
+    // original finding was that `configure()` unconditionally nulled out
+    // the wrap-detection baseline, so any reconfigure landing in the same
+    // rAF gap as a period boundary silently ate that wrap. Our
+    // `finishTransitionNow` resets `lastNow` (not `phase`) for a related
+    // but distinct reason (see its own comment) — the very next steady
+    // tick always measures `dt = 0` by design and so cannot itself detect
+    // a wrap, but a wrap crossed once real elapsed time resumes
+    // accumulating must still come through correctly.
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions()); // period 1000, frames 10
+
+    mockNow = 800;
+    fire(800); // baseline tick before the morph.
+
+    mockNow = 800;
+    void instance.transitionTo({ fg: '#bbb', transition: { duration: 100 } });
+
+    // Exactly at `duration`: the morph completes this tick, via
+    // `finishTransitionNow`, which resets `lastNow` to `null` but leaves
+    // `phase` exactly where it was frozen.
+    mockNow = 900;
     fire(900);
 
     let resolved = false;
@@ -3249,19 +3294,93 @@ describe('createDithered transitions', () => {
       resolved = true;
     });
 
-    // Halves the period while holding the current phase — `update()`
-    // paints `blit(prevFrame % frames)` = `blit(9)`, i.e. `currentFrame`
-    // stays 9 even though the new period makes frame 9 out of step with
-    // the wall clock.
-    instance.update({ period: 500 });
-
-    // Under the new period, t = 910 lands on frame `frameAt(910, 500, 10) = 8`
-    // — 8 < 9 looks exactly like the old buggy wrap check, but no
-    // `period` boundary was actually crossed between 900 and 910.
-    mockNow = 910;
-    fire(910);
+    // The first steady tick after the reset measures dt=0 and so cannot
+    // detect a wrap by itself.
+    mockNow = 950;
+    fire(950);
     await Promise.resolve();
     expect(resolved).toBe(false);
+
+    // dt=950ms more (enough to complete a full loop) is still detected
+    // correctly.
+    mockNow = 1900;
+    fire(1900);
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
+  it('update() drains a pending finishLoop() when the patch itself halts the loop (finding 3)', async () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+
+    // `update({ paused: true })` — not `setPaused(true)` — is the path
+    // that used to strand this promise: it went through `halt()` without
+    // ever calling `drainLoopEnd()`, unlike `haltPlayback()` (which
+    // `setPaused` uses).
+    instance.update({ paused: true });
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
+  it('a reduced-motion cut drains a pending finishLoop() instead of stranding it (finding 3)', async () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+
+    // The OS reduced-motion preference flips on, then any `transitionTo`/
+    // `update()` re-reads it and takes `cutToTarget`'s immediate-cut
+    // branch — which used to `halt()` without draining either.
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({ matches: true })),
+    );
+    await instance.transitionTo({ fg: '#123456', transition: { duration: 400 } });
+    expect(resolved).toBe(true);
+  });
+
+  it('renderFrame() during an active morph settles it first, painting the target rather than a stale mix (finding 9)', () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(
+      canvas,
+      baseOptions({ shape: SQUARE_SHAPE, brightness: () => true }),
+    );
+
+    mockNow = 1000;
+    void instance.transitionTo({
+      brightness: () => false,
+      transition: { duration: 1000 },
+    });
+
+    // 200ms into a still-in-flight 1000ms morph: `renderFrame` is called
+    // directly, without ever going through `setPaused`/`update` first —
+    // reachable by any direct `createDithered` consumer.
+    ctx.fill.mockClear();
+    mockNow = 1200;
+    instance.renderFrame(0);
+
+    // The morph is settled onto its target (always-false brightness) as
+    // part of this call, so frame 0 draws nothing — not a half-dissolved
+    // mix of the outgoing shape's cells against the target's (already
+    // resized) geometry.
+    expect(ctx.fill).not.toHaveBeenCalled();
+
+    // A later, ordinary tick confirms this really did adopt the target as
+    // the new steady state (rather than, say, coincidentally drawing zero
+    // cells for an unrelated reason): every subsequent frame is also
+    // brightness-false.
+    ctx.fill.mockClear();
+    mockNow = 1300;
+    fire(1300);
+    expect(ctx.fill).not.toHaveBeenCalled();
   });
 
   it('transition.onLoopEnd defers the morph until after the loop wraps', async () => {

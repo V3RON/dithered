@@ -9,6 +9,8 @@ import {
   resolveSizePx,
   surfaceSize,
   toPalette,
+  TRANSITION_DEFAULTS,
+  type ResolvedTransitionOptions,
 } from './core';
 import { gem } from './presets';
 import { createDithered } from './renderer';
@@ -264,6 +266,26 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     progress,
   ]);
 
+  // `transition`'s own fields, resolved with the same defaults
+  // `resolveOptions` would fill in — read fresh from the `transition` prop
+  // object every render, never merged with an *earlier* render's
+  // `transition` (finding 6): the whole prop is the truth for this
+  // render, so dropping a field (`{ duration: 400 }` after `{ duration:
+  // 400, onLoopEnd: true }`) puts it back to its default instead of
+  // leaving it stuck at whatever a previous render last set — the
+  // declarative prop is not a one-way door. This is deliberately *not*
+  // how `transitionTo`'s own patch merging works on the imperative core
+  // API (`renderer.ts`'s `mergeTransitionOption` is sticky on purpose,
+  // and stays that way) — only the declarative prop gets whole-object
+  // semantics, because only the declarative prop can silently go stale
+  // between renders without the caller writing every field every time.
+  const resolvedTransition: ResolvedTransitionOptions | undefined = transition
+    ? {
+        duration: transition.duration ?? TRANSITION_DEFAULTS.duration,
+        onLoopEnd: transition.onLoopEnd ?? TRANSITION_DEFAULTS.onLoopEnd,
+      }
+    : undefined;
+
   // The reconfigure effect's own "did any *option* actually change" record
   // — deliberately excludes `transition` (see the effect below, and
   // finding 5: the documented `transition={{ duration: 400 }}` usage is a
@@ -346,6 +368,42 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     // and recreate the instance, only mount/unmount should.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Applies `paused` directly via `setPaused()` — separate from the
+  // reconfigure effect below so toggling it never triggers a resample/
+  // cache rebuild. Skipped while `time` or `progress` is controlled,
+  // since the effect below owns pausing then.
+  //
+  // Declared *before* the reconfigure effect on purpose (finding 4):
+  // React runs a component's effects in declaration order, so when
+  // `paused` and an option like `shape` change in the same commit, this
+  // effect's `setPaused()` call lands on the instance before the
+  // reconfigure effect below calls `update()`/`transitionTo()` — meaning
+  // that call sees the instance's *new* pause state, not the one it had
+  // before this render. That matters because `transitionTo()` decides
+  // morph-vs-cut from whether the loop is currently advancing: with the
+  // effects in the other order, unpausing and changing `shape` together
+  // would call `transitionTo()` while the instance was *still* paused
+  // from the previous render, taking the immediate-cut branch — on
+  // `dithered/native`, the same two props in the same commit start a real
+  // morph, because `holding` there is computed from *this* render's props
+  // directly (see `native/Dithered.tsx`'s own comment on `holding`). This
+  // ordering makes the two platforms agree: the *final*, post-commit
+  // pause state decides, not which prop a caller happened to change in
+  // which commit. See the README's "Transitions" section for the
+  // user-facing rule.
+  useEffect(() => {
+    if (skipNextPaused.current) {
+      skipNextPaused.current = false;
+      return;
+    }
+    // `time == null` — loose, so it covers `null` as well as `undefined`.
+    // `null` is documented as behaving exactly like an absent prop (the
+    // `time={sharedValue ?? null}` pattern), and the effect below hands
+    // it to `clearTime()` rather than to `setTime`, so it does not own
+    // pausing and must not suppress it here.
+    if (progress === undefined && time == null) instanceRef.current?.setPaused(paused);
+  }, [paused, progress, time]);
 
   // Reconfigure (may resample cells / rebuild the sprite cache) on option
   // changes, skipping the initial mount run since `createDithered` above
@@ -458,7 +516,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
       respectReducedMotion,
       initialFrame,
       speed,
-      transition,
+      transition: resolvedTransition,
     };
     if (transition) {
       void instanceRef.current?.transitionTo(patch);
@@ -486,22 +544,6 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     speed,
     transition,
   ]);
-
-  // Separate from the reconfigure effect so toggling `paused` never
-  // triggers a resample/cache rebuild. Skipped while `time` or
-  // `progress` is controlled, since the effect below owns pausing then.
-  useEffect(() => {
-    if (skipNextPaused.current) {
-      skipNextPaused.current = false;
-      return;
-    }
-    // `time == null` — loose, so it covers `null` as well as `undefined`.
-    // `null` is documented as behaving exactly like an absent prop (the
-    // `time={sharedValue ?? null}` pattern), and the effect below hands
-    // it to `clearTime()` rather than to `setTime`, so it does not own
-    // pausing and must not suppress it here.
-    if (progress === undefined && time == null) instanceRef.current?.setPaused(paused);
-  }, [paused, progress, time]);
 
   // Re-resolve `'currentColor'` on *every* render, not just when
   // `className`/`style`/`fg` change. The overwhelmingly common web

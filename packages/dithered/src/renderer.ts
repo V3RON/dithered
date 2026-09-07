@@ -293,6 +293,21 @@ export function createDithered(
   // independently of `currentFrame` — see `checkWrap` for why the two
   // cannot be the same variable.
   let lastWrapCheckMs: number | null = null;
+  // The `period` that `lastWrapCheckMs` was captured under. `checkWrap`
+  // compares two wall-clock moments through `Math.floor(nowMs / opts.period)`
+  // — a comparison that is only meaningful when both ends used the *same*
+  // period. `configure()` can follow an `opts.period` change (a plain
+  // `update()`, or a transition landing that happens to touch `period`),
+  // which invalidates the previous baseline's *meaning* without
+  // invalidating the baseline itself — so that is checked for here, inside
+  // `checkWrap`, rather than by unconditionally nulling `lastWrapCheckMs`
+  // on every `configure()` regardless of *why* it ran. The earlier,
+  // unconditional reset swallowed any wrap that fell in the same rAF gap
+  // as an unrelated reconfigure — e.g. a transition completing on the same
+  // period, or any `update()` at all — delaying `finishLoop()`/a queued
+  // `onLoopEnd` morph by up to a full period, or indefinitely under
+  // reconfigures frequent enough to always land inside that gap (finding 5).
+  let lastWrapPeriod: number | null = null;
   let isPaused = opts.paused;
   let visible = true;
   let destroyed = false;
@@ -720,12 +735,11 @@ export function createDithered(
     builtH = H;
     currentFrame = -1;
     pendingRebuild = false;
-    // A reconfigure (new shape/size, or a steady state just adopted from
-    // a completed transition) starts a fresh loop from the wrap
-    // detector's point of view too, for the same reason `currentFrame`
-    // resets: whatever `period` boundaries existed under the old
-    // configuration say nothing about the new one.
-    lastWrapCheckMs = null;
+    // `lastWrapCheckMs`/`lastWrapPeriod` are deliberately *not* touched
+    // here (see `lastWrapPeriod`'s own comment): a reconfigure that keeps
+    // the same `period` must not swallow a wrap crossed in the same rAF
+    // gap, and one that changes `period` is already handled by
+    // `checkWrap`'s own period-mismatch check on the very next tick.
   }
 
   function blit(f: number): void {
@@ -800,6 +814,27 @@ export function createDithered(
   }
 
   /**
+   * Drains pending `finishLoop()` resolvers if, after whatever change just
+   * ran, the loop is no longer advancing — ADR 0004 §6: a resolver that
+   * can never fire is worse than one that fires early, and the loop
+   * stopping is one of that rule's listed triggers regardless of *which*
+   * call caused it. `haltPlayback()` (the `setPaused(true)`/tab-hidden/
+   * off-screen path) already drains unconditionally, because by
+   * definition it is always the loop stopping. `update()`/`cutToTarget()`
+   * are not always that — an `fg` change on a playing instance still ends
+   * with the loop advancing, and draining unconditionally there would
+   * resolve every pending `finishLoop()` on an unrelated color change — so
+   * they call this instead, which only drains when the *result* of this
+   * particular call actually left the loop halted: reduced motion just
+   * having turned on, an explicit `paused: true` in the patch, or any
+   * other `loopAdvancing()` gate. Without this, a `finishLoop()` awaited
+   * before either path runs could hang forever (finding 3).
+   */
+  function drainIfHalted(): void {
+    if (!loopAdvancing()) drainLoopEnd();
+  }
+
+  /**
    * Recomputes a `transitionTo` patch's target against the *current* live
    * `opts` — the merge `update(patch)` would do. Always reading `opts`
    * fresh (rather than a value captured earlier) is what lets a deferred
@@ -850,6 +885,7 @@ export function createDithered(
     buildCache();
     paintForPhase();
     schedule();
+    drainIfHalted();
   }
 
   /**
@@ -1033,8 +1069,19 @@ export function createDithered(
    */
   function checkWrap(nowMs: number): boolean {
     const previous = lastWrapCheckMs;
+    const previousPeriod = lastWrapPeriod;
     lastWrapCheckMs = nowMs;
-    if (previous === null) return false; // first tick after create()/configure(): nothing to compare against
+    lastWrapPeriod = opts.period;
+    // Nothing meaningful to compare against: either this is the first
+    // tick after create() (no baseline yet), or `opts.period` changed
+    // since the previous check, which would make the floor-division
+    // comparison below compare two moments under two different periods —
+    // able to manufacture a false wrap or hide a real one. Either way,
+    // report no wrap this tick and let the baseline just recorded above
+    // stand for the next one.
+    if (previous === null || previousPeriod === null || previousPeriod !== opts.period) {
+      return false;
+    }
     return Math.floor(nowMs / opts.period) > Math.floor(previous / opts.period);
   }
 
@@ -1062,8 +1109,12 @@ export function createDithered(
       // `finishTransitionNow`) rather than advanced underneath it, so
       // `dt` is only ever computed here, on the steady-state branch. Wrap
       // detection here stays phase-based (`loopsAt`), not the wall-clock
-      // `wrapped` computed above: `loopsAt` already accounts for `speed`,
-      // while `checkWrap`'s raw `floor(nowMs / period)` does not — it
+      // `wrapped` computed above: `loopsAt` already accounts for `speed`
+      // and for a relative, seeded accumulator that has no fixed
+      // relationship to wall-clock zero — unlike the old absolute
+      // `frameAt(nowMs, period, frames)` model `checkWrap`'s wall-clock
+      // comparison was built for, where "crossed an absolute multiple of
+      // `period`" and "a loop completed" were the same question. `wrapped`
       // exists only to catch a wrap that falls *inside* a morph's window,
       // where there is no live phase to derive it from (finding 4/5).
       const dt = lastNow === null ? 0 : nowMs - lastNow;
@@ -1618,6 +1669,7 @@ export function createDithered(
         if (haltedForRepaint && wasScheduled) schedule();
         throw err;
       }
+      drainIfHalted();
     },
 
     transitionTo(patch: Partial<DitheredOptions>): Promise<void> {
@@ -1662,6 +1714,20 @@ export function createDithered(
     },
 
     renderFrame(frame: number) {
+      // `renderFrame` "draws a specific frame directly, bypassing the
+      // animation loop" — a mid-morph `opts`/`cells`/`W`/`H` are a
+      // deliberately inconsistent mix (the outgoing shape's cells and
+      // brightness, sampled for the outgoing grid, but the surface
+      // already resized to the *target*'s — ADR 0004 §5 resizes at morph
+      // start, before the first paint) that only `paintTransitionFrame`
+      // is meant to paint from. A bare `blit(frame)` against that mix
+      // draws the outgoing shape at the target's cell pitch: wrong cell
+      // count, wrong geometry, or both (finding 9). Settling whatever is
+      // in flight first — the same "bypass wins" rule `setPaused(true)`
+      // already applies via `haltPlayback` — leaves `opts`/`cells`/`W`/`H`
+      // mutually consistent again before `blit` runs.
+      settlePendingNow();
+      finishTransitionNow();
       // Kept in sync with `phase`, not just `currentFrame`: a later
       // resize, DPR change, or `update()` reconfigure all compute "what's
       // currently displayed" via `frameForPhase(phase, opts.frames)`

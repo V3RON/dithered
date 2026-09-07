@@ -236,6 +236,19 @@ describe('Dithered (native)', () => {
     // the instant the prop changes, but the canvas must still show the
     // *outgoing* square — the deferred morph hasn't started yet.
     expect(cellsDrawnOf(lastPictureShared!.value)).toBe(16);
+
+    // Finding 1: this assertion alone passed even with the underlying fix
+    // entirely removed, because nothing had driven the frame callback —
+    // it only observed React-commit-time state, never what the UI-thread
+    // loop actually paints. A tick is the whole point: the pre-fix steady
+    // branch read `pictures` directly (already the target's, 0 cells)
+    // with no morph state to gate it while one is merely *queued*, so it
+    // repainted the target on this very first tick, a full `period`
+    // before the deferred morph was ever meant to start.
+    act(() => {
+      tick(250);
+    });
+    expect(cellsDrawnOf(lastPictureShared!.value)).toBe(16);
   });
 
   // Finding 3 (continued): once the wrap actually happens, the morph plays
@@ -441,7 +454,7 @@ describe('Dithered (native)', () => {
         shape={SQUARE_SHAPE}
         hitTest={squareHitTest}
         cols={4}
-        frames={4}
+        frames={48}
         period={1000}
         brightness={alwaysTrue}
         transition={{ duration: 400 }}
@@ -455,7 +468,7 @@ describe('Dithered (native)', () => {
           shape={OTHER_SHAPE}
           hitTest={otherHitTest}
           cols={4}
-          frames={4}
+          frames={48}
           period={1000}
           brightness={alwaysTrue}
           transition={{ duration: 400 }}
@@ -466,6 +479,18 @@ describe('Dithered (native)', () => {
     // No tick has run yet — the canvas must still show the outgoing
     // square, not the already-rebuilt (0-cell) target steady picture.
     expect(cellsDrawnOf(lastPictureShared!.value)).toBe(16);
+
+    // Driving a tick partway through the morph is the part the original
+    // assertion above never covered (finding 1/7): a genuine dissolve is
+    // in progress by now — some but not all cells drawn — not stuck on
+    // the outgoing shape forever, and not an instant jump to the target
+    // either.
+    act(() => {
+      tick(200); // roughly halfway through the 400ms morph.
+    });
+    const midway = cellsDrawnOf(lastPictureShared!.value);
+    expect(midway).toBeGreaterThan(0);
+    expect(midway).toBeLessThan(16);
   });
 
   // Finding 10 (native scheduling coverage): once a morph completes, the
@@ -560,5 +585,302 @@ describe('Dithered (native)', () => {
 
     expect(bayer4Draws).toBeGreaterThan(0);
     expect(bayer8Draws).not.toBe(bayer4Draws);
+  });
+
+  // Finding 2: the frame callback's own clock can restart mid-morph
+  // (Reanimated resets `info.timeSinceFirstFrame` to 0 whenever
+  // `useFrameCallback` is deactivated and reactivated — which happens
+  // whenever `holding` toggles, and can toggle in the very same commit
+  // that also starts a new morph). Without clamping/clock-restart
+  // handling, `elapsed` goes deeply negative, `morphPictures[step]` reads
+  // `undefined`, and the canvas goes blank for the rest of the window.
+  it('keeps painting a valid frame after the frame-callback clock restarts mid-morph (finding 2)', () => {
+    const { rerender } = render(
+      <Dithered
+        shape={SQUARE_SHAPE}
+        hitTest={squareHitTest}
+        cols={4}
+        frames={48}
+        period={1000}
+        brightness={alwaysTrue}
+        transition={{ duration: 400 }}
+      />,
+    );
+
+    // Run for a while first — mirrors a long-lived instance, not one
+    // freshly mounted at t=0 (where `elapsed` could never go negative
+    // regardless of this bug).
+    act(() => {
+      tick(9000);
+    });
+
+    // Starts a morph this commit, capturing `startedAt` from the clock as
+    // it stood on the last tick (9000).
+    act(() => {
+      rerender(
+        <Dithered
+          shape={OTHER_SHAPE}
+          hitTest={otherHitTest}
+          cols={4}
+          frames={48}
+          period={1000}
+          brightness={alwaysTrue}
+          transition={{ duration: 400 }}
+        />,
+      );
+    });
+
+    // Simulates the frame-callback clock restarting: a tick whose raw
+    // time is *lower* than the previous one, with no assumption about by
+    // how much (real Reanimated restarts at ~0, but the fix must not
+    // depend on the exact value).
+    act(() => {
+      tick(16);
+    });
+
+    const picture = lastPictureShared!.value;
+    expect(picture).not.toBeUndefined();
+    // A real recording — whichever step this virtual-clock-corrected tick
+    // lands on — draws a valid, in-range cell count. The pre-fix bug's
+    // `undefined` picture would throw here instead (`cellsDrawnOf` reads
+    // `.canvas` off it).
+    const cells = cellsDrawnOf(picture);
+    expect(cells).toBeGreaterThanOrEqual(0);
+    expect(cells).toBeLessThanOrEqual(16);
+
+    // The clock-restart handling must not get "stuck" either: continued
+    // ticks (now on the new, post-restart epoch) still make forward
+    // progress and eventually complete the morph normally.
+    act(() => {
+      tick(500); // ~484ms after the restart on the new epoch — well past duration.
+    });
+    expect(cellsDrawnOf(lastPictureShared!.value)).toBe(0); // settled on the target.
+  });
+
+  // Finding 4: native computes `holding` from *this* render's props, so a
+  // `paused`/option change landing in the same commit is decided by the
+  // *final* pause state, not a stale one — this is the behaviour
+  // `dithered/react`'s effect ordering was changed to match (see
+  // `react.test.tsx`'s mirror of this test).
+  it('unpausing and changing shape together starts a real morph, not an immediate cut (finding 4)', () => {
+    const { rerender } = render(
+      <Dithered
+        shape={SQUARE_SHAPE}
+        hitTest={squareHitTest}
+        cols={4}
+        frames={48}
+        period={1000}
+        brightness={alwaysTrue}
+        transition={{ duration: 400 }}
+        paused
+      />,
+    );
+
+    act(() => {
+      rerender(
+        <Dithered
+          shape={OTHER_SHAPE}
+          hitTest={otherHitTest}
+          cols={4}
+          frames={48}
+          period={1000}
+          brightness={alwaysTrue}
+          transition={{ duration: 400 }}
+          // `paused` dropped -> false, in the same commit as the shape change.
+        />,
+      );
+    });
+
+    // A real morph is now driving playback: a tick partway through shows
+    // a genuine partial dissolve, not an instant cut to the target.
+    act(() => {
+      tick(200);
+    });
+    const midway = cellsDrawnOf(lastPictureShared!.value);
+    expect(midway).toBeGreaterThan(0);
+    expect(midway).toBeLessThan(16);
+  });
+
+  it('pausing and changing shape together still cuts immediately, on native as on web (finding 4)', () => {
+    const { rerender } = render(
+      <Dithered
+        shape={SQUARE_SHAPE}
+        hitTest={squareHitTest}
+        cols={4}
+        frames={4}
+        period={1000}
+        brightness={alwaysTrue}
+        transition={{ duration: 400 }}
+      />,
+    );
+
+    act(() => {
+      rerender(
+        <Dithered
+          shape={OTHER_SHAPE}
+          hitTest={otherHitTest}
+          cols={4}
+          frames={4}
+          period={1000}
+          brightness={alwaysTrue}
+          transition={{ duration: 400 }}
+          paused
+        />,
+      );
+    });
+
+    // No loop left to morph on this commit: cuts straight to the target,
+    // no recordings needed, no tick required to observe it.
+    expect(cellsDrawnOf(lastPictureShared!.value)).toBe(0);
+  });
+
+  // Finding 6: the declarative `transition` prop is the whole truth for a
+  // render — dropping `onLoopEnd` puts it back to its default (`false`),
+  // it does not stay stuck at an earlier render's `true`. This must agree
+  // with `dithered/react`'s own resolution of the same finding.
+  it('dropping onLoopEnd from the transition prop resets it to false, not a sticky true (finding 6)', () => {
+    const { rerender } = render(
+      <Dithered
+        shape={SQUARE_SHAPE}
+        hitTest={squareHitTest}
+        cols={4}
+        frames={48}
+        period={1000}
+        brightness={alwaysTrue}
+        transition={{ duration: 400, onLoopEnd: true }}
+      />,
+    );
+
+    act(() => {
+      rerender(
+        <Dithered
+          shape={OTHER_SHAPE}
+          hitTest={otherHitTest}
+          cols={4}
+          frames={48}
+          period={1000}
+          brightness={alwaysTrue}
+          transition={{ duration: 400 }} // onLoopEnd dropped, not repeated as false.
+        />,
+      );
+    });
+
+    // No wrap has fired. If `onLoopEnd` were still (sticky) true, this
+    // would still show the outgoing square untouched. With the fix, the
+    // morph starts immediately, so a tick partway through shows a partial
+    // dissolve.
+    act(() => {
+      tick(200);
+    });
+    const cells = cellsDrawnOf(lastPictureShared!.value);
+    expect(cells).toBeGreaterThan(0);
+    expect(cells).toBeLessThan(16);
+  });
+
+  // Finding 8: pictures are recorded at `p = i / (steps - 1)`, so
+  // selecting the nearest step needs the same denominator — `round(t *
+  // (steps - 1))` — not `floor(t * steps)`, which runs ahead of the
+  // recording and freezes on the finished target for the last fraction of
+  // the morph.
+  it('tracks progress continuously rather than running ahead of the recorded steps (finding 8)', () => {
+    const { rerender } = render(
+      <Dithered
+        shape={SQUARE_SHAPE}
+        hitTest={squareHitTest}
+        cols={4}
+        frames={48}
+        period={2000}
+        brightness={alwaysTrue}
+        transition={{ duration: 400 }}
+      />,
+    );
+
+    createPictureImpl.mockClear();
+    act(() => {
+      rerender(
+        <Dithered
+          shape={OTHER_SHAPE}
+          hitTest={otherHitTest}
+          cols={4}
+          frames={48}
+          period={2000}
+          brightness={alwaysTrue}
+          transition={{ duration: 400 }}
+        />,
+      );
+    });
+
+    // steps = clamp(round(400 / (2000/48)), 2, 240) = round(9.6) = 10,
+    // recorded once (synchronously, in order) as this render's morph
+    // starts — nothing else records a picture in the same commit, since
+    // the steady `pictures` array stays pinned to the (unchanged)
+    // outgoing config.
+    expect(createPictureImpl.mock.results.length).toBe(10);
+    const stepBeforeFinish = createPictureImpl.mock.results[8]!.value; // p = 8/9 ≈ 0.889
+    const finishedTarget = createPictureImpl.mock.results[9]!.value; // p = 1
+
+    // At t = 0.9 (360ms into the 400ms morph), the *old* `floor(t * steps)`
+    // selection picks step `floor(0.9 * 10) = 9` — the fully-finished
+    // target — a full 10% of the duration before the morph is actually
+    // meant to finish. The fixed `round(t * (steps - 1))` selection picks
+    // step `round(0.9 * 9) = round(8.1) = 8`: still (barely) mid-dissolve,
+    // matching the denominator the recording itself used.
+    act(() => {
+      tick(360);
+    });
+    expect(lastPictureShared!.value).toBe(stepBeforeFinish);
+    expect(lastPictureShared!.value).not.toBe(finishedTarget);
+  });
+
+  // Finding 3 (native mirror): a queued `onLoopEnd` morph must be settled
+  // immediately when reduced motion turns on mid-wait, exactly as it is
+  // for `paused` — `holding` folds both in identically, but only the
+  // `paused` case had a regression test before this.
+  it('settles a still-pending onLoopEnd morph immediately when reduced motion turns on (finding 3)', () => {
+    const { rerender } = render(
+      <Dithered
+        shape={SQUARE_SHAPE}
+        hitTest={squareHitTest}
+        cols={4}
+        frames={4}
+        period={1000}
+        brightness={alwaysTrue}
+        transition={{ duration: 400, onLoopEnd: true }}
+      />,
+    );
+    act(() => {
+      rerender(
+        <Dithered
+          shape={OTHER_SHAPE}
+          hitTest={otherHitTest}
+          cols={4}
+          frames={4}
+          period={1000}
+          brightness={alwaysTrue}
+          transition={{ duration: 400, onLoopEnd: true }}
+        />,
+      );
+    });
+    expect(cellsDrawnOf(lastPictureShared!.value)).toBe(16); // still queued.
+
+    reducedMotionValue = true;
+    act(() => {
+      rerender(
+        <Dithered
+          shape={OTHER_SHAPE}
+          hitTest={otherHitTest}
+          cols={4}
+          frames={4}
+          period={1000}
+          brightness={alwaysTrue}
+          transition={{ duration: 400, onLoopEnd: true }}
+        />,
+      );
+    });
+
+    // Settled immediately to the target — not left frozen on the square
+    // waiting for a wrap that reduced motion means will never usefully
+    // come.
+    expect(cellsDrawnOf(lastPictureShared!.value)).toBe(0);
   });
 });
