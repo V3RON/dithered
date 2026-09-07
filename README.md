@@ -115,8 +115,8 @@ import { shapeFromSvg } from 'dithered';
 
 const shape = shapeFromSvg(`
   <svg viewBox="0 0 100 100">
-    <g transform="translate(10 10) rotate(15)">
-      <rect width="80" height="80" rx="12" />
+    <g transform="translate(50 50) rotate(15)">
+      <rect x="-30" y="-30" width="60" height="60" rx="8" />
     </g>
   </svg>
 `);
