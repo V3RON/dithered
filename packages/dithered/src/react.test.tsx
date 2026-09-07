@@ -2,6 +2,7 @@ import { render, screen } from '@testing-library/react';
 import { createRef } from 'react';
 import { renderToString } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { renderToSvg } from './core';
 import { Dithered } from './react';
 import type { DitheredInstance } from './renderer';
 import type { Palette } from './core';
@@ -374,6 +375,32 @@ describe('Dithered SSR fallback', () => {
     const svg = decodeURIComponent(dataUrl.slice('data:image/svg+xml;utf8,'.length));
     const rectCount = (svg.match(/<rect\b/g) ?? []).length;
     expect(rectCount).toBeGreaterThan(0);
+  });
+
+  it('SSR fallback honours `progress`, rendering the frame the mount effect will actually paint', () => {
+    // Frame-varying, unlike the `() => true` used elsewhere in this file:
+    // with every cell drawn on every frame, frame 0 and frame 42's SVGs
+    // would be identical regardless of which frame the fallback picks,
+    // and this test would not be able to tell `initialFrame` (the pre-fix
+    // behaviour) apart from the correct frame.
+    const brightness = (cell: { u: number }, t: number) => cell.u < t - 0.5;
+    const html = renderToString(
+      <Dithered shape={SQUARE_SHAPE} brightness={brightness} progress={0.9} />,
+    );
+    const match = html.match(/background-image:\s*url\((data:image\/svg\+xml;utf8,[^)]*)\)/);
+    expect(match).not.toBeNull();
+    const svg = decodeURIComponent(match![1].slice('data:image/svg+xml;utf8,'.length));
+
+    // round(0.9 * (48 - 1)) = round(42.3) = 42 — the frame the
+    // determinate-progress mount effect paints via `instance.renderFrame`
+    // (see the `progress={0.5}` test above for the same arithmetic).
+    const expectedFrame42 = renderToSvg({ shape: SQUARE_SHAPE, brightness, frame: 42 });
+    expect(svg).toBe(expectedFrame42);
+
+    // Falling back to `initialFrame` (0) instead — the pre-fix behaviour
+    // — would render this SVG, which must differ from the one above.
+    const frame0 = renderToSvg({ shape: SQUARE_SHAPE, brightness, frame: 0 });
+    expect(svg).not.toBe(frame0);
   });
 
   it('ssrFallback={false} omits the background-image', () => {

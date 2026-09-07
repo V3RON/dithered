@@ -280,16 +280,38 @@ describe('arcToCubics', () => {
     }
 
     it.each([
-      [false, false],
-      [false, true],
-      [true, false],
-      [true, true],
-    ])('largeArc=%s sweep=%s lands exactly on the endpoint', (largeArc, sweep) => {
-      const polygon = flattenArc(largeArc, sweep);
-      const last = polygon[polygon.length - 1];
-      expect(last.x).toBeCloseTo(end.x);
-      expect(last.y).toBeCloseTo(end.y);
-    });
+      [false, false, 1],
+      [false, true, -1],
+      [true, false, 1],
+      [true, true, -1],
+    ])(
+      'largeArc=%s sweep=%s selects the correct arc and bulges to the correct side of the chord',
+      (largeArc, sweep, expectedCrossSign) => {
+        const polygon = flattenArc(largeArc, sweep);
+        const last = polygon[polygon.length - 1];
+        expect(last.x).toBeCloseTo(end.x);
+        expect(last.y).toBeCloseTo(end.y);
+
+        // The endpoint alone proves nothing: `arcToCubics` unconditionally
+        // overwrites the last cubic's endpoint regardless of these flags.
+        // Assert the two properties the flags actually control instead —
+        // `largeArc` picks the major vs. minor arc (very different arc
+        // length), `sweep` picks which side of the chord the curve bulges
+        // to (the sign of the cross product of the chord vector and the
+        // chord-to-midpoint vector).
+        if (largeArc) {
+          expect(arcLength(polygon)).toBeGreaterThan(200);
+        } else {
+          expect(arcLength(polygon)).toBeLessThan(100);
+        }
+
+        const mid = polygon[Math.floor(polygon.length / 2)];
+        const chordX = end.x - start.x;
+        const chordY = end.y - start.y;
+        const cross = chordX * (mid.y - start.y) - chordY * (mid.x - start.x);
+        expect(Math.sign(cross)).toBe(expectedCrossSign);
+      },
+    );
 
     it('largeArc selects the major arc, not the minor one', () => {
       for (const sweep of [false, true]) {

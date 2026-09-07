@@ -25,8 +25,21 @@ interface FillRun {
   shapes: PendingShape[];
 }
 
-/** Rounds `n` to `precision` decimals and strips trailing zeros, so output is compact and byte-stable across runs. */
+/**
+ * Rounds `n` to `precision` decimals and strips trailing zeros, so output
+ * is compact and byte-stable across runs.
+ *
+ * Throws rather than emitting `NaN`/`Infinity` verbatim into an
+ * attribute, which `toFixed` would otherwise happily stringify into an
+ * invalid document (e.g. a degenerate viewBox making `aspectOf` return
+ * `Infinity`). Callers with a more specific diagnosis — `renderToSvg`'s
+ * own degenerate-viewBox check — should throw first, so this is a last
+ * line of defense, not the primary error message.
+ */
 export function formatNumber(n: number, precision: number): string {
+  if (!Number.isFinite(n)) {
+    throw new Error(`formatNumber: cannot format a non-finite number (${n}).`);
+  }
   let s = (n === 0 ? 0 : n).toFixed(Math.max(0, precision));
   if (s.includes('.')) {
     s = s.replace(/0+$/, '').replace(/\.$/, '');

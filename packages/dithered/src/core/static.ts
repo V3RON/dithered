@@ -26,15 +26,28 @@ function wrapFrame(frame: number, count: number): number {
  * live output cannot drift apart.
  *
  * The `viewBox` is `0 0 W H`, where `W`/`H` are `surfaceSize`'s CSS-pixel
- * size at `devicePixelRatio` 1 — the same numbers the canvas renderer
- * draws at, so this is byte-comparable with the live output as well as
- * resolution independent. `hitTest` defaults to {@link jsHitTester}, like
+ * size at `devicePixelRatio` 1 — the same CSS-pixel geometry the canvas
+ * renderer displays (see `createDithered`'s scale-by-the-backing-store
+ * derivation), so this matches the live output up to the half device
+ * pixel that rounding the canvas's backing store can introduce, as well
+ * as being resolution independent. `hitTest` defaults to {@link jsHitTester}, like
  * `sampleCells`.
+ *
+ * Throws if `options.shape`'s viewBox is degenerate (zero width or
+ * height, making the aspect ratio non-finite) rather than emitting an
+ * invalid `viewBox="0 0 Infinity …"` document.
  */
 export function renderToSvg(options: RenderToSvgOptions): string {
   const { frame = 0, precision = 3, title, ...ditheredOptions } = options;
   const opts = resolveOptions(ditheredOptions);
   const { width, height } = surfaceSize(opts);
+  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+    const { width: vbWidth, height: vbHeight } = opts.shape.viewBox;
+    throw new Error(
+      `renderToSvg: shape has a degenerate viewBox (width ${vbWidth}, height ${vbHeight}); ` +
+        'both must be finite and positive.',
+    );
+  }
   const rows = resolveRows(opts);
   const cells = sampleCells(opts.shape, opts.cols, opts.hitTest ?? jsHitTester(opts.shape), rows);
   const geometry = computeGeometry(opts, width, height);
@@ -57,14 +70,17 @@ export function renderToSvg(options: RenderToSvgOptions): string {
  * `renderToSvg`'s output as a `data:image/svg+xml;utf8,...` URL, ready to
  * use as a favicon `href`, an `<img src>`, or a CSS `background-image`.
  *
- * Percent-encodes `%` first, then `#`, `<`, `>`, `"`, `'`, `(`, `)` and
- * whitespace — enough to survive interpolation into a CSS `url(...)`
+ * Percent-encodes `%` first, then `#`, `<`, `>`, `"`, `'`, `(`, `)`, `&`
+ * and whitespace — enough to survive interpolation into a CSS `url(...)`
  * unquoted, and to keep `fg`'s default `#` from being read as a URL
  * fragment. The parentheses matter as much as `#` does: an unquoted CSS
  * `url()` token ends at the first `)`, so an `fg`/`bg` of e.g.
- * `rgb(130, 50, 255)` would otherwise truncate the declaration. A full
- * `encodeURIComponent` would also work but roughly triples the length of
- * a favicon-sized SVG.
+ * `rgb(130, 50, 255)` would otherwise truncate the declaration. `&`
+ * matters for the other advertised use: pasted into an HTML `href`/`src`,
+ * an unescaped `&` in the payload is decoded by the HTML parser (as
+ * `&amp;` → `&`) before the data URL itself is decoded, leaving malformed
+ * XML behind. A full `encodeURIComponent` would also work but roughly
+ * triples the length of a favicon-sized SVG.
  */
 export function renderToDataURL(options: RenderToSvgOptions): string {
   const svg = renderToSvg(options);
@@ -72,7 +88,7 @@ export function renderToDataURL(options: RenderToSvgOptions): string {
 }
 
 function encodeForDataUrl(svg: string): string {
-  return svg.replace(/[%#<>"'()\s]/g, (ch) => {
+  return svg.replace(/[%#<>"'()&\s]/g, (ch) => {
     switch (ch) {
       case '%':
         return '%25';
@@ -90,6 +106,8 @@ function encodeForDataUrl(svg: string): string {
         return '%28';
       case ')':
         return '%29';
+      case '&':
+        return '%26';
       default:
         return encodeURIComponent(ch);
     }

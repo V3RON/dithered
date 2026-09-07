@@ -90,15 +90,18 @@ export function createDithered(
 
   // `W`/`H` are the backing store's *integer* pixel dimensions — what
   // `canvas.width`/`height`, the sprite strip, and `drawImage` need.
-  // `geoW`/`geoH`/`dpr` are the *unrounded* device-pixel size and the
-  // scale it was computed at; geometry (cell size, gap, radius) is
-  // derived from those so it matches `renderToSvg`'s unrounded CSS-pixel
-  // geometry once divided by `dpr` — rounding only the backing store, per
-  // the ADR's scale invariant.
+  // `cssW`/`cssH` are the CSS-pixel size `canvas.style` is set to.
+  // Geometry is derived from the *rounded* `W`/`H`, scaled by `W / cssW`
+  // (not `devicePixelRatio`) — that is the factor the browser actually
+  // stretches the backing store by when painting it into the CSS box, so
+  // displayed coordinates match `renderToSvg`'s CSS-pixel geometry
+  // exactly (up to the half-device-pixel that rounding `W`/`H`
+  // independently can introduce). See the ADR's "scale that matters is
+  // the backing store's" section.
   let W = 0;
   let H = 0;
-  let geoW = 0;
-  let geoH = 0;
+  let cssW = 0;
+  let cssH = 0;
   let dpr = 1;
   let cells: Cell[] = [];
   let sheet: HTMLCanvasElement | null = null;
@@ -150,6 +153,12 @@ export function createDithered(
   function buildCache(): void {
     const useCache = opts.cache === 'auto' ? opts.size <= 120 : opts.cache;
     if (useCache) {
+      // `W / cssW`, not `dpr`: that is the factor the browser actually
+      // stretches the backing store by when painting it into the CSS
+      // box, so geometry matches `renderToSvg`'s CSS-pixel geometry
+      // exactly (up to the half-device-pixel `W`/`H` rounding can
+      // introduce) — see the field comments above.
+      const scale = W / cssW;
       const strip = document.createElement('canvas');
       strip.width = W * opts.frames;
       strip.height = H;
@@ -161,7 +170,7 @@ export function createDithered(
             cells,
             opts.brightness,
             f / opts.frames,
-            computeGeometry(paintOpts, geoW, geoH, f * W, dpr),
+            computeGeometry(paintOpts, W, H, f * W, scale),
           );
         }
         sheet = strip;
@@ -176,9 +185,8 @@ export function createDithered(
   function configure(): void {
     const newDpr = Math.min((typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1, 3);
     const css = surfaceSize(opts);
-    const device = surfaceSize(opts, newDpr);
-    const newW = Math.round(device.width);
-    const newH = Math.round(device.height);
+    const newW = Math.round(css.width * newDpr);
+    const newH = Math.round(css.height * newDpr);
 
     // Sample first, before touching the canvas or any module state: an
     // invalid `matrix` (or any other bad option) throws here, and
@@ -196,12 +204,11 @@ export function createDithered(
     canvas.style.height = css.height + 'px';
     W = canvas.width = newW;
     H = canvas.height = newH;
-    // `geoW`/`geoH`/`dpr` are the *unrounded* device-pixel size and the
-    // scale it was computed at — see the field comments above — kept in
-    // sync with `W`/`H` here so a later `buildCache()`/`blit()` (which
-    // read them via closure) always sees this same configure()'s values.
-    geoW = device.width;
-    geoH = device.height;
+    // `cssW`/`cssH`/`dpr` — see the field comments above — kept in sync
+    // with `W`/`H` here so a later `buildCache()`/`blit()` (which read
+    // them via closure) always sees this same configure()'s values.
+    cssW = css.width;
+    cssH = css.height;
     dpr = newDpr;
     cells = newCells;
 
@@ -222,7 +229,7 @@ export function createDithered(
         cells,
         opts.brightness,
         frame / opts.frames,
-        computeGeometry(paintOpts, geoW, geoH, 0, dpr),
+        computeGeometry(paintOpts, W, H, 0, W / cssW),
       );
     }
     currentFrame = frame;
@@ -316,8 +323,8 @@ export function createDithered(
       const prevCanvasHeight = canvas.height;
       const prevW = W;
       const prevH = H;
-      const prevGeoW = geoW;
-      const prevGeoH = geoH;
+      const prevCssW = cssW;
+      const prevCssH = cssH;
       const prevDpr = dpr;
       const prevCells = cells;
       const prevSheet = sheet;
@@ -348,8 +355,8 @@ export function createDithered(
         if (canvas.height !== prevCanvasHeight) canvas.height = prevCanvasHeight;
         W = prevW;
         H = prevH;
-        geoW = prevGeoW;
-        geoH = prevGeoH;
+        cssW = prevCssW;
+        cssH = prevCssH;
         dpr = prevDpr;
         cells = prevCells;
         sheet = prevSheet;

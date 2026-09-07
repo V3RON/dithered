@@ -176,6 +176,18 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     const resolved = resolveOptions({ shape, brightness, size });
     const { width, height } = surfaceSize(resolved);
     if (!showFallback) return { width, height };
+    // Render the frame the mount effect will actually paint, not always
+    // `initialFrame`: when `progress` is controlled, the determinate-
+    // progress effect immediately overrides `initialFrame` with
+    // `Math.round(clamp(progress) * (frameCount - 1))`. Falling back to
+    // `initialFrame` regardless made a determinate `<Dithered
+    // progress={0.9} />` server-render an empty bar and snap to 90% on
+    // hydration.
+    const frameCount = frames ?? 48;
+    const fallbackFrame =
+      typeof progress === 'number'
+        ? Math.round(Math.min(1, Math.max(0, progress)) * (frameCount - 1))
+        : initialFrame;
     const dataUrl = renderToDataURL({
       shape,
       brightness,
@@ -188,7 +200,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
       bg,
       gap,
       radius,
-      frame: initialFrame,
+      frame: fallbackFrame,
     });
     return { width, height, backgroundImage: `url(${dataUrl})`, backgroundSize: '100% 100%' };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -207,6 +219,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     gap,
     radius,
     initialFrame,
+    progress,
   ]);
 
   // Mount/unmount only. Re-creating the instance on every prop change

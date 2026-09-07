@@ -122,6 +122,12 @@ describe('formatNumber', () => {
     expect(formatNumber(-0.00001, 3)).toBe('0');
     expect(formatNumber(-0, 3)).toBe('0');
   });
+
+  it('throws rather than emitting NaN or Infinity into an attribute', () => {
+    expect(() => formatNumber(NaN, 3)).toThrow(/non-finite/);
+    expect(() => formatNumber(Infinity, 3)).toThrow(/non-finite/);
+    expect(() => formatNumber(-Infinity, 3)).toThrow(/non-finite/);
+  });
 });
 
 describe('escapeXml', () => {

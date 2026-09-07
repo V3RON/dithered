@@ -305,7 +305,7 @@ Both take the same `DitheredOptions` as `createDithered`/`<Dithered>`, plus:
 | `precision` | `number` | `3`     | Decimal places in emitted coordinates.                               |
 | `title`     | `string` | —       | Emitted as `<title>`, for accessible inline SVG. Omitted when unset. |
 
-The `viewBox` is `0 0 W H`, where `W`/`H` are the same CSS-pixel size (`surfaceSize` at `devicePixelRatio` 1) the canvas renderer draws at — output is both resolution independent and byte-comparable with the live canvas.
+The `viewBox` is `0 0 W H`, where `W`/`H` are the same CSS-pixel size (`surfaceSize` at `devicePixelRatio` 1) the canvas renderer displays — output is resolution independent, and matches the live canvas's displayed geometry up to the half device pixel that rounding the canvas's backing store can introduce (exact whenever `size` and `devicePixelRatio` are both integers, which covers essentially every real render).
 
 ### Use a frame as a favicon
 
