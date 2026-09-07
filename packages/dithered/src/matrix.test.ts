@@ -78,7 +78,7 @@ describe('resolveMatrix — named matrices', () => {
     expect(height).toBe(4);
     for (let j = 0; j < 4; j++) {
       for (let i = 0; i < 4; i++) {
-        expect(thresholds[j][i]).toBeCloseTo((BAYER_4[j][i] + 0.5) / 16, 10);
+        expect(thresholds[j][i]).toBe((BAYER_4[j][i] + 0.5) / 16);
       }
     }
   });
@@ -148,6 +148,43 @@ describe('resolveMatrix — rank vs float normalization', () => {
     ]);
   });
 
+  // The ADR is explicit that the rank divisor is the entry *count*
+  // (width * height) — not width*width, not height*height, and not
+  // max-entry-plus-one. Every other fixture in this file is square (so
+  // width*width and height*height coincide with the right answer) and
+  // uses a dense 0..n-1 permutation (so max+1 also coincides). These two
+  // fixtures are non-square *and* carry a tied top rank, so all three
+  // wrong divisors diverge from the correct one (8) and from each other.
+  it('rank mode: a non-square 4-wide x 2-tall matrix normalizes by entry count (8), not width*width, height*height, or max+1', () => {
+    const { thresholds, width, height } = resolveMatrix([
+      [0, 1, 2, 3],
+      [4, 5, 6, 6],
+    ]);
+    expect(width).toBe(4);
+    expect(height).toBe(2);
+    expect(thresholds).toEqual([
+      [0.0625, 0.1875, 0.3125, 0.4375],
+      [0.5625, 0.6875, 0.8125, 0.8125],
+    ]);
+  });
+
+  it('rank mode: a non-square 2-wide x 4-tall matrix normalizes by entry count (8), not width*width, height*height, or max+1', () => {
+    const { thresholds, width, height } = resolveMatrix([
+      [0, 1],
+      [2, 3],
+      [4, 5],
+      [6, 6],
+    ]);
+    expect(width).toBe(2);
+    expect(height).toBe(4);
+    expect(thresholds).toEqual([
+      [0.0625, 0.1875],
+      [0.3125, 0.4375],
+      [0.5625, 0.6875],
+      [0.8125, 0.8125],
+    ]);
+  });
+
   it('an all-0/1 integer matrix is read as ranks, not as ready-made thresholds', () => {
     const { thresholds } = resolveMatrix([
       [0, 1],
@@ -168,12 +205,23 @@ describe('resolveMatrix — validation', () => {
     ['NaN entry', [[0, Number.NaN]], /not a finite number/],
     ['Infinity entry', [[0, Number.POSITIVE_INFINITY]], /not a finite number/],
     [
-      'rank above n - 1',
+      'rank above n - 1 (square)',
       [
         [0, 1],
         [2, 20],
       ],
       /outside the rank range 0\.\.3/,
+    ],
+    // Pins the range bound to width*height (8) on a non-square matrix,
+    // not width*width (16) or height*height (4) — either of those would
+    // report a different (wrong) range for this same input.
+    [
+      'rank above n - 1 (non-square, 4x2)',
+      [
+        [0, 1, 2, 3],
+        [4, 5, 6, 8],
+      ],
+      /outside the rank range 0\.\.7/,
     ],
     ['negative rank', [[-1, 0]], /outside the rank range/],
     ['float above 1', [[0.1, 1.5]], /outside the range 0\.\.1/],
@@ -229,6 +277,64 @@ describe('thresholdFor', () => {
     ];
     expect(thresholdFor(matrix, -1, -1)).toBe(matrix[1][1]);
     expect(thresholdFor(matrix, -2, 0)).toBe(matrix[0][0]);
+  });
+});
+
+describe('resolveMatrix / thresholdFor — hand-built ResolvedMatrix', () => {
+  // `ResolvedMatrix` is exported, so a caller can legally build one without
+  // ever calling `resolveMatrix`. It must be accepted (and validated) on
+  // its own terms rather than misdiagnosed as a malformed 2D array.
+  it('a hand-built valid ResolvedMatrix round-trips through resolveMatrix and thresholdFor, agreeing with the branded one', () => {
+    const handBuilt = {
+      width: 2,
+      height: 2,
+      thresholds: [
+        [0.1, 0.2],
+        [0.3, 0.4],
+      ],
+    };
+    const branded = resolveMatrix([
+      [0.1, 0.2],
+      [0.3, 0.4],
+    ]);
+
+    const resolved = resolveMatrix(handBuilt);
+    expect(resolved.width).toBe(2);
+    expect(resolved.height).toBe(2);
+    expect(resolved.thresholds).toEqual(branded.thresholds);
+
+    for (const i of [0, 1, 4]) {
+      for (const j of [0, 1, 3]) {
+        expect(thresholdFor(handBuilt, i, j)).toBe(thresholdFor(branded, i, j));
+      }
+    }
+  });
+
+  it('resolveMatrix memoizes a hand-built ResolvedMatrix by identity', () => {
+    const handBuilt = { width: 1, height: 1, thresholds: [[0.5]] };
+    expect(resolveMatrix(handBuilt)).toBe(resolveMatrix(handBuilt));
+  });
+
+  it('a hand-built object with a mismatched width/thresholds row length throws naming the mismatch', () => {
+    const mismatched = {
+      width: 2,
+      height: 1,
+      thresholds: [[0.1, 0.2, 0.3]],
+    };
+    expect(() => resolveMatrix(mismatched)).toThrow(
+      /resolved matrix declares width 2 but thresholds\[0\] has 3 entries/,
+    );
+  });
+
+  it('a hand-built object with a mismatched height/thresholds row count throws naming the mismatch', () => {
+    const mismatched = {
+      width: 2,
+      height: 2,
+      thresholds: [[0.1, 0.2]],
+    };
+    expect(() => resolveMatrix(mismatched)).toThrow(
+      /resolved matrix declares height 2 but thresholds has 1 rows/,
+    );
   });
 });
 

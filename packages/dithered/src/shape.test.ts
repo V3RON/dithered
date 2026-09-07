@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { BAYER_4, aspectOf, defaultRowsFor, sampleCells, type Shape } from './shape';
-import { BLUE_NOISE_16 } from './matrix';
+import { BLUE_NOISE_16, resolveMatrix } from './matrix';
 import { rozenite } from './shapes';
 
 const SQUARE: Shape = {
@@ -155,7 +155,7 @@ describe('sampleCells default matrix (no regression)', () => {
       ]
     `);
     for (const c of cells) {
-      expect(c.threshold).toBeCloseTo((BAYER_4[c.j % 4][c.i % 4] + 0.5) / 16, 10);
+      expect(c.threshold).toBe((BAYER_4[c.j % 4][c.i % 4] + 0.5) / 16);
     }
   });
 
@@ -206,7 +206,7 @@ describe('sampleCells default matrix (no regression)', () => {
       ]
     `);
     for (const c of cells) {
-      expect(c.threshold).toBeCloseTo((BAYER_4[c.j % 4][c.i % 4] + 0.5) / 16, 10);
+      expect(c.threshold).toBe((BAYER_4[c.j % 4][c.i % 4] + 0.5) / 16);
     }
   });
 });
@@ -241,6 +241,46 @@ describe('sampleCells with a matrix argument', () => {
     const cells = sampleCells(SQUARE, 4, ACCEPT_ALL, 4, custom);
     for (const c of cells) {
       expect(c.threshold).toBe(expectedThresholds[c.j % 2][c.i % 2]);
+    }
+  });
+
+  // Regression: only a raw `BLUE_NOISE_16` array or the `'bayer8'` name was
+  // ever driven through `sampleCells`/the renderer/react/native tests, so
+  // `builtinMatrix`'s `case 'blueNoise'` was reachable only from
+  // `resolveMatrix('blueNoise')` in matrix.test.ts — an implementation bug
+  // returning `BAYER_8` for that case would have stayed green everywhere
+  // else, including `<Dithered matrix="blueNoise">` and the playground select.
+  it("the 'blueNoise' name, driven through sampleCells, matches resolveMatrix(BLUE_NOISE_16) and not bayer8", () => {
+    const namedCells = sampleCells(rozenite, 16, corner, undefined, 'blueNoise');
+    const arrayCells = sampleCells(rozenite, 16, corner, undefined, BLUE_NOISE_16);
+    const bayer8Cells = sampleCells(rozenite, 16, corner, undefined, 'bayer8');
+
+    expect(namedCells.map((c) => c.threshold)).toEqual(arrayCells.map((c) => c.threshold));
+    expect(namedCells.map((c) => c.threshold)).not.toEqual(bayer8Cells.map((c) => c.threshold));
+
+    const resolved = resolveMatrix(BLUE_NOISE_16);
+    for (const c of namedCells) {
+      expect(c.threshold).toBe(resolved.thresholds[c.j % 16][c.i % 16]);
+    }
+  });
+
+  // Regression: the only prior custom-matrix sampling test used a 2x2
+  // array on a 4x4 grid, which cannot catch a `(i, j)` axis mixup that
+  // only shows once `width !== height` — an implementation reading
+  // `thresholds[j % width][i % height]` would pass that test but index
+  // out of bounds (or wrap wrong) here.
+  it('tiles a non-square custom matrix across the grid, respecting width vs height', () => {
+    // 3 wide x 2 tall.
+    const custom = [
+      [0, 1, 2],
+      [3, 4, 5],
+    ];
+    // Rank mode, entry count 6: threshold = (v + 0.5) / 6.
+    const expectedThresholds = custom.map((row) => row.map((v) => (v + 0.5) / 6));
+    const cells = sampleCells(SQUARE, 6, ACCEPT_ALL, 6, custom);
+    expect(cells.length).toBeGreaterThan(0);
+    for (const c of cells) {
+      expect(c.threshold).toBe(expectedThresholds[c.j % 2][c.i % 3]);
     }
   });
 

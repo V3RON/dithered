@@ -213,6 +213,12 @@ export function createDithered(
     schedule();
   }
 
+  // Resample/rebuild before registering anything the caller would need to
+  // release: an invalid `matrix` (or any other bad option) throws here, and
+  // if the listener/observer below were already registered the throw would
+  // escape with no `destroy()` to clean them up.
+  configure();
+
   const io =
     typeof IntersectionObserver !== 'undefined'
       ? new IntersectionObserver((entries) => {
@@ -232,7 +238,6 @@ export function createDithered(
     document.addEventListener('visibilitychange', onVisibility);
   }
 
-  configure();
   blit(opts.initialFrame);
   schedule();
 

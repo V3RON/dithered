@@ -657,6 +657,32 @@ describe('createDithered', () => {
     // Nothing should have been drawn — the throw happens before the first blit.
     expect(ctx.fill).not.toHaveBeenCalled();
   });
+
+  // Regression: a throwing `configure()` used to run after the
+  // visibilitychange listener and IntersectionObserver were already
+  // registered, so a failed create left both pinned to the canvas with no
+  // `destroy()` to release them (a real leak under React 18 StrictMode,
+  // which mounts twice).
+  it('leaves no visibilitychange listener or observed IntersectionObserver behind when create fails', () => {
+    const addSpy = vi.spyOn(document, 'addEventListener');
+    const { canvas } = makeFakeCanvas();
+
+    expect(() =>
+      createDithered(
+        canvas,
+        baseOptions({
+          matrix: [
+            [0, 1, 2],
+            [1, 2],
+          ],
+        }),
+      ),
+    ).toThrow(/ragged/);
+
+    expect(addSpy).not.toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+    expect(env.ioInstances).toHaveLength(0);
+    addSpy.mockRestore();
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -359,7 +359,7 @@ This means an all-integer matrix like `[[0, 1], [1, 0]]` is read as **ranks** (g
 
 A ragged array (rows of different lengths), a non-finite entry, or a rank/threshold outside its valid range throws a clear `dithered: ` error naming the offending row or cell — validation happens once when the matrix is resolved, not per cell.
 
-As with `shape` and `brightness`, a custom `matrix` array is compared by identity in the React wrapper's reconfigure effect: hoist it to module scope (or memoize it) rather than passing a fresh array literal as a prop, or every render triggers a resample.
+As with `shape` and `brightness`, a custom `matrix` array is compared by identity in the React wrapper's reconfigure effect: hoist it to module scope (or memoize it) rather than passing a fresh array literal as a prop, or every render triggers a resample. The same applies to `dithered/native`'s `useDitheredPictures`/`<Dithered>` — there an inline `matrix={[[0, 1], [2, 3]]}` is worse than a wasted resample, since it re-records every `SkPicture` in the frame strip on each render.
 
 `dithered`'s `bayer2`/`bayer4`/`bayer8`/`blueNoise` tables, plus `bayerMatrix(order)` (which generates any power-of-two Bayer matrix) and the lower-level `resolveMatrix`/`thresholdFor` helpers `sampleCells` is built on, are all exported if you want to build on them directly. The blue-noise table is generated offline by `packages/dithered/scripts/blue-noise.mjs` (`pnpm --filter dithered generate:blue-noise`) and committed as source — regenerate it only if you're changing the generator itself.
 

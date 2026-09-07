@@ -25,7 +25,13 @@ export interface Cell {
   u: number;
   /** Cell centre, normalized down the shape's height, -0.5..0.5. */
   v: number;
-  /** Ordered-dither threshold for this cell (see `matrix` in `DitheredOptions`), in (0, 1). */
+  /**
+   * Ordered-dither threshold for this cell (see `matrix` in
+   * `DitheredOptions`). In `(0, 1)` for every built-in matrix and for a
+   * custom matrix in rank mode; a custom matrix in float mode may produce
+   * exactly `0` (always drawn) or `1` (never drawn) — see `ResolvedMatrix`
+   * in `matrix.ts`.
+   */
   threshold: number;
 }
 

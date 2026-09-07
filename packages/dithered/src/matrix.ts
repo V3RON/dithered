@@ -47,6 +47,25 @@ function brand(matrix: ResolvedMatrix): BrandedResolvedMatrix {
   return Object.defineProperty(matrix, RESOLVED, { value: true }) as BrandedResolvedMatrix;
 }
 
+/**
+ * Recognizes a hand-built object that structurally matches `ResolvedMatrix`
+ * (a plain `{ width, height, thresholds }`, not one of this module's own
+ * branded values) so it can be validated on its own terms rather than
+ * falling through to the "2D array of numbers" error. Only distinguishes
+ * shape from a raw `DitherMatrix` array — `validateResolvedMatrixShape`
+ * does the actual field validation.
+ */
+function looksLikeResolvedMatrix(value: unknown): value is ResolvedMatrix {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    'width' in value &&
+    'height' in value &&
+    'thresholds' in value
+  );
+}
+
 /** Classic 2x2 Bayer ordered-dither matrix — the seed every other size is generated from. */
 export const BAYER_2: readonly (readonly number[])[] = [
   [0, 2],
@@ -168,6 +187,45 @@ function validateAndResolve(matrix: readonly (readonly number[])[]): ResolvedMat
   return { width, height, thresholds };
 }
 
+/**
+ * Validates a hand-built `ResolvedMatrix` object (as opposed to one this
+ * module already branded) and returns a branded, defensively-copied
+ * equivalent. `ResolvedMatrix` is a public, exported type, so a caller who
+ * assembles one directly and hands it to `resolveMatrix`/`thresholdFor`
+ * gets it checked and diagnosed as a resolved matrix — not misread as a
+ * malformed 2D array, and not accepted unchecked just because it typechecks.
+ */
+function validateResolvedMatrixShape(input: ResolvedMatrix): BrandedResolvedMatrix {
+  const { width, height, thresholds } = input;
+  if (!Number.isInteger(width) || width < 1) {
+    throw new Error(`dithered: resolved matrix width must be a positive integer, got ${width}.`);
+  }
+  if (!Number.isInteger(height) || height < 1) {
+    throw new Error(`dithered: resolved matrix height must be a positive integer, got ${height}.`);
+  }
+  if (!Array.isArray(thresholds) || thresholds.length !== height) {
+    const got = Array.isArray(thresholds) ? thresholds.length : typeof thresholds;
+    throw new Error(
+      `dithered: resolved matrix declares height ${height} but thresholds has ${got} rows.`,
+    );
+  }
+  for (let j = 0; j < height; j++) {
+    const row = thresholds[j];
+    if (!Array.isArray(row) || row.length !== width) {
+      const got = Array.isArray(row) ? row.length : typeof row;
+      throw new Error(
+        `dithered: resolved matrix declares width ${width} but thresholds[${j}] has ${got} entries.`,
+      );
+    }
+    for (let i = 0; i < width; i++) {
+      if (!isFiniteNumber(row[i])) {
+        throw new Error(`dithered: resolved matrix thresholds[${j}][${i}] is not a finite number.`);
+      }
+    }
+  }
+  return brand({ width, height, thresholds: thresholds.map((row) => row.slice()) });
+}
+
 const BUILTIN_NAMES = ['bayer2', 'bayer4', 'bayer8', 'blueNoise'] as const;
 
 function builtinMatrix(name: (typeof BUILTIN_NAMES)[number]): readonly (readonly number[])[] {
@@ -191,6 +249,10 @@ function builtinMatrix(name: (typeof BUILTIN_NAMES)[number]): readonly (readonly
 // collected along with the array itself).
 const namedCache = new Map<string, BrandedResolvedMatrix>();
 const customCache = new WeakMap<readonly (readonly number[])[], BrandedResolvedMatrix>();
+// Same identity-keyed memoization for a hand-built `ResolvedMatrix` object
+// passed in unbranded (see `looksLikeResolvedMatrix`) — validating it is a
+// cost worth paying once, not on every `thresholdFor` call.
+const resolvedShapeCache = new WeakMap<object, BrandedResolvedMatrix>();
 
 /**
  * Resolves a {@link DitherMatrix} — a built-in name, a raw array, or an
@@ -207,9 +269,20 @@ const customCache = new WeakMap<readonly (readonly number[])[], BrandedResolvedM
  */
 export function resolveMatrix(input: DitherMatrix | ResolvedMatrix): ResolvedMatrix {
   if (isResolvedMatrix(input)) return input;
-  // Only a plain `DitherMatrix` (string | array) survives past the brand
-  // check above — a `ResolvedMatrix` reaching this function is always
-  // branded, since `brand()` is the only place one is constructed.
+  // A hand-built object that structurally matches `ResolvedMatrix` but was
+  // never returned by this module (so it lacks the brand) — `ResolvedMatrix`
+  // is exported, so this is a real, typechecking way to call `resolveMatrix`.
+  if (looksLikeResolvedMatrix(input)) {
+    const cached = resolvedShapeCache.get(input);
+    if (cached) return cached;
+    const resolved = validateResolvedMatrixShape(input);
+    resolvedShapeCache.set(input, resolved);
+    return resolved;
+  }
+  // Only a plain `DitherMatrix` (string | array) survives past the checks
+  // above — a `ResolvedMatrix` reaching this function is always branded or
+  // structurally recognized, since `brand()` is the only place a branded
+  // one is constructed.
   const matrix = input as DitherMatrix;
 
   if (typeof matrix === 'string') {
