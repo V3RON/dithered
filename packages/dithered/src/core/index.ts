@@ -51,3 +51,23 @@ export { escapeXml, formatNumber, svgPaintContext } from './svg-paint';
 export type { RenderToSvgOptions } from './static';
 export { renderToDataURL, renderToSvg } from './static';
 export { advancePhase, frameForPhase, loopsAt, phaseForFrame, wrapFrame, wrapPhase } from './clock';
+export type {
+  CellDiff,
+  ResolvedTransitionOptions,
+  Transition,
+  TransitionOptions,
+  TransitionSide,
+} from './transition';
+export {
+  ENTER_START,
+  EXIT_END,
+  TRANSITION_DEFAULTS,
+  blend,
+  blendPhases,
+  createTransition,
+  diffCells,
+  enterAt,
+  exitAt,
+  toLevel,
+  transitionCells,
+} from './transition';

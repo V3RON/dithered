@@ -56,7 +56,7 @@ function LoadingIndicator() {
 }
 ```
 
-The props are the web component's, minus the DOM-only ones: `className` and `style: CSSProperties` become `style: StyleProp<ViewStyle>`, `label` maps to `accessibilityLabel` rather than `role="status"`, `cache` is gone (see [Performance notes](#performance-notes)), and `cells` is new. Everything else — `shape`, `brightness`, `size`, `cols`, `rows`, `matrix`, `frames`, `period`, `speed`, `fg`, `bg`, `gap`, `radius`, `paused`, `progress`, `time`, `onFrame`, `onLoop`, `initialFrame`, `respectReducedMotion` — behaves identically, so a shared component can spread the same props object at both. (`matrix` is ignored when you also pass pre-sampled `cells` — see [Performance notes](#performance-notes).) One difference: `time` also accepts a Reanimated `SharedValue<number>` on native — see [Playback controls](#playback-controls).
+The props are the web component's, minus the DOM-only ones: `className` and `style: CSSProperties` become `style: StyleProp<ViewStyle>`, `label` maps to `accessibilityLabel` rather than `role="status"`, `cache` is gone (see [Performance notes](#performance-notes)), and `cells` is new. Everything else — `shape`, `brightness`, `size`, `cols`, `rows`, `matrix`, `frames`, `period`, `speed`, `fg`, `bg`, `gap`, `radius`, `paused`, `progress`, `time`, `onFrame`, `onLoop`, `initialFrame`, `respectReducedMotion`, `transition` — behaves identically, so a shared component can spread the same props object at both. (`matrix` is ignored when you also pass pre-sampled `cells` — see [Performance notes](#performance-notes).) One difference: `time` also accepts a Reanimated `SharedValue<number>` on native — see [Playback controls](#playback-controls).
 
 To draw into a Skia canvas you already own, `dithered/react-native` also exports the pieces: `useDitheredPictures(options)` returns one `SkPicture` per frame plus the canvas size, and `skiaPaintContext(canvas)` adapts an `SkCanvas` to the `PaintContext` that `paintFrame` draws through.
 
@@ -102,7 +102,7 @@ createDithered(canvas, { shape, brightness: gem() }); // same thing
 
 ## Shapes
 
-Ready-made `Shape` objects, importable individually or via `shapes`: `rozenite` (the Rozenite gem mark), `circle`, `square`, `diamond`, `heart`.
+Ready-made `Shape` objects, importable individually or via `shapes`: `rozenite` (the Rozenite gem mark), `circle`, `square`, `diamond`, `heart`, `check`, `cross`. `check` and `cross` share a `0 0 100 100` viewBox on purpose — see [Transitions](#transitions).
 
 ```ts
 import { shapes } from 'dithered';
@@ -374,6 +374,45 @@ Sampling which cells fall inside a shape needs a point-in-path test, and `Path2D
 
 `dithered/react`'s `<Dithered>` renders, as a `background-image` data URL (with matching CSS width/height) on the `<canvas>`, an SVG of the frame the component is about to paint on mount — `initialFrame`, or, when `progress` is set, `Math.round(clamp(progress) * (frames - 1))`, the same frame the determinate-progress effect renders — until the component has mounted and painted for real, so server-rendered HTML shows the shape instead of a blank canvas. A determinate `<Dithered progress={0.9} />` therefore server-renders frame 42 of a 48-frame loop directly, rather than flashing frame 0 first. Opt out with `ssrFallback={false}`.
 
+## Transitions
+
+A loading indicator almost always ends in a state change — success, error, done — and `update()`/a plain prop change cuts straight to it, mid-loop. `transitionTo`/`transition` morph into the change instead: both shapes are sampled onto the same grid, cells that leave and cells that arrive dissolve on complementary Bayer schedules (so the canvas is never empty), and brightness crossfades between the two, each side still ticking on its own loop phase so neither jumps.
+
+```tsx
+<Dithered
+  shape={done ? shapes.check : shapes.rozenite}
+  brightness={done ? presets.fill() : presets.gem()}
+  transition={{ duration: 400 }}
+  fg="#8232ff"
+/>
+```
+
+Setting `transition` (an object; `{}` is enough to opt in) is what makes a `shape`/`brightness` prop change morph instead of cut — on both `dithered/react` and `dithered/native`, with identical props. With the vanilla/core API, call `instance.transitionTo(patch)` instead of `instance.update(patch)`:
+
+```ts
+await instance.transitionTo({ shape: shapes.check, brightness: presets.fill() });
+```
+
+`transitionTo` computes its target exactly like `update()` would, and resolves once that target is the new steady state — it never rejects, even if the transition is interrupted (see below). `transition.duration` (default `400`) sets how long the morph takes; `transition.onLoopEnd` (default `false`) waits for the current loop to reach phase 0 before starting it, so a morph never begins mid-cycle either.
+
+```ts
+await instance.finishLoop(); // resolves the next time playback wraps to phase 0
+```
+
+`finishLoop()` is what `onLoopEnd` is built on, and it is also safe to call directly. It resolves early — rather than hanging — if the loop stops advancing before it would otherwise wrap: `setPaused(true)`, the tab going hidden, the canvas leaving the viewport, reduced motion, or `destroy()`. Resolution means "the loop is not mid-cycle any more", not "a full cycle played". The same rule applies to a transition itself: one already in flight when playback halts (or when a second `transitionTo` starts) completes immediately, landing on its target rather than freezing half-morphed.
+
+A shape's `cols`/`rows` grid comes from its aspect ratio, and the morph always runs on the _target's_ grid — so pairing shapes with a shared viewBox aspect (like the built-in `check`/`cross`, both `0 0 100 100`) keeps a transition from resizing the canvas mid-morph. A mismatched pair still works; the canvas just resizes to the target at the start of the morph instead.
+
+`prefers-reduced-motion` (web) / `useReducedMotion()` (native) skips the morph entirely when `respectReducedMotion` is set (the default) — `transitionTo` cuts straight to the target and resolves immediately, same as `update()`.
+
+`blend(a, b, mix)` is the brightness crossfade `transitionTo` itself uses, also useful on its own — `mix` is clamped to `[0, 1]`, and `mix = 0`/`mix = 1` reproduce `a`/`b`'s draw decisions exactly (a boolean brightness is coerced to a level — `true → 1`, `false → 0` — before blending):
+
+```ts
+import { blend, presets } from 'dithered';
+
+const brightness = blend(presets.gem(), presets.pulse(), 0.5);
+```
+
 ## Performance notes
 
 ### Web
@@ -419,20 +458,30 @@ Sampling which cells fall inside a shape needs a point-in-path test, and `Path2D
 | `speed`                | `number`                             | `1`                       | Playback rate multiplier. Negative values play backwards. See [Playback controls](#playback-controls).                                                                           |
 | `onFrame`              | `(frame: number, t: number) => void` | —                         | Called after a frame is painted. See [Playback controls](#playback-controls).                                                                                                    |
 | `onLoop`               | `(loops: number) => void`            | —                         | Called each time the internal clock's loop wraps. See [Playback controls](#playback-controls).                                                                                   |
+| `transition`           | `TransitionOptions`                  | unset                     | Morph into a `shape`/`brightness` change instead of cutting — see [Transitions](#transitions).                                                                                   |
+
+### `TransitionOptions`
+
+| Option      | Type      | Default | Description                                                 |
+| ----------- | --------- | ------- | ----------------------------------------------------------- |
+| `duration`  | `number`  | `400`   | Duration of the morph in ms.                                |
+| `onLoopEnd` | `boolean` | `false` | Wait for the current loop to reach phase 0 before starting. |
 
 ### `DitheredInstance`
 
-| Method                                      | Description                                                                                          |
-| ------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `setPaused(paused: boolean)`                | Pause or resume the animation loop.                                                                  |
-| `update(options: Partial<DitheredOptions>)` | Re-configure the instance in place; may resample cells and/or rebuild the sprite cache.              |
-| `renderFrame(frame: number)`                | Draw a specific frame directly, bypassing the animation loop.                                        |
-| `refreshColors()`                           | Re-resolve `'currentColor'` in `fg` and repaint if it changed. Web only — see [Palettes](#palettes). |
-| `setTime(t: number)`                        | Drive playback externally, in loop units. Halts the internal clock.                                  |
-| `clearTime()`                               | Hand playback back to the internal clock, resuming from the current phase.                           |
-| `destroy()`                                 | Stop the loop and release all listeners/observers.                                                   |
+| Method                                          | Description                                                                                                                                                      |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `setPaused(paused: boolean)`                    | Pause or resume the animation loop.                                                                                                                              |
+| `update(options: Partial<DitheredOptions>)`     | Re-configure the instance in place; may resample cells and/or rebuild the sprite cache.                                                                          |
+| `transitionTo(patch: Partial<DitheredOptions>)` | Like `update()`, but morphs into the change over `transition.duration` — see [Transitions](#transitions). Returns a `Promise<void>` that never rejects.          |
+| `finishLoop()`                                  | Returns a `Promise<void>` that resolves the next time playback wraps to phase 0 (or early, if the loop stops advancing first) — see [Transitions](#transitions). |
+| `renderFrame(frame: number)`                    | Draw a specific frame directly, bypassing the animation loop.                                                                                                    |
+| `refreshColors()`                               | Re-resolve `'currentColor'` in `fg` and repaint if it changed. Web only — see [Palettes](#palettes).                                                             |
+| `setTime(t: number)`                            | Drive playback externally, in loop units. Halts the internal clock.                                                                                              |
+| `clearTime()`                                   | Hand playback back to the internal clock, resuming from the current phase.                                                                                       |
+| `destroy()`                                     | Stop the loop and release all listeners/observers.                                                                                                               |
 
-`dithered/react`'s `Dithered` component accepts the same options as props (`shape`/`brightness` still required, `hitTest` not exposed as a prop), plus `label` (accessible label, default `'Loading'`, `''` hides it from assistive tech), `className`, `style`, `progress`, `time`, `ssrFallback` (default `true`), and `instanceRef` (a `Ref<DitheredInstance | null>`, populated on mount and cleared on unmount — an escape hatch onto the instance, e.g. for calling `refreshColors()`; the regular `ref` keeps forwarding the canvas element, unchanged) — see [Determinate progress](#determinate-progress), [Playback controls](#playback-controls), [SSR fallback](#ssr-fallback) and [React](#quick-start) above. `dithered/react-native`'s takes the same props with `style: StyleProp<ViewStyle>` in place of `className`/`style`, no `cache`, a `time` that also accepts a `SharedValue<number>`, and an extra `cells` — see [React Native](#react-native) above.
+`dithered/react`'s `Dithered` component accepts the same options as props (`shape`/`brightness` still required, `hitTest` not exposed as a prop), plus `label` (accessible label, default `'Loading'`, `''` hides it from assistive tech), `className`, `style`, `progress`, `time`, `ssrFallback` (default `true`), and `instanceRef` (a `Ref<DitheredInstance | null>`, populated on mount and cleared on unmount — an escape hatch onto the instance, e.g. for calling `refreshColors()`; the regular `ref` keeps forwarding the canvas element, unchanged) — see [Determinate progress](#determinate-progress), [Playback controls](#playback-controls), [SSR fallback](#ssr-fallback) and [React](#quick-start) above. `dithered/react-native`'s takes the same props with `style: StyleProp<ViewStyle>` in place of `className`/`style`, no `cache`, a `time` that also accepts a `SharedValue<number>`, and an extra `cells` — see [React Native](#react-native) above. On both, setting `transition` routes a `shape`/`brightness` prop change through the morph described in [Transitions](#transitions) instead of cutting.
 
 ### Sampling
 

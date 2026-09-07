@@ -174,6 +174,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     respectReducedMotion,
     initialFrame,
     speed,
+    transition,
     progress,
     time,
     onFrame,
@@ -302,6 +303,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
       respectReducedMotion,
       initialFrame,
       speed,
+      transition,
       onFrame: (f, t) => onFrameRef.current?.(f, t),
       onLoop: (loops) => onLoopRef.current?.(loops),
     });
@@ -326,12 +328,18 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
   // `onLoop` are deliberately absent: the first two get their own effect
   // below (a scrub at 60 Hz must never touch this one), and the
   // callbacks are wired once at mount via the refs above.
+  //
+  // With `transition` set, the change is routed through `transitionTo()`
+  // instead of `update()` — the whole point of the prop is that a
+  // `shape`/`brightness` change morphs rather than cuts. `transitionTo`
+  // never rejects (see `DitheredInstance`), so there is nothing to catch;
+  // `void` just tells the linter the floating promise is intentional.
   useEffect(() => {
     if (skipNextUpdate.current) {
       skipNextUpdate.current = false;
       return;
     }
-    instanceRef.current?.update({
+    const patch = {
       shape,
       brightness,
       size,
@@ -349,7 +357,13 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
       respectReducedMotion,
       initialFrame,
       speed,
-    });
+      transition,
+    };
+    if (transition) {
+      void instanceRef.current?.transitionTo(patch);
+    } else {
+      instanceRef.current?.update(patch);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     shape,
@@ -369,6 +383,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     respectReducedMotion,
     initialFrame,
     speed,
+    transition,
   ]);
 
   // Separate from the reconfigure effect so toggling `paused` never

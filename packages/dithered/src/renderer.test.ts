@@ -2981,3 +2981,327 @@ describe('createDithered playback controls', () => {
     expect(env.rafCallbacks.length).toBe(rafCountBefore);
   });
 });
+
+// ---------------------------------------------------------------------------
+// transitions (ADR 0004): transitionTo() / finishLoop()
+// ---------------------------------------------------------------------------
+
+describe('createDithered transitions', () => {
+  let env: ReturnType<typeof stubAnimationGlobals>;
+  let mockNow: number;
+  let nowSpy: ReturnType<typeof vi.spyOn>;
+
+  function baseOptions(overrides: Partial<DitheredOptions> = {}): DitheredOptions {
+    return {
+      shape: SQUARE_SHAPE,
+      brightness: () => true,
+      size: 40,
+      cols: 4,
+      cache: false,
+      period: 1000,
+      frames: 10,
+      ...overrides,
+    };
+  }
+
+  // Fires the most recently *scheduled* animation frame. stubAnimationGlobals
+  // never removes a cancelled callback from `rafCallbacks`, but createDithered
+  // only ever reads `raf`'s return value to decide whether to re-schedule, so
+  // the last entry is always the one that matters next.
+  function fire(ts: number): void {
+    const cbs = env.rafCallbacks;
+    cbs[cbs.length - 1](ts);
+  }
+
+  beforeEach(() => {
+    env = stubAnimationGlobals();
+    mockNow = 0;
+    nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => mockNow);
+  });
+
+  afterEach(() => {
+    env.restore();
+    nowSpy.mockRestore();
+  });
+
+  it('transitionTo resolves after duration of ticks and leaves the instance in the target state', async () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+    ctx.fill.mockClear();
+
+    mockNow = 1000;
+    let resolved = false;
+    const promise = instance
+      .transitionTo({ brightness: () => false, transition: { duration: 400 } })
+      .then(() => {
+        resolved = true;
+      });
+
+    // The first transition frame paints synchronously, at progress 0 —
+    // still the outgoing (always-true) brightness, so cells are drawn.
+    expect(ctx.fill.mock.calls.length).toBeGreaterThan(0);
+
+    ctx.fill.mockClear();
+    mockNow = 1200; // 200ms into a 400ms morph: not done yet.
+    fire(1200);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    ctx.fill.mockClear();
+    mockNow = 1400; // exactly at duration: progress reaches 1.
+    fire(1400);
+    await promise;
+    expect(resolved).toBe(true);
+    // Target brightness is always-false: the completed steady state draws
+    // nothing for this tick...
+    expect(ctx.fill).not.toHaveBeenCalled();
+
+    // ...and for a later one, at a different frame index, confirming this
+    // is the new steady state rather than a one-off empty transition frame.
+    ctx.fill.mockClear();
+    mockNow = 1500;
+    fire(1500);
+    expect(ctx.fill).not.toHaveBeenCalled();
+  });
+
+  it("repaints every tick during a morph, unlike steady state's skip-if-unchanged shortcut", () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    mockNow = 1000;
+    void instance.transitionTo({ brightness: () => true, transition: { duration: 1000 } });
+    ctx.clearRect.mockClear();
+
+    mockNow = 1100;
+    fire(1100);
+    expect(ctx.clearRect).toHaveBeenCalledTimes(1);
+
+    // Same instant again: a steady loop computes the same frame index and
+    // skips the redraw entirely. A morph must not — p is continuous.
+    fire(1100);
+    expect(ctx.clearRect).toHaveBeenCalledTimes(2);
+  });
+
+  it('drops the sprite strip for the morph and rebuilds it once the steady state resumes', () => {
+    const ctx = make2dCtx();
+    const getContextStub = stubGetContext(ctx);
+    const canvas = document.createElement('canvas');
+
+    try {
+      const instance = createDithered(canvas, baseOptions({ cache: true }));
+
+      // Before: the initial steady-state paint is cached, so it draws via drawImage.
+      expect(ctx.drawImage).toHaveBeenCalled();
+
+      ctx.drawImage.mockClear();
+      mockNow = 1000;
+      void instance.transitionTo({ brightness: () => false, transition: { duration: 400 } });
+      // During: the strip is dropped — the transition paints cells directly.
+      expect(ctx.drawImage).not.toHaveBeenCalled();
+
+      mockNow = 1200;
+      fire(1200);
+      expect(ctx.drawImage).not.toHaveBeenCalled();
+
+      ctx.drawImage.mockClear();
+      mockNow = 1400;
+      fire(1400); // progress reaches 1: completes, configure() rebuilds the strip.
+      // After: back to drawImage for the new steady state.
+      expect(ctx.drawImage).toHaveBeenCalled();
+    } finally {
+      getContextStub.restore();
+    }
+  });
+
+  it('prefers-reduced-motion skips the morph and cuts straight to the target', async () => {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({ matches: true })),
+    );
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+    ctx.fill.mockClear();
+
+    const promise = instance.transitionTo({
+      brightness: () => false,
+      transition: { duration: 5000 },
+    });
+
+    // No tick needed at all — it's already resolved.
+    await promise;
+    // Target's always-false brightness, applied immediately.
+    expect(ctx.fill).not.toHaveBeenCalled();
+  });
+
+  it('finishLoop() resolves when the frame index wraps to 0', async () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+
+    // The first tick after create() always sees dt=0 (lastNow starts
+    // null), so this just establishes the baseline timestamp — phase
+    // doesn't move yet, and no wrap has happened.
+    mockNow = 500;
+    fire(500);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    // dt=700ms out of a 1000ms period advances phase by 0.7 from its
+    // ~0.05 seed — not yet a full loop, so still no wrap.
+    mockNow = 1200;
+    fire(1200);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    // dt=950ms more crosses the 1.0 phase boundary: the loop has wrapped.
+    mockNow = 2150;
+    fire(2150);
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
+  it('finishLoop() resolves when playback halts (paused) without a wrap', async () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+
+    instance.setPaused(true);
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
+  it('finishLoop() resolves immediately when the loop is already halted', async () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ paused: true }));
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
+  it('transition.onLoopEnd defers the morph until after the loop wraps', async () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    mockNow = 0;
+    let resolved = false;
+    const promise = instance
+      .transitionTo({ brightness: () => false, transition: { onLoopEnd: true, duration: 200 } })
+      .then(() => {
+        resolved = true;
+      });
+
+    // The first tick after create() always sees dt=0 (lastNow starts
+    // null) — this just establishes the baseline timestamp, no wrap yet.
+    mockNow = 500;
+    fire(500);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    // dt=700ms out of a 1000ms period: not yet a full loop.
+    mockNow = 1200;
+    fire(1200);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    ctx.fill.mockClear();
+    // dt=950ms more crosses the 1.0 phase boundary: wraps, deferred morph begins.
+    mockNow = 2150;
+    fire(2150);
+    await Promise.resolve(); // flush finishLoop()'s `.then(begin)`
+
+    mockNow = 2350; // 200ms after the morph actually started at 2150.
+    fire(2350);
+    await promise;
+    expect(resolved).toBe(true);
+  });
+
+  it('a second transitionTo mid-morph resolves the first and lands on the second target', async () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    mockNow = 1000;
+    let firstResolved = false;
+    void instance
+      .transitionTo({ brightness: () => false, transition: { duration: 1000 } })
+      .then(() => {
+        firstResolved = true;
+      });
+
+    mockNow = 1200;
+    fire(1200); // 200ms into the first (1000ms) morph — nowhere near done.
+    await Promise.resolve();
+    expect(firstResolved).toBe(false);
+
+    // A second call cuts the first one short: its target becomes the
+    // steady state and its own promise resolves right away.
+    let secondResolved = false;
+    const second = instance
+      .transitionTo({ brightness: () => true, transition: { duration: 400 } })
+      .then(() => {
+        secondResolved = true;
+      });
+
+    await Promise.resolve();
+    expect(firstResolved).toBe(true);
+    expect(secondResolved).toBe(false);
+
+    mockNow = 1600; // 400ms after the second morph started at 1200.
+    fire(1600);
+    await second;
+    expect(secondResolved).toBe(true);
+  });
+
+  it('destroy() resolves pending finishLoop/transitionTo promises, tears down listeners, and releases the strip', async () => {
+    const removeSpy = vi.spyOn(document, 'removeEventListener');
+    const ctx = make2dCtx();
+    const getContextStub = stubGetContext(ctx);
+    const canvas = document.createElement('canvas');
+
+    try {
+      const instance = createDithered(canvas, baseOptions({ cache: true }));
+
+      let loopEndResolved = false;
+      void instance.finishLoop().then(() => {
+        loopEndResolved = true;
+      });
+
+      mockNow = 1000;
+      let transitionResolved = false;
+      void instance
+        .transitionTo({ brightness: () => false, transition: { duration: 1000 } })
+        .then(() => {
+          transitionResolved = true;
+        });
+
+      instance.destroy();
+      await Promise.resolve();
+
+      expect(loopEndResolved).toBe(true);
+      expect(transitionResolved).toBe(true);
+      expect(cancelAnimationFrame).toHaveBeenCalled();
+      expect(env.ioInstances[0].disconnect).toHaveBeenCalled();
+      expect(removeSpy).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+
+      // The sprite strip is released, not just abandoned: a renderFrame()
+      // call afterward has nothing cached left to drawImage from.
+      ctx.drawImage.mockClear();
+      instance.renderFrame(0);
+      expect(ctx.drawImage).not.toHaveBeenCalled();
+    } finally {
+      getContextStub.restore();
+      removeSpy.mockRestore();
+    }
+  });
+});

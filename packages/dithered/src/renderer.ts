@@ -4,8 +4,10 @@ import {
   assignDefined,
   clonePaletteOption,
   computeGeometry,
+  createTransition,
   effectiveDpr,
   fitSize,
+  frameAt,
   frameForPhase,
   hasCurrentColor,
   loopsAt,
@@ -24,6 +26,7 @@ import {
   type PaintGeometry,
   type Palette,
   type ResolvedOptions,
+  type Transition,
 } from './core';
 import { aspectOf, sampleCells, type Cell } from './shape';
 
@@ -36,6 +39,28 @@ export interface DitheredInstance {
   setPaused(paused: boolean): void;
   /** Re-configures the instance; may resample cells and/or rebuild the sprite cache. */
   update(options: Partial<DitheredOptions>): void;
+  /**
+   * Like `update()`, but morphs into the new shape/brightness over
+   * `transition.duration` (see ADR 0004) instead of cutting to it. The
+   * target options are computed exactly as `update(patch)` would.
+   *
+   * Resolves once the target is the new steady state. Never rejects: a
+   * transition that is interrupted (by `destroy()`, a pause, the tab
+   * going hidden, the canvas leaving the viewport, or another
+   * `transitionTo` call) completes immediately instead of hanging, and
+   * `prefers-reduced-motion` skips the morph and cuts straight to the
+   * target.
+   */
+  transitionTo(patch: Partial<DitheredOptions>): Promise<void>;
+  /**
+   * Resolves the next time playback wraps back to loop phase 0. Also
+   * resolves — early — if the loop stops advancing before that happens
+   * (paused, tab hidden, canvas off-screen, reduced motion, or
+   * `destroy()`) or if it is already stopped when called: a promise that
+   * settles early is preferable to one that hangs forever. Resolution
+   * means "the loop is not mid-cycle any more", not "a full cycle played".
+   */
+  finishLoop(): Promise<void>;
   /** Draws a specific frame directly, bypassing the animation loop. */
   renderFrame(frame: number): void;
   /**
@@ -83,6 +108,22 @@ function prefersReducedMotion(opts: ResolvedOptions): boolean {
   }
 }
 
+/** `performance.now()` where available, falling back to `Date.now()`. */
+function now(): number {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+/** A morph in progress: the pure "what to draw" core plus what it's morphing into. */
+interface ActiveTransition {
+  core: Transition;
+  targetOpts: ResolvedOptions;
+  /** `transitionTo`'s resolver(s) — one per call, drained on completion. */
+  resolvers: Array<() => void>;
+}
+
 /**
  * Creates and starts an animated dither loop on `canvas`.
  *
@@ -104,6 +145,13 @@ function prefersReducedMotion(opts: ResolvedOptions): boolean {
  * time — that's what makes `speed`, negative `speed`, `onLoop`, and
  * `setTime`/`clearTime` possible without ever moving the displayed frame
  * discontinuously. See ADR 0006.
+ *
+ * `transitionTo`/`finishLoop` (ADR 0004) layer a time-boxed morph on top
+ * of that same loop rather than replacing it: a transition frame is
+ * painted directly every tick (never through the sprite cache — see
+ * `paintTransitionFrame`), and completion runs through the same
+ * resample/applySurface/buildCache reconfigure the plain `update()` path
+ * uses, so there is no separate post-transition state to keep consistent.
  */
 export function createDithered(
   canvas: HTMLCanvasElement,
@@ -241,6 +289,11 @@ export function createDithered(
   // True while a `setTime` caller owns `phase`; the internal clock never
   // runs while this is set, regardless of `isPaused`.
   let driven = false;
+
+  // A morph in progress (ADR 0004), and the `finishLoop()`/`onLoopEnd`
+  // waiters pending a loop wrap.
+  let transition: ActiveTransition | null = null;
+  let loopEndResolvers: Array<() => void> = [];
 
   function computedColor(): string {
     if (typeof getComputedStyle === 'undefined') return '';
@@ -652,9 +705,83 @@ export function createDithered(
     }
   }
 
+  /**
+   * Paints one frame of a morph directly — never through `sheet`, per ADR
+   * 0004 §5: a transition is played once, so caching it would cost a
+   * synchronous build to save a single repaint each. `currentFrame` is
+   * left at -1 (not a valid steady-state frame index) so the first
+   * post-transition `blit()` never mistakes a stale index for a match.
+   */
+  function paintTransitionFrame(t: ActiveTransition, p: number, nowMs: number): void {
+    ctx.setTransform(W / cssW, 0, 0, H / cssH, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+    paintFrame(
+      ctx,
+      t.core.cellsAt(p),
+      t.core.brightnessAt(p, nowMs),
+      0, // phase unused: brightnessAt's function already carries both sides' phases
+      computeGeometry(t.targetOpts, cssW, cssH),
+    );
+    currentFrame = -1;
+  }
+
+  function drainLoopEnd(): void {
+    const resolvers = loopEndResolvers;
+    loopEndResolvers = [];
+    for (const resolve of resolvers) resolve();
+  }
+
+  /**
+   * Ends the in-progress morph (if any) exactly like a plain `update()`
+   * would: adopts the target as the new steady state, resamples, rebuilds
+   * the sprite cache, repaints, and resolves the transition's promise(s).
+   * Used both for a morph completing naturally (`p >= 1`) and for cutting
+   * one short (reduced motion, a halt, a superseding `transitionTo`) — ADR
+   * 0004 §1/§7: completion is a single code path either way.
+   */
+  function finishTransitionNow(): void {
+    if (!transition) return;
+    const t = transition;
+    transition = null;
+    opts = t.targetOpts;
+    reduced = prefersReducedMotion(opts);
+    isPaused = opts.paused;
+    // The phase clock was frozen for the morph's duration (see `tick`),
+    // not advanced against wall-clock time like the old frame-index
+    // model — resuming with a fresh `dt` of 0 on the next tick avoids a
+    // discontinuous jump forward by however long the morph took, rather
+    // than trying to reconstruct where a continuously-running clock
+    // would have ended up.
+    lastNow = null;
+    resample();
+    applyResolvedFg();
+    applySurface();
+    buildCache();
+    paintForPhase();
+    for (const resolve of t.resolvers) resolve();
+  }
+
+  /**
+   * Same as `finishTransitionNow`, but never paints — `destroy()`'s
+   * canvas is going away, so there is nothing to resample or draw onto
+   * (ADR 0004 §7). The promise still resolves; it never rejects.
+   */
+  function finishTransitionSilently(): void {
+    if (!transition) return;
+    const t = transition;
+    transition = null;
+    opts = t.targetOpts;
+    for (const resolve of t.resolvers) resolve();
+  }
+
+  function loopAdvancing(): boolean {
+    if (destroyed || isPaused || reduced || !visible || dormant || driven) return false;
+    if (typeof document !== 'undefined' && document.hidden) return false;
+    return true;
+  }
+
   function schedule(): void {
-    if (destroyed || isPaused || !visible || reduced || dormant || driven) return;
-    if (typeof document !== 'undefined' && document.hidden) return;
+    if (!loopAdvancing()) return;
     if (raf) return;
     raf = requestAnimationFrame(tick);
   }
@@ -665,17 +792,63 @@ export function createDithered(
     lastNow = null;
   }
 
-  function tick(now: number): void {
+  /**
+   * Stops playback from advancing (setPaused(true), tab hidden, canvas
+   * off-screen): finishes any in-progress morph immediately so no
+   * half-morphed frame is left sitting in the backing store for whenever
+   * playback resumes, cancels the loop, then drains `finishLoop()` —
+   * ADR 0004 §6/§7.
+   */
+  function haltPlayback(): void {
+    finishTransitionNow();
+    halt();
+    drainLoopEnd();
+  }
+
+  /**
+   * Resolves the next time playback wraps to phase 0 — or immediately if
+   * the loop isn't currently advancing at all, so a caller can never
+   * `await` a promise that was already doomed to hang. Shared by the
+   * public `finishLoop()` and by `transition.onLoopEnd` inside
+   * `transitionTo`, so neither has to go through `this`.
+   */
+  function finishLoopPromise(): Promise<void> {
+    if (!loopAdvancing()) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      loopEndResolvers.push(resolve);
+    });
+  }
+
+  function tick(nowMs: number): void {
     raf = 0;
-    const dt = lastNow === null ? 0 : now - lastNow;
-    lastNow = now;
+    // Defensive: a stale callback slipping through after destroy() (this
+    // is what cancelAnimationFrame guards against in a real browser)
+    // must not paint onto — or resample against — a canvas that's gone.
+    if (destroyed) return;
+    if (transition) {
+      const p = transition.core.progressAt(nowMs);
+      paintTransitionFrame(transition, p, nowMs);
+      // Every tick repaints during a morph (p is continuous — the
+      // repeated-frame-index shortcut below doesn't apply), so this can
+      // only run *after* that paint, exactly like a plain update()'s.
+      if (p >= 1) finishTransitionNow();
+    } else {
+      // The phase clock is frozen for a morph's duration (see
+      // `finishTransitionNow`) rather than advanced underneath it, so
+      // `dt` is only ever computed here, on the steady-state branch.
+      const dt = lastNow === null ? 0 : nowMs - lastNow;
+      lastNow = nowMs;
 
-    const loopsBefore = loopsAt(phase);
-    phase = advancePhase(phase, dt, opts.period, opts.speed);
-    const loopsAfter = loopsAt(phase);
-    if (loopsAfter !== loopsBefore) opts.onLoop?.(loopsAfter);
+      const loopsBefore = loopsAt(phase);
+      phase = advancePhase(phase, dt, opts.period, opts.speed);
+      const loopsAfter = loopsAt(phase);
+      if (loopsAfter !== loopsBefore) {
+        opts.onLoop?.(loopsAfter);
+        drainLoopEnd();
+      }
 
-    paintForPhase();
+      paintForPhase();
+    }
     schedule();
   }
 
@@ -707,14 +880,14 @@ export function createDithered(
       ? new IntersectionObserver((entries) => {
           visible = entries[0]?.isIntersecting ?? true;
           if (visible) schedule();
-          else halt();
+          else haltPlayback();
         })
       : null;
   io?.observe(canvas);
 
   const onVisibility = () => {
     if (typeof document === 'undefined') return;
-    if (document.hidden) halt();
+    if (document.hidden) haltPlayback();
     else schedule();
   };
   if (typeof document !== 'undefined') {
@@ -782,6 +955,99 @@ export function createDithered(
   }
 
   armDpr();
+
+  /** Merges `patch` onto `base`'s *resolved* transition, filling gaps from it rather than TRANSITION_DEFAULTS. */
+  function mergeTransitionOption(
+    base: ResolvedOptions['transition'],
+    patch: Partial<DitheredOptions>,
+  ): ResolvedOptions['transition'] {
+    return assignDefined(base, patch.transition ?? {});
+  }
+
+  /**
+   * Starts a new morph toward `targetOpts`, resolving `resolve` when it
+   * completes (naturally, or because something cut it short). Any morph
+   * already running is finished instantly first — ADR 0004 §7: blends
+   * are never nested.
+   */
+  function startTransition(targetOpts: ResolvedOptions, resolve: () => void): void {
+    if (destroyed) {
+      resolve();
+      return;
+    }
+
+    const nowMs = now();
+    finishTransitionNow();
+
+    const fromOpts = opts;
+    // Both shapes are sampled onto the *target's* grid — ADR 0004 §2 — so
+    // a diff by (i, j) is meaningful even when the shapes' own aspect
+    // ratios differ.
+    const rows = resolveRows(targetOpts);
+    const fromCells = sampleCells(
+      fromOpts.shape,
+      targetOpts.cols,
+      fromOpts.hitTest,
+      rows,
+      fromOpts.matrix,
+    );
+    const toCells = sampleCells(
+      targetOpts.shape,
+      targetOpts.cols,
+      targetOpts.hitTest,
+      rows,
+      targetOpts.matrix,
+    );
+
+    const core = createTransition(
+      {
+        cells: fromCells,
+        brightness: fromOpts.brightness,
+        period: fromOpts.period,
+        frames: fromOpts.frames,
+      },
+      {
+        cells: toCells,
+        brightness: targetOpts.brightness,
+        period: targetOpts.period,
+        frames: targetOpts.frames,
+      },
+      nowMs,
+      targetOpts.transition.duration,
+    );
+
+    // Resize onto the target surface and drop the sprite strip *before*
+    // the first paint below, so the resize never shows through as a
+    // blank frame — ADR 0004 §5. Written out rather than reusing
+    // `applySurface()`: that function reads `opts`/`sizePx` from the
+    // closure, and `opts` doesn't switch to `targetOpts` until the morph
+    // actually completes (`finishTransitionNow`) — see the field comment
+    // on `transition`. `sizePx`/`cssW`/`cssH`/`dpr` are still written
+    // through to the shared state (not kept purely local) so that later
+    // `applySurface()` call recomputes idempotently from the same values.
+    if (targetOpts.size !== 'fill') {
+      sizePx = resolveSizePx(targetOpts.size);
+    }
+    const targetDpr = effectiveDpr(rawDpr(), targetOpts.maxDpr);
+    lastEffectiveDpr = targetDpr;
+    const css = surfaceSize(sizePx, targetOpts.shape);
+    canvas.style.width = css.width + 'px';
+    canvas.style.height = css.height + 'px';
+    const device = surfaceSize(sizePx, targetOpts.shape, targetDpr);
+    W = canvas.width = Math.round(device.width);
+    H = canvas.height = Math.round(device.height);
+    cssW = css.width;
+    cssH = css.height;
+    dpr = targetDpr;
+    sheet = null;
+
+    transition = { core, targetOpts, resolvers: [resolve] };
+
+    halt();
+    paintTransitionFrame(transition, core.progressAt(nowMs), nowMs);
+    schedule();
+  }
+
   schedule();
 
   return {
@@ -795,7 +1061,7 @@ export function createDithered(
       // value (review finding 6).
       opts.paused = paused;
       isPaused = paused;
-      if (paused) halt();
+      if (paused) haltPlayback();
       else schedule();
     },
 
@@ -807,6 +1073,11 @@ export function createDithered(
       // a node the caller believes is released, and constructing a second,
       // never-disconnected `ResizeObserver` (review finding 2).
       if (destroyed) return;
+
+      // Any in-progress morph is a hard-cut override: adopt its target
+      // first so this update() layers onto a consistent steady state
+      // rather than onto a half-morphed one.
+      finishTransitionNow();
 
       const prevShape = opts.shape;
       const prevCols = opts.cols;
@@ -837,7 +1108,12 @@ export function createDithered(
       const candidate = assignDefined<ResolvedOptions>(opts, {
         ...patch,
         fg: clonePaletteOption(patch.fg),
-      });
+      } as Partial<ResolvedOptions>);
+      // `assignDefined` above treats `transition` like any other key: a
+      // provided object would replace the current one wholesale, dropping
+      // an unset `onLoopEnd`/`duration` rather than filling it from the
+      // existing value (mirrors `resolveOptions`'s identical fix-up).
+      candidate.transition = mergeTransitionOption(opts.transition, patch);
 
       const shapeChanged = candidate.shape !== prevShape;
       const doResample =
@@ -1102,6 +1378,46 @@ export function createDithered(
       }
     },
 
+    transitionTo(patch: Partial<DitheredOptions>): Promise<void> {
+      if (destroyed) return Promise.resolve();
+
+      const previousTransition = opts.transition;
+      const targetOpts = assignDefined<ResolvedOptions>(
+        opts,
+        patch as Partial<ResolvedOptions>,
+      ) as ResolvedOptions;
+      targetOpts.transition = mergeTransitionOption(previousTransition, patch);
+
+      const targetReduced = prefersReducedMotion(targetOpts);
+
+      // Reduced motion (ADR 0004 §7), or a loop that isn't advancing
+      // anyway (paused/hidden/off-screen/destroyed): there is no loop to
+      // morph in front of, so cut straight to the target through the same
+      // path `update()` uses, and resolve immediately.
+      if (targetReduced || !loopAdvancing()) {
+        finishTransitionNow();
+        opts = targetOpts;
+        reduced = targetReduced;
+        isPaused = opts.paused;
+        lastNow = null;
+        halt();
+        resample();
+        applyResolvedFg();
+        applySurface();
+        buildCache();
+        paintForPhase();
+        schedule();
+        return Promise.resolve();
+      }
+
+      const begin = () => new Promise<void>((resolve) => startTransition(targetOpts, resolve));
+      return targetOpts.transition.onLoopEnd ? finishLoopPromise().then(begin) : begin();
+    },
+
+    finishLoop(): Promise<void> {
+      return finishLoopPromise();
+    },
+
     renderFrame(frame: number) {
       // Kept in sync with `phase`, not just `currentFrame`: a later
       // resize, DPR change, or `update()` reconfigure all compute "what's
@@ -1153,7 +1469,14 @@ export function createDithered(
 
     destroy() {
       destroyed = true;
+      finishTransitionSilently();
       halt();
+      drainLoopEnd();
+      // Release the sprite strip (and the sampled cells) for GC rather
+      // than leaving the last steady state's — or a half-morphed
+      // transition's — canvas sitting around referenced.
+      sheet = null;
+      cells = [];
       io?.disconnect();
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', onVisibility);

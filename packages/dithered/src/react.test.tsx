@@ -148,6 +148,36 @@ describe('Dithered', () => {
     expect(mockedCreateDithered).toHaveBeenCalledTimes(1);
   });
 
+  // ADR 0004: with `transition` set, an option change is routed through
+  // transitionTo() (a morph) instead of update() (a cut).
+  it('without `transition`, a shape change calls update() and never transitionTo()', () => {
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} fg="#111111" />);
+    const instance = lastInstance();
+    const updateSpy = vi.spyOn(instance, 'update');
+    const transitionToSpy = vi.spyOn(instance, 'transitionTo');
+
+    rerender(<Dithered shape={SQUARE_SHAPE} fg="#222222" />);
+
+    expect(updateSpy).toHaveBeenCalledWith(expect.objectContaining({ fg: '#222222' }));
+    expect(transitionToSpy).not.toHaveBeenCalled();
+  });
+
+  it('with `transition` set, a shape/option change calls transitionTo() instead of update()', () => {
+    const { rerender } = render(
+      <Dithered shape={SQUARE_SHAPE} fg="#111111" transition={{ duration: 400 }} />,
+    );
+    const instance = lastInstance();
+    const updateSpy = vi.spyOn(instance, 'update');
+    const transitionToSpy = vi.spyOn(instance, 'transitionTo');
+
+    rerender(<Dithered shape={SQUARE_SHAPE} fg="#222222" transition={{ duration: 400 }} />);
+
+    expect(transitionToSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ fg: '#222222', transition: { duration: 400 } }),
+    );
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
   it('toggling paused calls setPaused with the new value', () => {
     const { rerender } = render(<Dithered shape={SQUARE_SHAPE} paused={false} />);
     const setPausedSpy = vi.spyOn(lastInstance(), 'setPaused');

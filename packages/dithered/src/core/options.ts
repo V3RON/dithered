@@ -1,5 +1,10 @@
 import { aspectOf, defaultRowsFor, type Cell, type HitTester, type Shape } from '../shape';
 import type { DitherMatrix } from '../matrix';
+import {
+  TRANSITION_DEFAULTS,
+  type ResolvedTransitionOptions,
+  type TransitionOptions,
+} from './transition';
 
 /**
  * Per-cell, per-frame brightness. `t` is the loop phase in `[0, 1)`.
@@ -94,6 +99,13 @@ export interface DitheredOptions {
    * isn't a wrap.
    */
   onLoop?: (loops: number) => void;
+  /**
+   * Morph into a shape/brightness change instead of cutting to it — see
+   * `DitheredInstance.transitionTo`. Left unset, `update()`/a prop change
+   * still cuts immediately; setting this only supplies the morph's
+   * defaults (`transitionTo` works either way).
+   */
+  transition?: TransitionOptions;
 }
 
 // `hitTest` is deliberately excluded from the `Required<...>` half: unlike
@@ -105,8 +117,18 @@ export interface DitheredOptions {
 // identity check against a module-level sentinel, and would cost native
 // callers a `runOnJS` hop per frame even when nothing is listening.
 type DitheredNonDefaultable = 'hitTest' | 'onFrame' | 'onLoop';
-export type ResolvedOptions = Required<Omit<DitheredOptions, DitheredNonDefaultable>> &
-  Pick<DitheredOptions, DitheredNonDefaultable>;
+// `transition`'s inner fields (`duration`, `onLoopEnd`) need to be fully
+// resolved too, not just present — `Required<DitheredOptions>` alone
+// would leave them `TransitionOptions`-shaped (still optional inside).
+// `resolveOptions` fills them from `TRANSITION_DEFAULTS`, same as every
+// other option is filled from `DEFAULTS`.
+export type ResolvedOptions = Omit<
+  Required<Omit<DitheredOptions, DitheredNonDefaultable>>,
+  'transition'
+> &
+  Pick<DitheredOptions, DitheredNonDefaultable> & {
+    transition: ResolvedTransitionOptions;
+  };
 
 // `fg` is narrowed back to `string` here (`ResolvedOptions.fg` is `string |
 // readonly string[]`, to allow a palette) since the default is always a
@@ -132,6 +154,7 @@ export const DEFAULTS: Omit<ResolvedOptions, 'shape' | 'brightness' | DitheredNo
   respectReducedMotion: true,
   initialFrame: 0,
   speed: 1,
+  transition: TRANSITION_DEFAULTS,
 };
 
 /**
@@ -183,10 +206,24 @@ export function clonePaletteOption(
 }
 
 export function resolveOptions(options: DitheredOptions): ResolvedOptions {
-  return assignDefined(DEFAULTS as ResolvedOptions, {
-    ...options,
-    fg: clonePaletteOption(options.fg),
-  });
+  // `transition` is nested-partial in `DitheredOptions` (`{ duration? }`)
+  // but required-and-fully-resolved in `ResolvedOptions` — a shape
+  // `Partial<T>` doesn't capture at any depth below the top level. It's
+  // reconciled explicitly just below, so the cast here is safe.
+  const resolved = assignDefined(
+    DEFAULTS as ResolvedOptions,
+    {
+      ...options,
+      fg: clonePaletteOption(options.fg),
+    } as Partial<ResolvedOptions>,
+  ) as ResolvedOptions;
+  // `assignDefined` above treats `transition` like any other key: a
+  // provided object replaces the default wholesale, which would drop an
+  // unset `onLoopEnd`/`duration` rather than defaulting it. Re-resolve it
+  // on its own so a caller passing `{ duration: 600 }` still gets
+  // `onLoopEnd: false` rather than `undefined`.
+  resolved.transition = assignDefined(DEFAULTS.transition, options.transition ?? {});
+  return resolved;
 }
 
 /** The grid row count, deriving one from the shape's aspect ratio when unset. */

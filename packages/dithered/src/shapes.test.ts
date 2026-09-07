@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { sampleCells } from './shape';
-import { circle, diamond, heart, rozenite, shapes, square } from './shapes';
+import { check, circle, cross, diamond, heart, rozenite, shapes, square } from './shapes';
 
 const ACCEPT_ALL = () => true;
 
 describe('shapes', () => {
-  it('exposes all five named shapes', () => {
+  it('exposes all seven named shapes', () => {
     expect(Object.keys(shapes).sort()).toEqual(
-      ['circle', 'diamond', 'heart', 'rozenite', 'square'].sort(),
+      ['check', 'circle', 'cross', 'diamond', 'heart', 'rozenite', 'square'].sort(),
     );
   });
 
@@ -42,5 +42,11 @@ describe('shapes', () => {
     expect(shapes.diamond).toBe(diamond);
     expect(shapes.heart).toBe(heart);
     expect(shapes.rozenite).toBe(rozenite);
+    expect(shapes.check).toBe(check);
+    expect(shapes.cross).toBe(cross);
+  });
+
+  it('check and cross share a viewBox, so transitionTo between them never resizes the grid', () => {
+    expect(check.viewBox).toEqual(cross.viewBox);
   });
 });

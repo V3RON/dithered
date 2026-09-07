@@ -9,8 +9,7 @@ import {
   useSharedValue,
   type SharedValue,
 } from 'react-native-reanimated';
-import type { Brightness, DitheredOptions } from '../core';
-import { wrapFrame } from '../core';
+import { TRANSITION_DEFAULTS, wrapFrame, type Brightness, type DitheredOptions } from '../core';
 import { gem } from '../presets';
 import type { Cell, Shape } from '../shape';
 import { useDitheredPictures } from './pictures';
@@ -23,6 +22,7 @@ import {
   resolveAppliedFrame,
   wrapPhaseUI,
 } from './playback';
+import { useDitheredTransition, type DitheredTransitionSide } from './transition';
 
 export interface DitheredProps extends Omit<
   DitheredOptions,
@@ -103,11 +103,21 @@ function isSharedValue(value: unknown): value is SharedValue<number> {
   return typeof value === 'object' && value !== null && 'value' in value;
 }
 
+/** The steady-state config a morph runs between — see {@link DitheredTransitionSide}. */
+type Snapshot = DitheredTransitionSide;
+
+/** A morph in flight: what it's morphing between, and when it started. */
+interface MorphState {
+  from: Snapshot;
+  to: Snapshot;
+  startedAt: number;
+}
+
 /**
  * React Native counterpart to `dithered/react`'s `<Dithered>`, rendering
  * through `@shopify/react-native-skia`.
  *
- * Every frame of the loop is recorded once as an `SkPicture`
+ * Every frame of the steady-state loop is recorded once as an `SkPicture`
  * (see {@link useDitheredPictures}); playback then only swaps which
  * recording the canvas draws. Both the internal clock (a phase
  * accumulator in the frame callback, mirroring the web driver — see ADR
@@ -118,10 +128,18 @@ function isSharedValue(value: unknown): value is SharedValue<number> {
  * scroll handler writing straight into it reaches the picture swap
  * without ever crossing to JS.
  *
+ * With `transition` set, a `shape`/`brightness` (or other steady-config)
+ * change plays a morph first — recorded up front by
+ * {@link useDitheredTransition} the same way, so playback stays on the UI
+ * thread there too (ADR 0004 §5) — before handing off to the new steady
+ * recordings. Without it, a change still cuts immediately, same as before
+ * this ADR.
+ *
  * Playback stops while the app is backgrounded, while `paused` is set,
  * while `time`/`progress` drive playback directly, and — unless
  * `respectReducedMotion` is false — while the OS reports a
- * reduced-motion preference.
+ * reduced-motion preference; a morph in flight when that happens
+ * completes immediately rather than freezing half-morphed (ADR 0004 §7).
  */
 export function Dithered({
   shape,
@@ -140,6 +158,7 @@ export function Dithered({
   initialFrame = 0,
   respectReducedMotion = true,
   speed = 1,
+  transition,
   progress,
   time,
   onFrame,
@@ -168,6 +187,13 @@ export function Dithered({
 
   const reducedMotion = useReducedMotion();
   const appActive = useAppActive();
+
+  // A morph in flight (ADR 0004). Declared this early only because the
+  // re-point effect just below needs to know about it; the rest of the
+  // transition machinery (the change-detection effect that starts one,
+  // `useDitheredTransition` itself) lives further down, in its own
+  // section, once `holding` is available.
+  const [morph, setMorph] = useState<MorphState | null>(null);
 
   // The seed frame/phase pair agree exactly: `internalPhase` is derived
   // from `seedFrame` via `phaseForFrameUI`, not a bare `initialFrame /
@@ -210,6 +236,11 @@ export function Dithered({
   // replaced on the web, and disagrees with the web driver (which
   // re-points from the preserved *phase*) whenever `frames` changes.
   useEffect(() => {
+    // Skipped while a morph is actively painting: it owns `picture.value`
+    // until it hands off (see the frame callback below), and re-pointing
+    // here would fight it for the same shared value every time a morph
+    // frame is rebuilt for an unrelated reason.
+    if (morph) return;
     const previousFrame = currentFrame.value;
     const phase = externalPhase.value ?? internalPhase.value;
     const frame = frameForRepoint(externalPhase.value, internalPhase.value, frameCount);
@@ -222,7 +253,16 @@ export function Dithered({
     // happens to move it again. Called directly rather than through
     // `runOnJS`: this is an effect, already on the JS thread.
     if (frame !== previousFrame) onFrameRef.current?.(frame, wrapPhaseUI(phase));
-  }, [pictures, frameCount, currentFrame, picture, externalPhase, internalPhase, onFrameRef]);
+  }, [
+    pictures,
+    frameCount,
+    currentFrame,
+    picture,
+    externalPhase,
+    internalPhase,
+    onFrameRef,
+    morph,
+  ]);
 
   // The initial paint at `initialFrame` fires `onFrame`, on both
   // platforms (ADR 0006 §2) — already on the JS thread at mount, so no
@@ -276,6 +316,128 @@ export function Dithered({
   const holding =
     paused || driven || !appActive || (respectReducedMotion && reducedMotion === true);
 
+  // --- transitions (ADR 0004) ----------------------------------------
+  // `morph`/`setMorph` are already declared above (before the re-point
+  // effect); the rest of the machinery lives here, once `holding` exists.
+
+  const snapshot: Snapshot = {
+    shape,
+    brightness,
+    size,
+    cols,
+    rows,
+    matrix,
+    frames,
+    period,
+    fg,
+    bg,
+    gap,
+    radius,
+    cells,
+    hitTest,
+  };
+  const prevRef = useRef<Snapshot>(snapshot);
+  // A morph deferred by `transition.onLoopEnd`, waiting for the next
+  // frame-index wrap — see the `useAnimatedReaction` below.
+  const pendingMorphStartRef = useRef<(() => void) | null>(null);
+
+  const handleLoopWrap = useCallback(() => {
+    const start = pendingMorphStartRef.current;
+    if (start) {
+      pendingMorphStartRef.current = null;
+      start();
+    }
+  }, []);
+
+  useEffect(() => {
+    const prev = prevRef.current;
+    const next = snapshot;
+    const changed =
+      prev.shape !== next.shape ||
+      prev.brightness !== next.brightness ||
+      prev.size !== next.size ||
+      prev.cols !== next.cols ||
+      prev.rows !== next.rows ||
+      prev.matrix !== next.matrix ||
+      prev.frames !== next.frames ||
+      prev.period !== next.period ||
+      prev.fg !== next.fg ||
+      prev.bg !== next.bg ||
+      prev.gap !== next.gap ||
+      prev.radius !== next.radius ||
+      prev.cells !== next.cells ||
+      prev.hitTest !== next.hitTest;
+
+    if (!changed) return;
+    prevRef.current = next;
+
+    if (transition && !holding) {
+      const start = () => setMorph({ from: prev, to: next, startedAt: Date.now() });
+      if (transition.onLoopEnd) {
+        pendingMorphStartRef.current = start;
+      } else {
+        pendingMorphStartRef.current = null;
+        start();
+      }
+    } else {
+      // No `transition` set, or nothing to morph in front of (paused,
+      // backgrounded, reduced motion, controlled progress, or externally
+      // driven playback — all folded into `holding`): cut, same as
+      // `update()` always has — `pictures` above already reflects `next`.
+      pendingMorphStartRef.current = null;
+      setMorph(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    shape,
+    brightness,
+    size,
+    cols,
+    rows,
+    matrix,
+    frames,
+    period,
+    fg,
+    bg,
+    gap,
+    radius,
+    cells,
+    hitTest,
+    transition,
+    holding,
+  ]);
+
+  // A morph in flight when playback halts completes immediately — ADR
+  // 0004 §7 — rather than leaving a half-morphed frame frozen.
+  useEffect(() => {
+    if (holding && morph) setMorph(null);
+  }, [holding, morph]);
+
+  const duration = transition?.duration ?? TRANSITION_DEFAULTS.duration;
+  const { pictures: morphPictures } = useDitheredTransition({
+    from: morph?.from ?? prevRef.current,
+    to: morph?.to ?? prevRef.current,
+    duration,
+    reducedMotion: !morph,
+  });
+  const morphStartedAt = morph?.startedAt ?? 0;
+  const morphActive = morph !== null && morphPictures.length > 0;
+  // Distinct from `currentFrame`/`picture` above: those track the steady
+  // loop, and stay untouched (per the re-point effect's `if (morph)
+  // return;` guard) while a morph owns the canvas.
+  const morphStep = useSharedValue(0);
+
+  // Detects the steady loop wrapping back to phase 0 — the same signal
+  // the core (web) renderer's `finishLoop` uses — to release a morph
+  // that `transition.onLoopEnd` deferred.
+  useAnimatedReaction(
+    () => currentFrame.value,
+    (curr, prev) => {
+      if (prev !== null && curr < prev) runOnJS(handleLoopWrap)();
+    },
+    [handleLoopWrap],
+  );
+
   // Internal clock: a phase accumulator identical in shape to the web
   // driver's. `dt` comes from differencing `info.timestamp` against
   // `lastTimestamp` (finding 4), reset to `null` whenever the clock is
@@ -285,10 +447,28 @@ export function Dithered({
   // with `useCallback` on top of that (ADR 0006 §6): belt and braces,
   // since an unmemoized worklet would otherwise churn the frame-callback
   // registration on every unrelated parent render.
+  //
+  // A morph in flight (ADR 0004) takes over the picture swap first —
+  // stepped by elapsed wall-clock time against `duration`, the same way
+  // the web driver's `paintTransitionFrame` does — before handing back
+  // to the phase accumulator once it's exhausted.
   const loop = useFrameCallback(
     useCallback(
       (info) => {
         'worklet';
+        if (morphActive) {
+          const elapsed = Date.now() - morphStartedAt;
+          const t = Math.min(1, elapsed / duration);
+          const steps = morphPictures.length;
+          const step = Math.min(steps - 1, Math.floor(t * steps));
+          if (step !== morphStep.value || picture.value !== morphPictures[step]) {
+            morphStep.value = step;
+            picture.value = morphPictures[step];
+          }
+          if (t >= 1) runOnJS(setMorph)(null);
+          return;
+        }
+
         const dt = lastTimestamp.value === null ? 0 : info.timestamp - lastTimestamp.value;
         lastTimestamp.value = info.timestamp;
         const loopsBefore = loopsAtUI(internalPhase.value);
@@ -297,7 +477,21 @@ export function Dithered({
         if (loopsAfter !== loopsBefore && hasOnLoop) runOnJS(notifyLoop)(loopsAfter);
         applyPhase(internalPhase.value);
       },
-      [lastTimestamp, internalPhase, period, speed, hasOnLoop, notifyLoop, applyPhase],
+      [
+        morphActive,
+        morphStartedAt,
+        duration,
+        morphPictures,
+        morphStep,
+        picture,
+        lastTimestamp,
+        internalPhase,
+        period,
+        speed,
+        hasOnLoop,
+        notifyLoop,
+        applyPhase,
+      ],
     ),
     false,
   );
