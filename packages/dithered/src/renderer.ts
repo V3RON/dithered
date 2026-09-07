@@ -151,6 +151,9 @@ export function createDithered(
   // store, so it's deferred and forced through on the next wake regardless
   // of the one-cell threshold (see `resizeTo` and review finding 1).
   let pendingRebuild = false;
+  // One-time warnings, so a persistently-too-large or persistently-detached
+  // instance doesn't spam the console on every resize/update.
+  let warnedCacheTooLarge = false;
 
   // --- DPR tracking ------------------------------------------------------
   let mql: MediaQueryList | null = null;
@@ -243,40 +246,68 @@ export function createDithered(
     };
   }
 
+  /**
+   * `contentBoxSize` reports *logical* dimensions (inline/block axis), which
+   * only line up with visual width/height under a horizontal writing mode.
+   * Under `writing-mode: vertical-*` the axes are swapped, so the parent's
+   * computed writing mode decides how to map them (review finding 8). The
+   * `contentRect` fallback below is unaffected — it already reports visual
+   * width/height.
+   */
+  function isVerticalWritingMode(el: Element): boolean {
+    if (typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') {
+      return false;
+    }
+    try {
+      const mode = window.getComputedStyle(el).writingMode || '';
+      return mode.startsWith('vertical');
+    } catch {
+      return false;
+    }
+  }
+
   /** Extracts a `{width, height}` box from a `ResizeObserverEntry`. */
   function boxFromEntry(entry: ResizeObserverEntry): MeasuredBox {
     const boxes = entry.contentBoxSize;
     if (boxes) {
       const box = Array.isArray(boxes) ? boxes[0] : boxes;
-      if (box) return { width: box.inlineSize, height: box.blockSize };
+      if (box) {
+        return isVerticalWritingMode(entry.target)
+          ? { width: box.blockSize, height: box.inlineSize }
+          : { width: box.inlineSize, height: box.blockSize };
+      }
     }
     const rect = entry.contentRect;
     return { width: rect.width, height: rect.height };
   }
 
   /**
-   * Idempotent: creates the observer once ('fill' -> 'fill' keeps the same
-   * instance) and (re-)observes the current parent every time it's called,
-   * so a canvas that had no parent yet at the last attempt recovers the
-   * moment `update()` runs again after it's mounted.
+   * Idempotent: captures/applies `display: block` once ('fill' -> 'fill'
+   * keeps the same state), and (re-)observes the current parent every time
+   * it's called, so a canvas that had no parent yet at the last attempt
+   * recovers the moment `update()` runs again after it's mounted.
+   *
+   * The `ResizeObserver` itself is constructed lazily on the first call that
+   * finds an actual parent to observe — not before — per ADR 0011 ("No
+   * parentElement … attach no observer"); review finding 6.
    */
   function attachFillObserver(): void {
     if (!fillArmed) {
       fillArmed = true;
       previousDisplay = canvas.style.display;
       canvas.style.display = 'block';
-      if (typeof ResizeObserver !== 'undefined') {
-        resizeObserver = new ResizeObserver((entries) => {
-          if (destroyed || !isFillMode()) return;
-          const entry = entries[entries.length - 1];
-          if (!entry) return;
-          applyMeasurement(boxFromEntry(entry));
-        });
-      }
-      // else: documented — no ResizeObserver means one sync measurement
-      // that stays put until the next update().
     }
     const parent = canvas.parentElement;
+    if (!resizeObserver && parent && typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver((entries) => {
+        if (destroyed || !isFillMode()) return;
+        const entry = entries[entries.length - 1];
+        if (!entry) return;
+        applyMeasurement(boxFromEntry(entry));
+      });
+    }
+    // else (no parent yet, or no global ResizeObserver): documented — one
+    // sync measurement that stays put until the next update() re-attempts.
     // Re-observing every call is what lets a canvas mounted after the last
     // attempt recover; unobserving the previous parent first is what stops
     // a reparented canvas from being driven by two boxes at once (a stray
@@ -363,12 +394,35 @@ export function createDithered(
     // resize that crosses a cell boundary (see review finding 2).
     const frameToShow = currentFrame >= 0 ? currentFrame % opts.frames : opts.initialFrame;
     applySurface();
-    const cellThreshold = builtW > 0 ? builtW / opts.cols : 0;
+    // Floored at 2 device px: `W`/`builtW` are always whole device pixels
+    // (rounded in `applySurface()`), so the smallest possible nonzero delta
+    // is 1 — and the comparison below is `>=`. On a fine grid at a small
+    // resolved size (e.g. `cols: 32` on a ~30px fill), `builtW / cols` falls
+    // below 1, which — even "floored" at exactly 1 — would still call a
+    // 1px delta a full rebuild (`1 >= 1`), i.e. every single observer
+    // delivery during a drag, exactly the rebuild storm the threshold
+    // exists to prevent. Flooring at 2 instead guarantees at least one
+    // device pixel of slack is always absorbed by the cheap path (review
+    // finding 5).
+    const cellThreshold = builtW > 0 ? Math.max(builtW / opts.cols, 2) : 0;
+    // Whether `cache: 'auto'`'s size <= 120 threshold, re-evaluated at the
+    // *new* sizePx, disagrees with whether a strip currently exists. A
+    // resize can cross that boundary while staying under the one-cell
+    // threshold (cheap path); without this check the stale strip would
+    // silently keep being rescaled (or stay absent) past the boundary
+    // (review finding 4).
+    const useCacheNow = opts.cache === 'auto' ? sizePx <= 120 : opts.cache;
+    const cacheStateStale = useCacheNow !== (sheet !== null);
     // `pendingRebuild` forces this even under the threshold: a resample or
     // an option change (e.g. `fg`) picked up while dormant has no surface
     // to apply to yet, and waking at the *same* device size would otherwise
     // never rebuild the now-stale cache (see review finding 1, scenario B).
-    if (pendingRebuild || builtW === 0 || Math.abs(W - builtW) >= cellThreshold) {
+    if (
+      pendingRebuild ||
+      builtW === 0 ||
+      cacheStateStale ||
+      Math.abs(W - builtW) >= cellThreshold
+    ) {
       buildCache();
     }
     blit(frameToShow);
@@ -406,7 +460,28 @@ export function createDithered(
 
   /** Depends on cells, W/H, brightness, frames, colors, gap and radius. */
   function buildCache(): void {
-    const useCache = opts.cache === 'auto' ? sizePx <= 120 : opts.cache;
+    const requestedCache = opts.cache === 'auto' ? sizePx <= 120 : opts.cache;
+    // A large resolved size (easiest to reach via `size: 'fill'`) times
+    // `frames` can exceed the canvas dimension limit browsers silently clamp
+    // to (~16k-32k depending on engine); past that the strip would allocate
+    // as blank and every frame would blit nothing. Fall back to direct
+    // painting instead of an invisible instance (review finding 9).
+    const MAX_STRIP_DIMENSION = 16384;
+    const tooLargeForStrip = W * opts.frames > MAX_STRIP_DIMENSION || H > MAX_STRIP_DIMENSION;
+    if (
+      requestedCache &&
+      tooLargeForStrip &&
+      typeof console !== 'undefined' &&
+      !warnedCacheTooLarge
+    ) {
+      warnedCacheTooLarge = true;
+      console.warn(
+        'dithered: the sprite-strip cache would exceed a safe canvas size at this ' +
+          'resolution; falling back to direct per-frame painting. Pass `cache: false` ' +
+          '(or a smaller `size`) to avoid this check.',
+      );
+    }
+    const useCache = requestedCache && !tooLargeForStrip;
     if (useCache) {
       // `W / cssW`, not `dpr`: that is the factor the browser actually
       // stretches the backing store by when painting it into the CSS
@@ -447,6 +522,15 @@ export function createDithered(
 
   function blit(f: number): void {
     const frame = wrapFrame(f, opts.frames);
+    // Dormant instances retain W = H = 0 (no surface to paint into) while
+    // the animation loop or a direct `renderFrame()` call can still reach
+    // here; painting would compute a zero cell size and draw hundreds of
+    // degenerate rects into an untouched, default-sized canvas for nothing
+    // (review finding 7).
+    if (W <= 0 || H <= 0) {
+      currentFrame = frame;
+      return;
+    }
     ctx.setTransform(W / cssW, 0, 0, H / cssH, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
     if (sheet) {
@@ -601,6 +685,14 @@ export function createDithered(
       const prevRows = opts.rows;
       const prevMatrix = opts.matrix;
       const prevHitTest = opts.hitTest;
+      const prevBrightness = opts.brightness;
+      const prevFrames = opts.frames;
+      const prevFg = opts.fg;
+      const prevBg = opts.bg;
+      const prevGap = opts.gap;
+      const prevRadius = opts.radius;
+      const prevCache = opts.cache;
+      const prevMaxDpr = opts.maxDpr;
       const wasFill = isFillMode();
       const patchHasSize = 'size' in patch && patch.size !== undefined;
 
@@ -663,6 +755,7 @@ export function createDithered(
       const prevPreviousDisplay = previousDisplay;
       const prevObservedParent = observedParent;
       const prevWarnedNoParent = warnedNoParent;
+      const prevWarnedCacheTooLarge = warnedCacheTooLarge;
       const wasScheduled = raf !== 0;
 
       opts = candidate;
@@ -679,13 +772,25 @@ export function createDithered(
         // deferring it would lose it permanently, since waking only re-runs
         // `applySurface()`/`buildCache()` (review finding 1, scenario A).
         if (doResample) resample();
-        applyResolvedFg();
+        // The `'currentColor'` token, unlike every other option, can
+        // resolve to a different value with no patch field of its own
+        // changing at all (the canvas's computed color moved since the
+        // last configure) — so whether the resolved palette actually
+        // changed feeds into the repaint decision below the same as any
+        // other cache-affecting field.
+        const fgResolvedChanged = applyResolvedFg();
 
+        const priorObservedParent = observedParent;
         if (nowFill) {
           // Idempotent — also recovers a canvas that had no parent to
           // observe yet at the last attempt.
           attachFillObserver();
         }
+        // The observer's target moved -- either a genuine reparent, or the
+        // very first time a parent became available to observe (previously
+        // null). Either way there is no live delivery for it yet, so a
+        // synchronous re-measure is the only way to get one.
+        const reparented = nowFill && observedParent !== priorObservedParent;
 
         if (nowFill && !wasFill) {
           resolveFillSizeSync();
@@ -693,10 +798,21 @@ export function createDithered(
           detachFillObserver();
           sizePx = resolveSizePx(opts.size);
         } else if (nowFill && wasFill) {
-          // 'fill' -> 'fill': re-measure only when asked to (an explicit
-          // `size: 'fill'` patch) or when the aspect ratio changed; any
-          // other option change leaves the derived `sizePx` untouched.
-          if (patchHasSize || shapeChanged) {
+          // 'fill' -> 'fill': re-measure synchronously only when it can
+          // actually change the outcome -- reparented (above), the aspect
+          // ratio changed, or there is no live `ResizeObserver` tracking
+          // this instance at all (the documented recovery path for that
+          // environment, gated on an explicit `size: 'fill'` patch so it
+          // isn't triggered by every unrelated option). Otherwise the
+          // observer-delivered `sizePx` -- more precise than this
+          // synchronous `clientWidth`-based fit, and per the ADR "not
+          // clobbered" -- is left alone. This is what lets a caller that
+          // always resends `size: 'fill'` alongside every other prop
+          // change (the React wrapper, which builds a full options object
+          // every render) avoid clobbering a fractional RO-delivered size
+          // with a coarser synchronous re-measurement on every unrelated
+          // prop change (review finding 2).
+          if (reparented || shapeChanged || (resizeObserver === null && patchHasSize)) {
             resolveFillSizeSync();
           }
         } else {
@@ -707,6 +823,13 @@ export function createDithered(
         // identical comment in `resizeTo` (review finding 2).
         const frameToShow = currentFrame >= 0 ? currentFrame % opts.frames : opts.initialFrame;
 
+        // Run only the stages this patch actually touches (ADR 0011's
+        // three-stage table), rather than unconditionally reapplying the
+        // surface and rebuilding the sprite strip on every `update()` call
+        // — which rebuilt the whole sprite strip for e.g.
+        // `update({ paused: true })`, or every React prop change on a
+        // cached instance (review finding 3).
+        let repainted = false;
         if (dormant) {
           // Everything but the resample above needs a surface (brightness,
           // colors, frames, gap, radius -> the sprite cache): defer it,
@@ -714,8 +837,22 @@ export function createDithered(
           // the one-cell threshold (review finding 1, scenario B).
           pendingRebuild = true;
         } else {
-          applySurface();
-          buildCache();
+          const surfaceChanged =
+            shapeChanged || opts.maxDpr !== prevMaxDpr || sizePx !== prevSizePx;
+          const cacheAffectingChanged =
+            doResample ||
+            surfaceChanged ||
+            fgResolvedChanged ||
+            opts.brightness !== prevBrightness ||
+            opts.frames !== prevFrames ||
+            opts.fg !== prevFg ||
+            opts.bg !== prevBg ||
+            opts.gap !== prevGap ||
+            opts.radius !== prevRadius ||
+            opts.cache !== prevCache;
+          if (surfaceChanged) applySurface();
+          if (cacheAffectingChanged) buildCache();
+          repainted = surfaceChanged || cacheAffectingChanged;
         }
 
         reduced = prefersReducedMotion(opts);
@@ -726,7 +863,7 @@ export function createDithered(
         if (dormant) {
           canvas.style.width = '0px';
           canvas.style.height = '0px';
-        } else {
+        } else if (repainted) {
           blit(frameToShow);
         }
         schedule();
@@ -755,6 +892,7 @@ export function createDithered(
         previousDisplay = prevPreviousDisplay;
         observedParent = prevObservedParent;
         warnedNoParent = prevWarnedNoParent;
+        warnedCacheTooLarge = prevWarnedCacheTooLarge;
         if (haltedForRepaint && wasScheduled) schedule();
         throw err;
       }
@@ -777,9 +915,17 @@ export function createDithered(
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', onVisibility);
       }
-      if (resizeObserver) {
-        resizeObserver.disconnect();
-        resizeObserver = null;
+      // Routed through `detachFillObserver()` (rather than disconnecting
+      // `resizeObserver` directly) so `display` is restored to whatever it
+      // was before fill mode set it to `block`, and `fillArmed`/
+      // `previousDisplay` are cleared — otherwise a create -> destroy ->
+      // create cycle on the same `<canvas>` node (React StrictMode's
+      // double-invoked mount effect, or any remount) captures the *already
+      // corrupted* `display: block` as the "previous" value on the next
+      // create, permanently losing the real original (review finding 1).
+      // Idempotent: a second `destroy()` finds `fillArmed` already false.
+      if (fillArmed) {
+        detachFillObserver();
       }
       disarmDpr();
     },
