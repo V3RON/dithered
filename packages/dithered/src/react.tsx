@@ -264,6 +264,31 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     progress,
   ]);
 
+  // The reconfigure effect's own "did any *option* actually change" record
+  // — deliberately excludes `transition` (see the effect below, and
+  // finding 5: the documented `transition={{ duration: 400 }}` usage is a
+  // fresh object literal every render, so comparing `transition` itself by
+  // identity would treat *every* unrelated re-render as a change).
+  const prevOptionsRef = useRef({
+    shape,
+    brightness,
+    size,
+    maxDpr,
+    cols,
+    rows,
+    matrix,
+    frames,
+    period,
+    fg,
+    bg,
+    cache,
+    gap,
+    radius,
+    respectReducedMotion,
+    initialFrame,
+    speed,
+  });
+
   // Latest-value refs rather than passing the callbacks through
   // `update()`: an inline arrow function (the overwhelmingly common
   // case) has a fresh identity every render, and routing that through
@@ -329,16 +354,92 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
   // below (a scrub at 60 Hz must never touch this one), and the
   // callbacks are wired once at mount via the refs above.
   //
-  // With `transition` set, the change is routed through `transitionTo()`
-  // instead of `update()` — the whole point of the prop is that a
-  // `shape`/`brightness` change morphs rather than cuts. `transitionTo`
-  // never rejects (see `DitheredInstance`), so there is nothing to catch;
-  // `void` just tells the linter the floating promise is intentional.
+  // Guarded on whether an option *actually* changed since the last render
+  // (finding 5): this effect's dependency array still has to list
+  // `transition` (its `duration`/`onLoopEnd` need to reach `update()`/
+  // `transitionTo()` too), but `transition` is deliberately left out of
+  // the "did anything change" comparison itself. Without that, the
+  // documented `transition={{ duration: 400 }}` usage — a fresh object
+  // literal every render — would make *every* unrelated parent re-render
+  // look like a change, calling `transitionTo()` on props that never
+  // moved. Via `transitionTo`, that cuts a half-finished morph straight to
+  // its target (the abrupt jump the feature exists to remove) and pays a
+  // full synchronous sprite-strip rebuild for nothing; `native/Dithered.tsx`
+  // already has this guard, so this brings the two platforms back in line.
+  //
+  // With `transition` set, a genuine change is routed through
+  // `transitionTo()` instead of `update()` — the whole point of the prop
+  // is that a `shape`/`brightness` change morphs rather than cuts.
+  // `transitionTo` never rejects (see `DitheredInstance`), so there is
+  // nothing to catch; `void` just tells the linter the floating promise is
+  // intentional.
   useEffect(() => {
     if (skipNextUpdate.current) {
       skipNextUpdate.current = false;
+      prevOptionsRef.current = {
+        shape,
+        brightness,
+        size,
+        maxDpr,
+        cols,
+        rows,
+        matrix,
+        frames,
+        period,
+        fg,
+        bg,
+        cache,
+        gap,
+        radius,
+        respectReducedMotion,
+        initialFrame,
+        speed,
+      };
       return;
     }
+
+    const prev = prevOptionsRef.current;
+    const changed =
+      prev.shape !== shape ||
+      prev.brightness !== brightness ||
+      prev.size !== size ||
+      prev.maxDpr !== maxDpr ||
+      prev.cols !== cols ||
+      prev.rows !== rows ||
+      prev.matrix !== matrix ||
+      prev.frames !== frames ||
+      prev.period !== period ||
+      prev.fg !== fg ||
+      prev.bg !== bg ||
+      prev.cache !== cache ||
+      prev.gap !== gap ||
+      prev.radius !== radius ||
+      prev.respectReducedMotion !== respectReducedMotion ||
+      prev.initialFrame !== initialFrame ||
+      prev.speed !== speed;
+
+    prevOptionsRef.current = {
+      shape,
+      brightness,
+      size,
+      maxDpr,
+      cols,
+      rows,
+      matrix,
+      frames,
+      period,
+      fg,
+      bg,
+      cache,
+      gap,
+      radius,
+      respectReducedMotion,
+      initialFrame,
+      speed,
+    };
+
+    if (!changed) return;
+
     const patch = {
       shape,
       brightness,

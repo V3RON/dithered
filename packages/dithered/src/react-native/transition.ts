@@ -30,6 +30,18 @@ export interface UseDitheredTransitionOptions {
   /** Duration of the morph in ms. */
   duration: number;
   /**
+   * The wall-clock instant (matching the clock `from`'s steady loop
+   * computes its own phase from — see `Dithered.tsx`'s `MorphState`) at
+   * which the morph begins. Fed into each side's `frameAt(startAt + p *
+   * duration, period, frames)` (see `createTransition`), so both sides
+   * keep ticking on the same clock the steady loop was already on rather
+   * than restarting at phase 0 (ADR 0004 §4; finding 4). Default 0 —
+   * matches the previous, buggy always-restart-at-0 behavior only when
+   * the caller genuinely wants the morph to start at that clock's origin
+   * (as every existing test recording from a fresh clock does).
+   */
+  startAt?: number;
+  /**
    * Skip recording entirely — `prefers-reduced-motion` (ADR 0004 §7). The
    * caller cuts straight to `to`'s steady-state pictures; `pictures` here
    * is just `[]`.
@@ -71,12 +83,12 @@ export function useDitheredTransition({
   from,
   to,
   duration,
+  startAt = 0,
   reducedMotion = false,
 }: UseDitheredTransitionOptions): DitheredTransitionPictures {
   const {
     shape: fromShape,
     brightness: fromBrightness,
-    cells: fromProvidedCells,
     size: fromSize,
     cols: fromCols,
     rows: fromRows,
@@ -144,11 +156,22 @@ export function useDitheredTransition({
     }
 
     // Both shapes are sampled onto the *target's* grid — same rule as the
-    // web renderer (ADR 0004 §2).
+    // web renderer (ADR 0004 §2). Unlike `to`, `from`'s cells are always
+    // resampled here rather than trusting a caller-supplied `cells` (see
+    // `DitheredTransitionSide`): a pre-sampled `from.cells` was sampled
+    // for *its own* options, and there is no way to tell from here whether
+    // that happens to already be the target's grid. `to.cells`, in
+    // contrast, is exactly what a caller would sample for the target grid
+    // in the first place, so it's trusted the same way `useDitheredPictures`
+    // trusts its own `cells` prop (finding 9).
     const rows = resolveRows(toOpts);
-    const fromCells =
-      fromProvidedCells ??
-      sampleCells(fromOpts.shape, toOpts.cols, fromOpts.hitTest, rows, fromOpts.matrix);
+    const fromCells = sampleCells(
+      fromOpts.shape,
+      toOpts.cols,
+      fromOpts.hitTest,
+      rows,
+      fromOpts.matrix,
+    );
     const toCells =
       toProvidedCells ??
       sampleCells(toOpts.shape, toOpts.cols, toOpts.hitTest, rows, toOpts.matrix);
@@ -166,7 +189,7 @@ export function useDitheredTransition({
         period: toOpts.period,
         frames: toOpts.frames,
       },
-      0,
+      startAt,
       duration,
     );
 
@@ -176,15 +199,20 @@ export function useDitheredTransition({
     const bounds = Skia.XYWHRect(0, 0, width, height);
     const pictures = Array.from({ length: steps }, (_, i) => {
       const p = i / (steps - 1);
-      // `p * duration` stands in for "elapsed ms since the morph started"
-      // — a deterministic clock for `brightnessAt`'s per-side phases,
-      // baked into the recording at record time rather than read from a
-      // live clock during playback.
+      // `startAt + p * duration` is "wall-clock ms at this step" on the
+      // *same* clock `from`'s (and, prospectively, `to`'s) steady phase is
+      // computed from — not a clock that restarts at 0 for every morph.
+      // Baked into the recording at record time rather than read from a
+      // live clock during playback. Getting this right (rather than
+      // `p * duration`, which always restarts both sides at phase 0 — see
+      // finding 4) is what keeps neither side visibly jumping at either
+      // end of the morph, per ADR 0004 §4.
+      const now = startAt + p * duration;
       return createPicture((canvas) => {
         paintFrame(
           skiaPaintContext(canvas),
           core.cellsAt(p),
-          core.brightnessAt(p, p * duration),
+          core.brightnessAt(p, now),
           0,
           geometry,
         );
@@ -195,7 +223,6 @@ export function useDitheredTransition({
   }, [
     fromShape,
     fromBrightness,
-    fromProvidedCells,
     fromSize,
     fromCols,
     fromRows,
@@ -222,6 +249,7 @@ export function useDitheredTransition({
     toRadius,
     toHitTest,
     duration,
+    startAt,
     reducedMotion,
   ]);
 }

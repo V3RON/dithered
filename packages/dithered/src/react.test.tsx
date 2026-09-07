@@ -178,6 +178,33 @@ describe('Dithered', () => {
     expect(updateSpy).not.toHaveBeenCalled();
   });
 
+  // Regression (finding 5): the documented usage passes `transition` as an
+  // inline object literal (`transition={{ duration: 400 }}`), a fresh
+  // reference on every render. A re-render with no *option* change must
+  // not call transitionTo()/update() at all — dependency-array churn on
+  // `transition` alone is not a change.
+  it('with `transition` set, an unrelated re-render calls neither transitionTo() nor update() (finding 5)', () => {
+    const { rerender } = render(
+      <Dithered shape={SQUARE_SHAPE} fg="#111111" transition={{ duration: 400 }} />,
+    );
+    const instance = lastInstance();
+    const updateSpy = vi.spyOn(instance, 'update');
+    const transitionToSpy = vi.spyOn(instance, 'transitionTo');
+
+    // Same logical props, but `transition` is a brand-new object each time
+    // — exactly the documented usage pattern.
+    rerender(<Dithered shape={SQUARE_SHAPE} fg="#111111" transition={{ duration: 400 }} />);
+    rerender(<Dithered shape={SQUARE_SHAPE} fg="#111111" transition={{ duration: 400 }} />);
+
+    expect(transitionToSpy).not.toHaveBeenCalled();
+    expect(updateSpy).not.toHaveBeenCalled();
+
+    // A real change is still routed through transitionTo(), exactly once.
+    rerender(<Dithered shape={SQUARE_SHAPE} fg="#222222" transition={{ duration: 400 }} />);
+    expect(transitionToSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
   it('toggling paused calls setPaused with the new value', () => {
     const { rerender } = render(<Dithered shape={SQUARE_SHAPE} paused={false} />);
     const setPausedSpy = vi.spyOn(lastInstance(), 'setPaused');

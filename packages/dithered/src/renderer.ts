@@ -125,6 +125,26 @@ interface ActiveTransition {
 }
 
 /**
+ * A `transitionTo()` call deferred by `transition.onLoopEnd`, waiting for
+ * the loop to wrap before it becomes an {@link ActiveTransition}.
+ *
+ * Deliberately stores the *patch* the caller passed, not a precomputed
+ * `ResolvedOptions` snapshot: the loop may take a long time to wrap, and in
+ * the meantime another `update()`/`transitionTo()` call may have changed
+ * options this patch doesn't touch. Recomputing the target from the patch
+ * against whatever `opts` happens to be *when the wait ends* — rather than
+ * replaying a stale full snapshot over it — is what keeps those
+ * intervening changes from being silently undone (see finding 2 in the
+ * review this fixes, and ADR 0004 §1: `transitionTo` "computes the target
+ * options exactly as `update(patch)` would").
+ */
+interface PendingTransition {
+  patch: Partial<DitheredOptions>;
+  /** This call's `transitionTo` resolver. */
+  resolve: () => void;
+}
+
+/**
  * Creates and starts an animated dither loop on `canvas`.
  *
  * Generalizes the Rozenite loading spinner's playback engine: time is
@@ -294,6 +314,12 @@ export function createDithered(
   // waiters pending a loop wrap.
   let transition: ActiveTransition | null = null;
   let loopEndResolvers: Array<() => void> = [];
+  // A `transitionTo({ transition: { onLoopEnd: true } })` call waiting for
+  // the loop to wrap — see `PendingTransition`. At most one at a time:
+  // starting a real transition, settling this one, or a plain `update()`
+  // all clear it first (ADR 0004 §7 — blends, and the queue in front of
+  // them, are never nested).
+  let pendingTransition: PendingTransition | null = null;
 
   function computedColor(): string {
     if (typeof getComputedStyle === 'undefined') return '';
@@ -732,6 +758,111 @@ export function createDithered(
   }
 
   /**
+   * Recomputes a `transitionTo` patch's target against the *current* live
+   * `opts` — the merge `update(patch)` would do. Always reading `opts`
+   * fresh (rather than a value captured earlier) is what lets a deferred
+   * `onLoopEnd` transition, when it finally starts or is settled, land on
+   * top of whatever happened while it was waiting instead of reverting it
+   * (finding 2).
+   */
+  function computeTargetOpts(patch: Partial<DitheredOptions>): ResolvedOptions {
+    const previousTransition = opts.transition;
+    const target = assignDefined<ResolvedOptions>(
+      opts,
+      patch as Partial<ResolvedOptions>,
+    ) as ResolvedOptions;
+    target.transition = mergeTransitionOption(previousTransition, patch);
+    return target;
+  }
+
+  /**
+   * Cuts straight to `targetOpts`: adopts it as the steady state, resamples
+   * and rebuilds the cache, and repaints — holding the loop's current phase
+   * rather than resetting it to `initialFrame`. Used for reduced motion, a
+   * halted loop, and settling a pending or active transition that's being
+   * cut short.
+   */
+  function cutToTarget(targetOpts: ResolvedOptions, targetReduced: boolean): void {
+    opts = targetOpts;
+    reduced = targetReduced;
+    isPaused = opts.paused;
+    // The phase clock resumes fresh, same reasoning as `finishTransitionNow`
+    // — see its comment on `lastNow`.
+    lastNow = null;
+    halt();
+    resample();
+    applyResolvedFg();
+    applySurface();
+    buildCache();
+    paintForPhase();
+    schedule();
+  }
+
+  /**
+   * Settles a queued `onLoopEnd` transition immediately, without ever
+   * playing its morph: recomputes its target against the live `opts` (see
+   * `computeTargetOpts`) and cuts straight to it. Used both when a newer
+   * `update()`/`transitionTo()` call supersedes it (ADR 0004 §7 — a
+   * queued-but-not-yet-started morph is "in flight" for that rule too) and
+   * when playback halts before it ever gets to fire (finding 1: without
+   * this, the deferred `.then(begin)` continuation calls `startTransition`
+   * on a loop that isn't advancing, whose `schedule()` is then a no-op —
+   * the instance is stranded on the *old* options and the promise never
+   * settles).
+   */
+  function settlePendingNow(): void {
+    if (!pendingTransition) return;
+    const { patch, resolve } = pendingTransition;
+    pendingTransition = null;
+    const target = computeTargetOpts(patch);
+    cutToTarget(target, prefersReducedMotion(target));
+    resolve();
+  }
+
+  /**
+   * Same as `settlePendingNow`, but for `destroy()`: adopts the target
+   * options without painting — the canvas is going away — mirroring
+   * `finishTransitionSilently`.
+   */
+  function settlePendingSilently(): void {
+    if (!pendingTransition) return;
+    const { patch, resolve } = pendingTransition;
+    pendingTransition = null;
+    opts = computeTargetOpts(patch);
+    resolve();
+  }
+
+  /**
+   * Releases a queued `onLoopEnd` transition when the loop actually wraps:
+   * starts its real morph. Recomputes the target from the live `opts` at
+   * this instant (finding 2) and re-checks reduced motion/`loopAdvancing`
+   * (rather than trusting the state from whenever `transitionTo` was
+   * originally called) in case either changed while it was waiting.
+   */
+  function releasePendingTransition(): void {
+    if (!pendingTransition) return;
+    const { patch, resolve } = pendingTransition;
+    pendingTransition = null;
+    const target = computeTargetOpts(patch);
+    const targetReduced = prefersReducedMotion(target);
+    if (targetReduced || !loopAdvancing()) {
+      cutToTarget(target, targetReduced);
+      resolve();
+    } else {
+      startTransition(target, resolve);
+    }
+  }
+
+  /**
+   * The loop wrapping back to phase 0: drains plain `finishLoop()`
+   * resolvers and releases any transition queued behind `onLoopEnd`.
+   */
+  function onLoopWrap(): void {
+    drainLoopEnd();
+    releasePendingTransition();
+  }
+
+  /**
    * Ends the in-progress morph (if any) exactly like a plain `update()`
    * would: adopts the target as the new steady state, resamples, rebuilds
    * the sprite cache, repaints, and resolves the transition's promise(s).
@@ -801,6 +932,7 @@ export function createDithered(
    */
   function haltPlayback(): void {
     finishTransitionNow();
+    settlePendingNow();
     halt();
     drainLoopEnd();
   }
@@ -844,7 +976,7 @@ export function createDithered(
       const loopsAfter = loopsAt(phase);
       if (loopsAfter !== loopsBefore) {
         opts.onLoop?.(loopsAfter);
-        drainLoopEnd();
+        onLoopWrap();
       }
 
       paintForPhase();
@@ -1074,9 +1206,13 @@ export function createDithered(
       // never-disconnected `ResizeObserver` (review finding 2).
       if (destroyed) return;
 
-      // Any in-progress morph is a hard-cut override: adopt its target
-      // first so this update() layers onto a consistent steady state
-      // rather than onto a half-morphed one.
+      // Whatever's already in flight is a hard-cut override: settle a
+      // transition merely *queued* behind `onLoopEnd` (finding 2 — an
+      // `update()` must not be silently undone by a deferred morph that
+      // fires a loop later) and finish one actually *running*, so this
+      // update() layers onto a consistent steady state either way, rather
+      // than onto a half-morphed or stale one.
+      settlePendingNow();
       finishTransitionNow();
 
       const prevShape = opts.shape;
@@ -1381,37 +1517,38 @@ export function createDithered(
     transitionTo(patch: Partial<DitheredOptions>): Promise<void> {
       if (destroyed) return Promise.resolve();
 
-      const previousTransition = opts.transition;
-      const targetOpts = assignDefined<ResolvedOptions>(
-        opts,
-        patch as Partial<ResolvedOptions>,
-      ) as ResolvedOptions;
-      targetOpts.transition = mergeTransitionOption(previousTransition, patch);
+      // Same "settle whatever's in flight first" rule as `update()` above,
+      // and for the same reason (ADR 0004 §7: blends are never nested,
+      // and neither is the queue in front of them) — this also means
+      // `computeTargetOpts` below merges `patch` onto an `opts` that
+      // already reflects anything the settled call had committed to.
+      settlePendingNow();
+      finishTransitionNow();
 
+      const targetOpts = computeTargetOpts(patch);
       const targetReduced = prefersReducedMotion(targetOpts);
 
       // Reduced motion (ADR 0004 §7), or a loop that isn't advancing
       // anyway (paused/hidden/off-screen/destroyed): there is no loop to
       // morph in front of, so cut straight to the target through the same
-      // path `update()` uses, and resolve immediately.
+      // path `update()` uses, and resolve immediately. `onLoopEnd` is
+      // ignored here too — "wait for the loop to end" is meaningless when
+      // there's no loop running.
       if (targetReduced || !loopAdvancing()) {
-        finishTransitionNow();
-        opts = targetOpts;
-        reduced = targetReduced;
-        isPaused = opts.paused;
-        lastNow = null;
-        halt();
-        resample();
-        applyResolvedFg();
-        applySurface();
-        buildCache();
-        paintForPhase();
-        schedule();
+        cutToTarget(targetOpts, targetReduced);
         return Promise.resolve();
       }
 
-      const begin = () => new Promise<void>((resolve) => startTransition(targetOpts, resolve));
-      return targetOpts.transition.onLoopEnd ? finishLoopPromise().then(begin) : begin();
+      if (targetOpts.transition.onLoopEnd) {
+        // Queue it — released by `onLoopWrap` on the next wrap, or settled
+        // immediately by a halt or a superseding call (finding 1). Note
+        // this stores `patch`, not `targetOpts`: see `PendingTransition`.
+        return new Promise<void>((resolve) => {
+          pendingTransition = { patch, resolve };
+        });
+      }
+
+      return new Promise<void>((resolve) => startTransition(targetOpts, resolve));
     },
 
     finishLoop(): Promise<void> {
@@ -1470,6 +1607,7 @@ export function createDithered(
     destroy() {
       destroyed = true;
       finishTransitionSilently();
+      settlePendingSilently();
       halt();
       drainLoopEnd();
       // Release the sprite strip (and the sampled cells) for GC rather

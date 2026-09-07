@@ -28,8 +28,13 @@ const { SQUARE_SHAPE } = await import('../test-utils');
 const { circle } = await import('../shapes');
 
 describe('useDitheredTransition', () => {
-  it("records steps at the outgoing loop's steady-state cadence: round(duration / (period / frames))", () => {
-    // period 1000, frames 10 -> cadence 100ms/frame; duration 350 -> 3.5 -> round to 4.
+  it("records steps at the outgoing loop's steady-state cadence: round(duration / (period / frames)) (finding 10)", () => {
+    // `from`'s cadence: period 1000, frames 10 -> 100ms/frame; duration 350
+    // -> 3.5 -> round to 4. `to` is deliberately given a *different*
+    // period/frames (2000/40 -> 50ms/frame, which would round 350 to 7):
+    // if the implementation used `toOpts` instead of `fromOpts` here, this
+    // test would catch it, unlike the previous version (which gave both
+    // sides identical period/frames, so it would have passed either way).
     const { result } = renderHook(() =>
       useDitheredTransition({
         from: {
@@ -42,8 +47,8 @@ describe('useDitheredTransition', () => {
         to: {
           shape: circle,
           brightness: () => false,
-          period: 1000,
-          frames: 10,
+          period: 2000,
+          frames: 40,
           cols: 4,
         },
         duration: 350,
@@ -123,5 +128,65 @@ describe('useDitheredTransition', () => {
     );
 
     expect(createPictureImpl).toHaveBeenCalledTimes(result.current.pictures.length);
+  });
+
+  // Regression (finding 4): `now` for each recorded step must continue the
+  // wall clock the live loop was already on (`startAt`), not restart both
+  // sides at phase 0.
+  it("bakes each side's phase from startAt, continuing the clock the live loop was on (finding 4)", () => {
+    // `t` passed straight through as the numeric brightness: at phase 0 no
+    // cell can clear its (strictly positive) Bayer threshold, so a morph
+    // that (incorrectly) always restarts both sides at phase 0 draws
+    // nothing in its very first recorded step; one that correctly
+    // continues from `startAt`'s phase (0.7) draws several cells.
+    const { result } = renderHook(() =>
+      useDitheredTransition({
+        from: {
+          shape: SQUARE_SHAPE,
+          brightness: (_cell, t) => t,
+          period: 1000,
+          frames: 10,
+          cols: 4,
+        },
+        to: { shape: SQUARE_SHAPE, brightness: (_cell, t) => t, period: 1000, frames: 10, cols: 4 },
+        duration: 100,
+        startAt: 700, // the outgoing loop was at phase 0.7 when the morph began.
+      }),
+    );
+
+    const first = result.current.pictures[0] as unknown as {
+      canvas: { drawRRect: ReturnType<typeof vi.fn> };
+    };
+    expect(first.canvas.drawRRect.mock.calls.length).toBeGreaterThan(0);
+  });
+
+  // Regression (finding 9): a caller-supplied `from.cells` is sampled for
+  // *its own* options, not necessarily the target's grid (ADR 0004 §2), so
+  // it must never be used verbatim for the outgoing side — only `to.cells`
+  // (already on the target grid by construction) is trusted that way.
+  it("ignores a caller-supplied from.cells and always resamples the outgoing shape onto the target's grid (finding 9)", () => {
+    const { result } = renderHook(() =>
+      useDitheredTransition({
+        from: {
+          shape: SQUARE_SHAPE,
+          brightness: () => true,
+          cells: [], // deliberately wrong/stale — must not be used as-is.
+          period: 1000,
+          frames: 10,
+          cols: 4,
+        },
+        to: { shape: circle, brightness: () => false, period: 1000, frames: 10, cols: 4 },
+        duration: 400,
+      }),
+    );
+
+    // At progress 0 the morph should show exactly the outgoing shape: if
+    // the bogus empty `from.cells` were used verbatim, `diffCells` would
+    // see nothing in `from`, so nothing would be drawn until well past
+    // `ENTER_START` — the very first recorded step would be blank.
+    const first = result.current.pictures[0] as unknown as {
+      canvas: { drawRRect: ReturnType<typeof vi.fn> };
+    };
+    expect(first.canvas.drawRRect.mock.calls.length).toBeGreaterThan(0);
   });
 });
