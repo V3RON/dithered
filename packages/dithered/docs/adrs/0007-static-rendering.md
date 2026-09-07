@@ -212,16 +212,49 @@ export function renderToDataURL(options: RenderToSvgOptions): string;
 **Coordinate system.** The `viewBox` is `0 0 W H` where `W`/`H` come from
 `surfaceSize(resolveOptions(options))` — i.e. the CSS-pixel size the canvas renderer
 uses at `devicePixelRatio` 1 — and `width`/`height` attributes are set to the same
-numbers. Output stays resolution independent (it is vector), and it is byte-comparable
-with what the canvas draws at dpr 1. Rejected: a `0 0 cols rows` viewBox, which looks
-tidier but silently breaks `computeGeometry`'s `Math.max(0.6, cellSize * gap)` —
-that 0.6 is a device-pixel floor, and at `cellSize = 1` it would swallow 60% of every
-cell.
+numbers. Output stays resolution independent (it is vector). Rejected: a
+`0 0 cols rows` viewBox, which looks tidier but silently breaks `computeGeometry`'s
+`Math.max(0.6, cellSize * gap)` — that 0.6 is a pixel floor, and at `cellSize = 1` it
+would swallow 60% of every cell.
+
+**The gap floor must scale with the surface, or static and live drift on every retina
+screen.** `computeGeometry`'s `Math.max(0.6, cellSize * gap)` is an _absolute_ floor
+applied in whatever unit it is handed. The canvas hands it device pixels
+(`surfaceSize(opts, dpr)`); the SVG hands it CSS pixels. At `dpr = 2` the canvas's
+floor is 0.6 device px = 0.3 CSS px while the SVG's is 0.6 CSS px, so the canvas
+draws visibly fatter cells than the SVG it replaces on mount — the fallback swap
+_jumps_. That is also a pre-existing bug in its own right: today the canvas's
+appearance changes with the display, because a floor denominated in device pixels
+shrinks as pixels get smaller.
+
+So `computeGeometry` gains a `scale` parameter (default 1) that applies to the floor
+only:
+
+```ts
+gap = Math.max(0.6 * scale, cellSize * opts.gap);
+```
+
+`createDithered` passes `dpr`; the SVG and Skia paths pass the default 1. This
+establishes the invariant the no-drift guarantee actually needs:
+
+> **Geometry computed at scale `s` equals geometry computed at scale 1, multiplied by
+> `s`** — cell size, gap, radius and every cell's x/y/width alike.
+
+Two consequences fall out. `createDithered` must derive geometry from the _unrounded_
+`surfaceSize(opts, dpr)` rather than from the rounded integer backing-store dimensions
+(`Math.round` there is for the `canvas.width`/`height` attributes, which must be
+integers; the drawing coordinates need not be, and rounding them is what makes
+`rozenite` at `size: 48` land on `cellSize` 2.125 instead of 2.1001). And the floor is
+now denominated in CSS pixels everywhere, so a 0.6px minimum gap means the same thing
+on every display.
 
 `renderToDataURL` returns `data:image/svg+xml;utf8,<encoded>`, percent-encoding `%`
-first, then `#`, `<`, `>`, `"`, `'`, and whitespace. Full `encodeURIComponent` would
-also work but triples the length of a favicon; leaving `#` unencoded breaks every
-call, since `fg` defaults to a hex colour and `#` starts a URL fragment.
+first, then `#`, `<`, `>`, `"`, `'`, `(`, `)`, and whitespace. Full
+`encodeURIComponent` would also work but triples the length of a favicon; leaving `#`
+unencoded breaks every call, since `fg` defaults to a hex colour and `#` starts a URL
+fragment. The parentheses are not optional either: an unquoted CSS `url()` token ends
+at the first `)`, so a `fg` of `rgb(130, 50, 255)` would truncate the declaration and
+blank the very SSR fallback this exists to provide.
 
 ### 6. React SSR: a `background-image` fallback, dropped on mount
 
@@ -277,6 +310,12 @@ palette PRD's per-tone grouping harder. `<rect rx>` is what the PRD asks for.
   worth noting in the PR.
 - `ResolvedOptions` is no longer `Required<DitheredOptions>`. Any external code
   relying on that identity breaks; nothing in the workspace does.
+- `computeGeometry` gains a `scale` parameter, and the minimum cell gap is now 0.6
+  **CSS** pixels rather than 0.6 device pixels. On a retina display the canvas
+  therefore draws slightly narrower cells (larger gaps) than it does today. This is
+  a deliberate fix — the old behaviour made the same options look different on
+  different displays — but it is a visible change to existing web output, not only
+  to the new static path.
 - **Parity testing is bounded by the test environment.** jsdom implements no
   `Path2D` and no `isPointInPath` (`src/test-setup.ts` already stubs a constructible
   `Path2D` for other tests), so a literal `jsHitTester` vs `domHitTester` comparison
@@ -311,7 +350,8 @@ palette PRD's per-tone grouping harder. `<rect rx>` is what the PRD asks for.
 | `src/core/options.ts`                                                                                                 | Add `hitTest?: HitTester` to `DitheredOptions`; redefine `ResolvedOptions` as `Required<Omit<DitheredOptions, 'hitTest'>> & { hitTest?: HitTester }`. `DEFAULTS` is unchanged (typed as `Omit<ResolvedOptions, 'shape' \| 'brightness' \| 'hitTest'>`).       |
 | `src/core/index.ts`                                                                                                   | Re-export the new path, hit-test, svg-paint and static surfaces.                                                                                                                                                                                              |
 | `src/shape.ts`                                                                                                        | `sampleCells`'s `hitTest` parameter becomes optional, defaulting to `jsHitTester(shape)`. Doc comment updated.                                                                                                                                                |
-| `src/renderer.ts`                                                                                                     | Drop the `domHitTester` import; pass `opts.hitTest` through to `sampleCells` (falling back to the default).                                                                                                                                                   |
+| `src/core/paint.ts`                                                                                                   | `computeGeometry` gains a `scale` parameter (default 1) applied to the gap floor: `Math.max(0.6 * scale, cellSize * opts.gap)`.                                                                                                                               |
+| `src/renderer.ts`                                                                                                     | Drop the `domHitTester` import; pass `opts.hitTest` through to `sampleCells` (falling back to the default). Derive geometry from the unrounded `surfaceSize(opts, dpr)` and pass `dpr` as `computeGeometry`'s `scale`; keep rounding only the backing store.  |
 | `src/native/pictures.ts`, `src/native/Dithered.tsx`                                                                   | Same: stop defaulting to `skiaHitTester`, honour `hitTest` when given.                                                                                                                                                                                        |
 | `src/index.ts`                                                                                                        | Export `jsHitTester`, `renderToSvg`, `renderToDataURL`, `svgPaintContext`, `parsePath`, `flattenPath`, `pathToPolygons`, and the `PathCommand` / `Point` / `FillRule` / `RenderToSvgOptions` / `SvgPaintContext` types.                                       |
 | `src/native.ts`                                                                                                       | Export the same additions (all DOM-free).                                                                                                                                                                                                                     |
@@ -376,10 +416,20 @@ palette PRD's per-tone grouping harder. `<rect rx>` is what the PRD asks for.
     a `background-image:url(data:image/svg+xml…)` and is non-blank; `ssrFallback={false}`
     omits it; after `render()` + mount the background image is gone; hydrating the
     SSR markup logs no hydration mismatch warning (spy on `console.error`).
-12. **Regression** — the existing `renderer.test.ts` / native suites keep passing with
-    the hit tester swapped, and a test asserts `createDithered` samples the same cells
-    that `renderToSvg` does for identical options (the no-drift guarantee, checked by
-    comparing the recording context's rect calls against the SVG's rects).
+12. **Regression / no drift** — the existing `renderer.test.ts` / native suites keep
+    passing with the hit tester swapped, and a test asserts `createDithered` paints
+    the same cells and the same geometry that `renderToSvg` emits for identical
+    options, by comparing the recording context's rect calls against the SVG's rects.
+    This test must use the library's own defaults (`shapes.rozenite`, `size: 48`,
+    `cols: 16` — a non-integer surface width and an aspect ratio that is not 1) and
+    must run at `devicePixelRatio` 1, 2 and 3, asserting the canvas's rects equal the
+    SVG's rects scaled by `dpr`. A fixture chosen so the gap floor and the
+    backing-store rounding both happen to cancel (e.g. `shapes.square` at
+    `size: 40, cols: 4, dpr: 1`) asserts a tautology and does not count.
+13. **Geometry scale invariant** — `computeGeometry(opts, w * s, h * s, 0, s)` equals
+    `computeGeometry(opts, w, h)` with `cellSize`, `gap` and `radius` each multiplied
+    by `s`, for `s` in 1, 2, 3 and for a `cellSize` both above and below the 0.6px
+    floor's crossover point.
 
 ### Checks
 
