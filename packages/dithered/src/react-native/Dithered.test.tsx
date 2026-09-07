@@ -284,6 +284,96 @@ describe('Dithered (native)', () => {
     expect(cellsDrawnOf(lastStep)).toBe(0); // ...and ends on the target.
   });
 
+  // Halting playback while a morph is *actively* dissolving (not merely
+  // queued behind `onLoopEnd` — that's the "finding 6" case above) must
+  // also cut straight to the target's steady state, not strand the canvas
+  // on the half-dissolved frame that happened to be on screen. Regression
+  // test: `suppressRepointRef` used to be set (by the effect that starts
+  // a morph) but never cleared by the halt effect's "active morph" branch,
+  // so the repoint effect's own guard bailed on every run from then on —
+  // the canvas froze on the half-morphed picture until some *unrelated*
+  // prop change happened to clear the ref via a different code path.
+  it('does not strand the canvas on a half-dissolved frame when playback halts mid-morph', () => {
+    const { rerender } = render(
+      <Dithered
+        shape={OTHER_SHAPE}
+        hitTest={otherHitTest}
+        cols={4}
+        frames={48}
+        period={1000}
+        brightness={alwaysTrue}
+        transition={{ duration: 400 }}
+      />,
+    );
+    expect(cellsDrawnOf(lastPictureShared!.value)).toBe(0);
+
+    act(() => {
+      rerender(
+        <Dithered
+          shape={SQUARE_SHAPE}
+          hitTest={squareHitTest}
+          cols={4}
+          frames={48}
+          period={1000}
+          brightness={alwaysTrue}
+          transition={{ duration: 400 }}
+        />,
+      );
+    });
+
+    act(() => {
+      tick(200); // roughly halfway through the 400ms morph
+    });
+    const midway = cellsDrawnOf(lastPictureShared!.value);
+    // Sanity: this is genuinely a half-dissolved frame, not one end or
+    // the other — otherwise the assertion below wouldn't distinguish
+    // "cut to target" from "coincidentally already showing the target".
+    expect(midway).toBeGreaterThan(0);
+    expect(midway).toBeLessThan(16);
+
+    act(() => {
+      rerender(
+        <Dithered
+          shape={SQUARE_SHAPE}
+          hitTest={squareHitTest}
+          cols={4}
+          frames={48}
+          period={1000}
+          brightness={alwaysTrue}
+          transition={{ duration: 400 }}
+          paused // playback halts mid-morph.
+        />,
+      );
+    });
+
+    // Cut straight to the target's full 16 cells in the same commit that
+    // halts playback — not left frozen at `midway`, and not requiring any
+    // further, unrelated prop change to unstick it.
+    expect(cellsDrawnOf(lastPictureShared!.value)).toBe(16);
+
+    // The fix must not just repaint once and re-freeze: a further,
+    // unrelated steady-state rebuild (e.g. from a later prop change while
+    // still paused) should also go through cleanly, proving
+    // `suppressRepointRef` was actually cleared rather than the repoint
+    // having happened despite it.
+    act(() => {
+      rerender(
+        <Dithered
+          shape={SQUARE_SHAPE}
+          hitTest={squareHitTest}
+          cols={4}
+          frames={48}
+          period={1000}
+          brightness={alwaysTrue}
+          fg="#123456"
+          transition={{ duration: 400 }}
+          paused
+        />,
+      );
+    });
+    expect(cellsDrawnOf(lastPictureShared!.value)).toBe(16);
+  });
+
   // Finding 6: a halt (paused, backgrounded, reduced motion) while a morph
   // is merely *queued* behind `onLoopEnd` must settle it immediately, not
   // leave it to fire later — possibly long after, and playing backwards.

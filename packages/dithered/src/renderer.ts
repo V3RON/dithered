@@ -120,6 +120,13 @@ function now(): number {
 interface ActiveTransition {
   core: Transition;
   targetOpts: ResolvedOptions;
+  /**
+   * The patch that started this morph (or, if it superseded a queued
+   * `onLoopEnd` transition, that one's patch). Kept around — rather than
+   * just `targetOpts` — so completion can tell whether the caller actually
+   * meant to touch `paused`: see `applyPausedPatch`.
+   */
+  patch: Partial<DitheredOptions>;
   /** `transitionTo`'s resolver(s) — one per call, drained on completion. */
   resolvers: Array<() => void>;
 }
@@ -282,6 +289,10 @@ export function createDithered(
 
   let raf = 0;
   let currentFrame = -1;
+  // The wall-clock timestamp `checkWrap` last compared against, tracked
+  // independently of `currentFrame` — see `checkWrap` for why the two
+  // cannot be the same variable.
+  let lastWrapCheckMs: number | null = null;
   let isPaused = opts.paused;
   let visible = true;
   let destroyed = false;
@@ -312,6 +323,31 @@ export function createDithered(
 
   // A morph in progress (ADR 0004), and the `finishLoop()`/`onLoopEnd`
   // waiters pending a loop wrap.
+
+  /**
+   * Applies `patch.paused` to the imperative `isPaused` flag, but only
+   * when `patch` actually specifies it.
+   *
+   * `paused` is a declarative option carried on `opts`, while `isPaused`
+   * is the imperative flag `setPaused()` writes directly — the two are
+   * related but not interchangeable. Because `assignDefined` always
+   * carries the previous value of an omitted field forward, a resolved
+   * `ResolvedOptions.paused` can never tell you whether *this* call meant
+   * to touch pause state or is just echoing whatever was already there.
+   * Reading it unconditionally (as `cutToTarget`/`finishTransitionNow`
+   * used to) meant every transition landing or being cut short replayed
+   * that stale echo over whatever `setPaused()` had last set — silently
+   * resuming a `setPaused(true)` instance when a morph completed, or
+   * silently freezing a running one when a morph completed with a stale
+   * `paused: true` still sitting in the options it started from. Reading
+   * `patch.paused` instead — `undefined` unless the caller wrote it
+   * *this* time — makes "did this call mean to change pause state" the
+   * only thing that can move `isPaused`.
+   */
+  function applyPausedPatch(patch: Partial<DitheredOptions> | undefined): void {
+    if (patch?.paused !== undefined) isPaused = patch.paused;
+  }
+
   let transition: ActiveTransition | null = null;
   let loopEndResolvers: Array<() => void> = [];
   // A `transitionTo({ transition: { onLoopEnd: true } })` call waiting for
@@ -684,6 +720,12 @@ export function createDithered(
     builtH = H;
     currentFrame = -1;
     pendingRebuild = false;
+    // A reconfigure (new shape/size, or a steady state just adopted from
+    // a completed transition) starts a fresh loop from the wrap
+    // detector's point of view too, for the same reason `currentFrame`
+    // resets: whatever `period` boundaries existed under the old
+    // configuration say nothing about the new one.
+    lastWrapCheckMs = null;
   }
 
   function blit(f: number): void {
@@ -781,11 +823,23 @@ export function createDithered(
    * rather than resetting it to `initialFrame`. Used for reduced motion, a
    * halted loop, and settling a pending or active transition that's being
    * cut short.
+   *
+   * `sourcePatch` is whatever caller-supplied patch produced `targetOpts`
+   * (`undefined` when there wasn't one, e.g. cutting to reduced motion) —
+   * threaded through to `applyPausedPatch` so a `transitionTo()` that
+   * never mentioned `paused` cannot silently resume (or freeze) playback
+   * by echoing `targetOpts.paused` over an imperative `setPaused()` call.
+   * `schedule()` below is a no-op while `isPaused` stays true, which is
+   * exactly what keeps a halted instance halted here.
    */
-  function cutToTarget(targetOpts: ResolvedOptions, targetReduced: boolean): void {
+  function cutToTarget(
+    targetOpts: ResolvedOptions,
+    targetReduced: boolean,
+    sourcePatch: Partial<DitheredOptions> | undefined,
+  ): void {
     opts = targetOpts;
     reduced = targetReduced;
-    isPaused = opts.paused;
+    applyPausedPatch(sourcePatch);
     // The phase clock resumes fresh, same reasoning as `finishTransitionNow`
     // — see its comment on `lastNow`.
     lastNow = null;
@@ -815,7 +869,7 @@ export function createDithered(
     const { patch, resolve } = pendingTransition;
     pendingTransition = null;
     const target = computeTargetOpts(patch);
-    cutToTarget(target, prefersReducedMotion(target));
+    cutToTarget(target, prefersReducedMotion(target), patch);
     resolve();
   }
 
@@ -846,10 +900,10 @@ export function createDithered(
     const target = computeTargetOpts(patch);
     const targetReduced = prefersReducedMotion(target);
     if (targetReduced || !loopAdvancing()) {
-      cutToTarget(target, targetReduced);
+      cutToTarget(target, targetReduced, patch);
       resolve();
     } else {
-      startTransition(target, resolve);
+      startTransition(target, resolve, patch);
     }
   }
 
@@ -869,6 +923,12 @@ export function createDithered(
    * Used both for a morph completing naturally (`p >= 1`) and for cutting
    * one short (reduced motion, a halt, a superseding `transitionTo`) — ADR
    * 0004 §1/§7: completion is a single code path either way.
+   *
+   * `applyPausedPatch(t.patch)` — not `isPaused = opts.paused` — is what
+   * keeps this from re-applying a stale `paused` the moment a morph that
+   * never mentioned it lands: `t.patch` is the exact patch that started
+   * (or superseded into) this morph, so `isPaused` only moves when that
+   * patch actually asked it to.
    */
   function finishTransitionNow(): void {
     if (!transition) return;
@@ -876,7 +936,7 @@ export function createDithered(
     transition = null;
     opts = t.targetOpts;
     reduced = prefersReducedMotion(opts);
-    isPaused = opts.paused;
+    applyPausedPatch(t.patch);
     // The phase clock was frozen for the morph's duration (see `tick`),
     // not advanced against wall-clock time like the old frame-index
     // model — resuming with a fresh `dt` of 0 on the next tick avoids a
@@ -951,15 +1011,48 @@ export function createDithered(
     });
   }
 
+  /**
+   * Detects a `period` boundary crossed since the previous tick, purely
+   * from the wall clock — never from `currentFrame`.
+   *
+   * `currentFrame` is a *painted frame index*: `update()` holds it across
+   * a phase it doesn't reset, `cutToTarget()`/`finishTransitionNow()`
+   * carry it over from before a morph, and `renderFrame()` sets it to
+   * whatever the caller asked for. None of those writes mean "a loop
+   * wrapped", so comparing them (`f < currentFrame`, the previous
+   * approach) both fires on decreases that were never a wrap — e.g.
+   * `update({ period: 500 })` shortening the period mid-frame — and, per
+   * finding 4, never fires at all during a morph, because the morph's
+   * paint path doesn't touch `currentFrame`.
+   *
+   * Comparing `Math.floor(nowMs / period)` between ticks sidesteps both:
+   * it only asks "did wall-clock time cross a `period`-multiple boundary
+   * since the last time this ran", independent of whatever got painted
+   * (or didn't) in between, and it runs on every tick — including ticks
+   * inside a morph, whose frame branch below never executes.
+   */
+  function checkWrap(nowMs: number): boolean {
+    const previous = lastWrapCheckMs;
+    lastWrapCheckMs = nowMs;
+    if (previous === null) return false; // first tick after create()/configure(): nothing to compare against
+    return Math.floor(nowMs / opts.period) > Math.floor(previous / opts.period);
+  }
+
   function tick(nowMs: number): void {
     raf = 0;
     // Defensive: a stale callback slipping through after destroy() (this
     // is what cancelAnimationFrame guards against in a real browser)
     // must not paint onto — or resample against — a canvas that's gone.
     if (destroyed) return;
+
+    // Checked unconditionally — before the branch below — so a wrap that
+    // falls inside a morph's `duration` window is still seen (finding 4).
+    const wrapped = checkWrap(nowMs);
+
     if (transition) {
       const p = transition.core.progressAt(nowMs);
       paintTransitionFrame(transition, p, nowMs);
+      if (wrapped) onLoopWrap();
       // Every tick repaints during a morph (p is continuous — the
       // repeated-frame-index shortcut below doesn't apply), so this can
       // only run *after* that paint, exactly like a plain update()'s.
@@ -967,7 +1060,12 @@ export function createDithered(
     } else {
       // The phase clock is frozen for a morph's duration (see
       // `finishTransitionNow`) rather than advanced underneath it, so
-      // `dt` is only ever computed here, on the steady-state branch.
+      // `dt` is only ever computed here, on the steady-state branch. Wrap
+      // detection here stays phase-based (`loopsAt`), not the wall-clock
+      // `wrapped` computed above: `loopsAt` already accounts for `speed`,
+      // while `checkWrap`'s raw `floor(nowMs / period)` does not — it
+      // exists only to catch a wrap that falls *inside* a morph's window,
+      // where there is no live phase to derive it from (finding 4/5).
       const dt = lastNow === null ? 0 : nowMs - lastNow;
       lastNow = nowMs;
 
@@ -1101,8 +1199,16 @@ export function createDithered(
    * completes (naturally, or because something cut it short). Any morph
    * already running is finished instantly first — ADR 0004 §7: blends
    * are never nested.
+   *
+   * `patch` is the caller-supplied patch that produced `targetOpts` —
+   * stored on the resulting `ActiveTransition` (see its doc comment) so
+   * completion can tell whether `paused` was actually part of this call.
    */
-  function startTransition(targetOpts: ResolvedOptions, resolve: () => void): void {
+  function startTransition(
+    targetOpts: ResolvedOptions,
+    resolve: () => void,
+    patch: Partial<DitheredOptions>,
+  ): void {
     if (destroyed) {
       resolve();
       return;
@@ -1173,7 +1279,7 @@ export function createDithered(
     dpr = targetDpr;
     sheet = null;
 
-    transition = { core, targetOpts, resolvers: [resolve] };
+    transition = { core, targetOpts, patch, resolvers: [resolve] };
 
     halt();
     paintTransitionFrame(transition, core.progressAt(nowMs), nowMs);
@@ -1445,7 +1551,7 @@ export function createDithered(
         }
 
         reduced = nextReduced;
-        isPaused = opts.paused;
+        applyPausedPatch(patch);
 
         // `halt()` only runs when there's actually a reason to — a
         // dormant/repaint transition that needs the canvas/loop settled
@@ -1535,7 +1641,7 @@ export function createDithered(
       // ignored here too — "wait for the loop to end" is meaningless when
       // there's no loop running.
       if (targetReduced || !loopAdvancing()) {
-        cutToTarget(targetOpts, targetReduced);
+        cutToTarget(targetOpts, targetReduced, patch);
         return Promise.resolve();
       }
 
@@ -1548,7 +1654,7 @@ export function createDithered(
         });
       }
 
-      return new Promise<void>((resolve) => startTransition(targetOpts, resolve));
+      return new Promise<void>((resolve) => startTransition(targetOpts, resolve, patch));
     },
 
     finishLoop(): Promise<void> {

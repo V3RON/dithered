@@ -355,6 +355,19 @@ const LOADING_DONE_SNIPPET = `<Dithered
   fg="${ACCENT}"
 />`;
 
+// Module-level, not `presets.fill()`/`presets.gem()` called inline in the
+// JSX below — see the caveat on `Dithered`'s `brightness` prop in
+// `react.tsx` and in the README's Transitions section. `dithered/react`
+// diffs `brightness` (and `shape`) by identity, and with `transition` set
+// (as it is here) a changed identity doesn't just trigger a resample —
+// it starts a real `transitionTo()` morph. Calling `presets.fill()` fresh
+// on every render meant every *unrelated* re-render of the playground
+// (dragging the size slider, picking a shape elsewhere on the page — any
+// `App`-level state change, since this component isn't memoized) cut a
+// morph short and started a new one from the shape to itself.
+const LOADING_DONE_FILL = presets.fill();
+const LOADING_DONE_GEM = presets.gem();
+
 function LoadingToDone() {
   const [done, setDone] = useState(false);
 
@@ -379,7 +392,7 @@ function LoadingToDone() {
         >
           <Dithered
             shape={done ? shapes.check : shapes.rozenite}
-            brightness={done ? presets.fill() : presets.gem()}
+            brightness={done ? LOADING_DONE_FILL : LOADING_DONE_GEM}
             transition={{ duration: 400 }}
             size={72}
             fg={ACCENT}

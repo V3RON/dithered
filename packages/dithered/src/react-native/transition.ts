@@ -197,6 +197,25 @@ export function useDitheredTransition({
 
     const geometry = computeGeometry(toOpts, width, height);
     const bounds = Skia.XYWHRect(0, 0, width, height);
+    // Deliberately no explicit `.dispose()` on the *previous* recording
+    // here (or anywhere else in this hook): every morph replaces this
+    // array wholesale via `useMemo`'s recomputation, so the old array is
+    // simply dropped and its `SkPicture`s are released whenever the JS
+    // GC gets to them. That is a real, bounded cost — up to 240 pictures
+    // abandoned per completed morph, on top of `useDitheredPictures`'
+    // own re-recording on the same prop change — but disposing a picture
+    // the UI thread might still be reading from (`Dithered.tsx`'s
+    // `<Picture picture={picture} />` holds whichever step's `SkPicture`
+    // is currently on screen in a Reanimated shared value, read directly
+    // by the UI-thread frame callback, not by this JS-thread hook) would
+    // be worse than the leak: a `dispose()` racing that read is a
+    // use-after-free of native memory, not a slow one to reclaim. Proving
+    // "the UI thread is definitely done with every entry of the old
+    // array" would require reasoning about Reanimated's cross-thread
+    // hand-off timing this hook has no visibility into, and getting it
+    // wrong is a crash rather than a memory-pressure regression — so
+    // this trade-off (bounded per-morph leak, GC-reclaimed) is accepted
+    // rather than risked.
     const pictures = Array.from({ length: steps }, (_, i) => {
       const p = i / (steps - 1);
       // `startAt + p * duration` is "wall-clock ms at this step" on the

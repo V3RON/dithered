@@ -177,8 +177,45 @@ loop stops advancing: `setPaused(true)`, tab hidden, canvas off-screen,
 reduced motion, or `destroy()`. Resolution therefore means "the loop is not
 mid-cycle any more", not "a full cycle was drawn"; the README says so.
 
-`transition.onLoopEnd` is implemented as `await finishLoop()` before the morph
-starts. Under the drain rule that never deadlocks.
+`transition.onLoopEnd` is **not** implemented as `await finishLoop()` before
+starting the morph. It has its own mechanism: a `transitionTo` call with
+`onLoopEnd` set stores the caller's patch (not a precomputed target — see
+below) in a single pending-transition slot instead of calling `startTransition`
+right away. The same wrap detection that resolves `finishLoop()`'s resolvers
+also releases this slot — both live in the tick that observes the wrap — but
+`await finishLoop()` chained in front of `startTransition` was the first
+implementation, and it did not survive contact with the rest of this ADR:
+
+- **Staleness.** `finishLoop()` resolving is a promise callback, a microtask
+  away from the tick that resolved it. `transitionTo`'s target is computed by
+  merging the caller's patch onto `opts` — and by the time that `.then`
+  continuation ran, `opts` could already reflect an intervening plain
+  `update()`, which the merge would then silently discard. Storing the
+  _patch_ and recomputing the target only when the wait actually ends (release
+  or an early settle) is what keeps a later `update()`/`transitionTo()` from
+  being reverted by a deferred one firing after it.
+- **Settling on halt.** `finishLoop()`'s drain rule (§6, above) resolves the
+  promise early when the loop stops advancing, but a promise resolving is all
+  it does — it has no target state to apply. A deferred `transitionTo`
+  does: if playback halts while its morph is still queued, "the loop
+  isn't mid-cycle any more" is true, but "cut to the target now" also has to
+  happen, or the instance is stranded showing the pre-`transitionTo` shape
+  indefinitely. `finishLoop()`'s own resolvers can't carry that extra step.
+
+Concretely: `pendingTransition` holds `{ patch, resolve }`. The same tick that
+detects the wrap calls `releasePendingTransition()`, which recomputes the
+target from the live `opts`, re-checks reduced motion and whether the loop is
+still advancing, and either starts the real morph or — if either check now
+says otherwise — cuts straight to the target and resolves immediately, the same
+"never leave a promise hanging" instinct `finishLoop()` follows. A halt before
+the wrap ever comes (`setPaused(true)`, tab hidden, canvas off-screen) calls
+`settlePendingNow()`, the same cut-and-resolve path, from the halt handler
+instead of the wrap tick; `destroy()` calls the paint-free `settlePendingSilently()`
+variant. So a queued `onLoopEnd` transition _does_ end up sharing `finishLoop()`'s
+"resolve early rather than hang" instinct on halt — just via its own slot and
+its own settle functions, not by literally being `await finishLoop()`, and
+with the additional obligation (applying the target) that a bare `finishLoop()`
+call never has.
 
 ### 7. Reduced motion, pausing, and overlap
 

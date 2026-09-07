@@ -3190,6 +3190,80 @@ describe('createDithered transitions', () => {
     expect(resolved).toBe(true);
   });
 
+  it('finishLoop() resolves the moment a wrap falls inside an in-progress morph', async () => {
+    // Regression test: wrap detection used to live exclusively in the
+    // steady-state half of `tick()`'s `if (transition) {...} else {...}`
+    // split, so a `period` boundary crossed *while a morph is playing*
+    // was never observed — `finishLoop()` only resolved on whatever wrap
+    // came after the morph finished and steady playback resumed, up to a
+    // full `period` late. `onLoopEnd` (which starts a morph only once
+    // `finishLoop()` resolves) makes this common: any morph whose
+    // `duration` straddles the loop boundary reproduces it.
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions()); // period 1000, frames 10
+
+    mockNow = 800; // frame 8 — establishes a baseline tick before the morph starts.
+    fire(800);
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+
+    mockNow = 800;
+    void instance.transitionTo({ transition: { duration: 400 } }); // starts immediately: loop is advancing.
+
+    mockNow = 900;
+    fire(900);
+    await Promise.resolve();
+    expect(resolved).toBe(false); // 900 hasn't crossed the t=1000 boundary yet.
+
+    // The loop wraps at t = 1000, squarely inside the 400ms morph window
+    // (800 -> 1200). `finishLoop()` must resolve on *this* tick.
+    mockNow = 1000;
+    fire(1000);
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
+  it('a decreasing `currentFrame` that is not a real wrap does not fire finishLoop()/onLoopWrap', async () => {
+    // Regression test: the previous wrap check was
+    // `currentFrame >= 0 && f < currentFrame` — comparing the *painted
+    // frame index* rather than the wall clock. `currentFrame` is written
+    // by more than the steady playback tick (`update()` holds it across
+    // a phase change, `renderFrame()` sets it to whatever the caller
+    // asks for), so a decrease there does not mean a loop boundary was
+    // actually crossed. Shortening `period` via `update()` while holding
+    // the phase is enough to trigger a same-tick decrease that is not a
+    // wrap: `frameAt` under the *new*, shorter period reads a lower frame
+    // for the *same* wall-clock instant than the frame `update()` just
+    // held over from the old one.
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions()); // period 1000, frames 10
+
+    mockNow = 900; // frame 9.
+    fire(900);
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+
+    // Halves the period while holding the current phase — `update()`
+    // paints `blit(prevFrame % frames)` = `blit(9)`, i.e. `currentFrame`
+    // stays 9 even though the new period makes frame 9 out of step with
+    // the wall clock.
+    instance.update({ period: 500 });
+
+    // Under the new period, t = 910 lands on frame `frameAt(910, 500, 10) = 8`
+    // — 8 < 9 looks exactly like the old buggy wrap check, but no
+    // `period` boundary was actually crossed between 900 and 910.
+    mockNow = 910;
+    fire(910);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+  });
+
   it('transition.onLoopEnd defers the morph until after the loop wraps', async () => {
     const { canvas, ctx } = makeFakeCanvas();
     const instance = createDithered(canvas, baseOptions());
@@ -3331,9 +3405,18 @@ describe('createDithered transitions', () => {
     // the deferred morph is still waiting for a wrap that will now never
     // come — this must not hang the promise, nor leave the instance
     // showing the outgoing (pre-`transitionTo`) state forever.
+    const rafCountBeforeHalt = env.rafCallbacks.length;
     instance.setPaused(true);
     await Promise.resolve();
     expect(resolved).toBe(true);
+
+    // `setPaused(true)` must actually leave the instance paused: settling
+    // the deferred transition used to overwrite the imperative `isPaused`
+    // flag with the (default, `false`) declarative `paused` option and
+    // call `schedule()`, silently resuming the loop the instant a queued
+    // `onLoopEnd` morph landed. No new animation frame may have been
+    // requested since the halt.
+    expect(env.rafCallbacks.length).toBe(rafCountBeforeHalt);
 
     // The target's brightness (always false) must have been adopted, not
     // left on the outgoing always-true brightness.
@@ -3536,6 +3619,46 @@ describe('createDithered transitions', () => {
     }
   });
 
+  it('a morph that never touches `paused` does not resurrect a stale `paused: true` on natural completion', async () => {
+    // Regression test: the instance is *created* paused, then explicitly
+    // un-paused, then morphs — the transitionTo patch never mentions
+    // `paused`. `finishTransitionNow` used to reassign
+    // `isPaused = opts.paused`, and `opts.paused` still held the
+    // construction-time `true` (only `transitionTo`/`update()` patches
+    // that actually include `paused` are supposed to move it —
+    // `setPaused()` intentionally only ever writes the imperative
+    // `isPaused` flag). The instant a morph completed *normally*, that
+    // stale `true` silently froze playback with no further way to
+    // observe why, since nothing else changed.
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ paused: true }));
+    expect(env.rafCallbacks.length).toBe(0); // created paused: no frame scheduled yet.
+
+    instance.setPaused(false);
+    const rafCountAfterResume = env.rafCallbacks.length;
+    expect(rafCountAfterResume).toBeGreaterThan(0);
+
+    mockNow = 0;
+    let resolved = false;
+    const promise = instance
+      .transitionTo({ brightness: () => false, transition: { duration: 200 } })
+      .then(() => {
+        resolved = true;
+      });
+
+    mockNow = 200; // exactly at the morph's duration: completes this tick.
+    fire(200);
+    await promise;
+    expect(resolved).toBe(true);
+
+    // Playback must still be running — a further tick keeps rescheduling.
+    const rafCountAfterCompletion = env.rafCallbacks.length;
+    expect(rafCountAfterCompletion).toBeGreaterThan(rafCountAfterResume);
+    mockNow = 300;
+    fire(300);
+    expect(env.rafCallbacks.length).toBeGreaterThan(rafCountAfterCompletion);
+  });
+
   it('a morph in flight completes immediately when playback is paused mid-morph (ADR 0004 §7)', async () => {
     const { canvas, ctx } = makeFakeCanvas();
     const instance = createDithered(canvas, baseOptions());
@@ -3560,5 +3683,20 @@ describe('createDithered transitions', () => {
     ctx.fill.mockClear();
     instance.renderFrame(0);
     expect(ctx.fill).not.toHaveBeenCalled();
+
+    // `setPaused(true)` must stick: `finishTransitionNow` used to
+    // overwrite `isPaused` with the *target options'* `paused` (`false`,
+    // the default — the `transitionTo` patch above never mentioned
+    // `paused`), so the instance only looked halted because no frame
+    // happened to be outstanding. Nothing had actually re-armed
+    // `schedule()`'s guard, so the next unrelated trigger that calls
+    // `schedule()` — the canvas re-entering the viewport, here — silently
+    // resumed playback despite `setPaused(true)`.
+    const rafCountAfterHalt = env.rafCallbacks.length;
+    env.ioInstances[0]!.callback(
+      [{ isIntersecting: true } as IntersectionObserverEntry],
+      env.ioInstances[0] as unknown as IntersectionObserver,
+    );
+    expect(env.rafCallbacks.length).toBe(rafCountAfterHalt);
   });
 });

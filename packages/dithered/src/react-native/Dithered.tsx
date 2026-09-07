@@ -428,10 +428,25 @@ export function Dithered({
     const hadPendingMorph = pendingMorphStartRef.current !== null;
     pendingMorphStartRef.current = null;
     if (morph) {
-      // Ends an *active* morph; the repoint effect below picks up the
-      // (already current) steady pictures once `morph` flips back to null
-      // on the next render — the existing, already-correct path.
+      // Ends an *active* morph. `suppressRepointRef` must be cleared
+      // *here*, synchronously with `setMorph(null)` — not left for the
+      // repoint effect's own `morph` guard to lift on some later render.
+      // It was set to `true` by the very effect that started this morph
+      // and nothing else was clearing it, so leaving it out here stranded
+      // it at `true` forever: the repoint effect's
+      // `if (morph || suppressRepointRef.current) return;` guard bailed
+      // on every future run, and the canvas stayed frozen on whatever
+      // half-dissolved frame was on screen the instant playback halted —
+      // exactly the "half-morphed frame held by a paused instance" state
+      // ADR 0004 §7 rejects. Repointing directly here (rather than
+      // trusting the next render's effect pass) also means the frozen
+      // frame is corrected in the same commit that halts playback,
+      // matching the `hadPendingMorph` branch below.
+      suppressRepointRef.current = false;
       setMorph(null);
+      const frame = wrapFrame(currentFrame.value, frameCount);
+      currentFrame.value = frame;
+      picture.value = pictures[frame];
     } else if (hadPendingMorph) {
       // A queued morph never gets a `morph` state transition of its own
       // to trigger the repoint effect via its dependency array, so it's

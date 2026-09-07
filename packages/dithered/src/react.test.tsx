@@ -216,6 +216,55 @@ describe('Dithered', () => {
     expect(setPausedSpy).toHaveBeenCalledWith(false);
   });
 
+  // Regression test (finding 1): `progress` holds the instance paused via
+  // `setPaused(true)`. A subsequent option change routed through
+  // `transitionTo()` (because `transition` is set) — here, on an instance
+  // that isn't advancing, taking `transitionTo`'s immediate-cut branch —
+  // must not silently resume playback. The underlying bug was
+  // `cutToTarget()` overwriting the imperative `isPaused` flag with the
+  // declarative `paused` *option* (`false`, the default — the reconfigure
+  // effect's patch never includes `paused` at all) and then calling
+  // `schedule()`, which requests a fresh animation frame the instant a
+  // shape/brightness prop changes on a `progress`-controlled indicator.
+  it('a transitionTo() cut on a progress-paused instance does not resume playback (finding 1)', () => {
+    const { rerender } = render(
+      <Dithered
+        shape={SQUARE_SHAPE}
+        progress={0.5}
+        frames={10}
+        period={1000}
+        transition={{ duration: 400 }}
+      />,
+    );
+    // `progress` paused the instance synchronously on mount (the mount
+    // effect itself schedules an animation frame before the later
+    // `progress` effect cancels it — `cancelAnimationFrame` in the test
+    // harness doesn't remove the entry, only marks it moot — so this
+    // just records the baseline rather than assuming a specific count).
+    const rafCountAfterMount = env.rafCallbacks.length;
+
+    const instance = lastInstance();
+    const transitionToSpy = vi.spyOn(instance, 'transitionTo');
+
+    rerender(
+      <Dithered
+        shape={SQUARE_SHAPE}
+        fg="#222222"
+        progress={0.5}
+        frames={10}
+        period={1000}
+        transition={{ duration: 400 }}
+      />,
+    );
+
+    // The `fg` change is routed through transitionTo() (transition is
+    // set); on a paused instance that's an immediate cut to the target,
+    // not a real morph.
+    expect(transitionToSpy).toHaveBeenCalled();
+    // Still paused: the cut must not have called `requestAnimationFrame`.
+    expect(env.rafCallbacks.length).toBe(rafCountAfterMount);
+  });
+
   it('progress={0.5} pauses and drives the expected phase (default frames=48)', () => {
     const { rerender } = render(<Dithered shape={SQUARE_SHAPE} />);
     const instance = lastInstance();

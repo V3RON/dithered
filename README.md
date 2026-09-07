@@ -387,6 +387,8 @@ A loading indicator almost always ends in a state change — success, error, don
 />
 ```
 
+The snippet above inlines `presets.fill()`/`presets.gem()` for brevity, but `brightness` (like `shape`) is diffed by identity — give it a stable reference (a module-level preset, as `LOADING_DONE_FILL`/`LOADING_DONE_GEM` do in the playground, or `useMemo`/`useCallback`), or an unrelated re-render creates a new closure each time and, with `transition` set, cuts a running morph short to start a pointless one from the shape to itself on every render.
+
 Setting `transition` (an object; `{}` is enough to opt in) is what makes a `shape`/`brightness` prop change morph instead of cut — on both `dithered/react` and `dithered/native`, with identical props. With the vanilla/core API, call `instance.transitionTo(patch)` instead of `instance.update(patch)`:
 
 ```ts
