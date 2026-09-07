@@ -180,12 +180,25 @@ a caller passing a negative index gets a wrapped cell rather than
 
 ### Resolution is memoized, so validation cost is paid once
 
-`resolveMatrix` is memoized twice over:
+`resolveMatrix` is memoized three ways:
 
 - a `Map` keyed by name for the four built-ins, populated lazily;
 - a `WeakMap` keyed by the array object for custom matrices, so
   `update({ matrix })` with a stable array reference does not re-validate,
-  and holding the entry cannot leak the caller's array.
+  and holding the entry cannot leak the caller's array;
+- a second `WeakMap` for hand-built `ResolvedMatrix` objects, on the same
+  terms.
+
+**All three cache on identity, not content**, so a matrix passed to this
+library must be treated as immutable once handed over. Mutating a custom
+matrix in place after it has been resolved is invisible: the stale
+thresholds are returned forever, and — the sharper edge — a matrix
+mutated into an _invalid_ one (ragged, out of range) is never
+re-validated, so the ragged-array guarantee the PRD asks for is bypassed.
+Re-validating on every call would defeat the point of the cache and cost
+a deep compare per resample; requiring immutability is the same contract
+`Shape` and `Brightness` already carry by identity. It is stated in the
+README and in the `DitherMatrix` jsdoc rather than enforced.
 
 `ResolvedMatrix` objects are branded (a non-enumerable symbol) and
 `resolveMatrix` returns an already-resolved input unchanged, so callers
@@ -259,8 +272,22 @@ ever surface" failure mode into a loud one.
   later `update()`, bricking the instance for good. `configure()`
   therefore resamples (the step that can throw) before mutating anything,
   and `update()` applies the merged options as a candidate it reverts on
-  failure. The error still propagates; the instance keeps its options,
-  its surface and its running loop.
+  failure.
+
+  The revert has to cover **all** of the instance's mutable state, not
+  just `opts`. `configure()` also writes `canvas.width`/`height`/`style`,
+  `W`, `H`, `cells` and `sheet`, and the sprite-strip build calls the
+  caller's `brightness` — which can throw for reasons that have nothing
+  to do with the matrix. Restoring `opts` alone would leave the surface
+  sized for the rejected configuration while `sheet` still held a strip
+  built at the old width, and every later `blit` would `drawImage` past
+  the end of that strip and paint garbage. The same applies to the
+  `blit()` that follows `configure()`, which runs `brightness` too
+  whenever the cache is off. So the whole reconfigure-and-repaint
+  sequence is the unit that succeeds or rolls back, and the error
+  propagates either way: the instance keeps its options, its surface, its
+  cache and its running loop.
+
 - `dithered/react` forwards `matrix` in the create effect, in the
   `update()` effect's payload **and in that effect's dependency array**.
   Omitting the dep is the failure mode that makes `update({ matrix })`
