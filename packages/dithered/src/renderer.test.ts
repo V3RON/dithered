@@ -3818,4 +3818,112 @@ describe('createDithered transitions', () => {
     );
     expect(env.rafCallbacks.length).toBe(rafCountAfterHalt);
   });
+
+  // Closing-review finding: `finishTransitionNow` — the completion path for
+  // both `update()`'s "settle whatever's running first" and a morph
+  // finishing naturally on its own (`p >= 1` in `tick()`) — is itself
+  // capable of halting the loop: the patch that started (or superseded
+  // into) the morph can carry `paused: true`, applied here via
+  // `applyPausedPatch(t.patch)`. `update()`/`cutToTarget()` already call
+  // `drainIfHalted()` after a patch lands; a morph completing *on its own*,
+  // with nothing else in the call stack to drain afterward, was the one
+  // path that didn't — stranding a `finishLoop()` awaited before it landed.
+  it('finishLoop() resolves when a morph completes onto a patch that pauses playback', async () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+
+    mockNow = 0;
+    void instance.transitionTo({
+      fg: '#abc',
+      paused: true,
+      transition: { duration: 100 },
+    });
+    await Promise.resolve();
+    expect(resolved).toBe(false); // still morphing; the loop hasn't halted yet.
+
+    // Exactly at `duration`: the morph lands on `paused: true`. `schedule()`
+    // at the end of this same `tick()` is then a no-op — nothing else will
+    // ever come along to drain this promise if `finishTransitionNow` itself
+    // doesn't.
+    mockNow = 100;
+    fire(100);
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
+  it('finishLoop() resolves when prefers-reduced-motion turns on during an in-progress morph and it completes', async () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+
+    mockNow = 0;
+    void instance.transitionTo({ fg: '#abc', transition: { duration: 400 } });
+
+    // Flips on partway through the morph — `finishTransitionNow` re-reads
+    // it (`reduced = prefersReducedMotion(opts)`) only when the morph
+    // actually completes, not before.
+    mockNow = 200;
+    fire(200);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({ matches: true })),
+    );
+
+    mockNow = 400; // exactly at duration: the morph completes, and lands on a now-halted loop.
+    fire(400);
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
+  // Defect 5 (renderer): `checkWrap`'s `previousPeriod !== opts.period` arm.
+  // Deleting just this clause leaves every other existing test green — the
+  // period changes they exercise never happen to straddle a boundary the
+  // naive (period-blind) comparison would manufacture — so it needs its own
+  // case: a period change chosen so that comparing the *previous* wall-clock
+  // reading against the *new* period alone (what the code would do without
+  // this guard) reports a boundary crossing that was never actually part of
+  // any period the loop was really running under between the two ticks.
+  it('a period change does not manufacture a false wrap on the very next tick (defect 5)', async () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions()); // period 1000
+
+    mockNow = 900;
+    fire(900); // establishes the wrap-detection baseline under period 1000.
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+
+    // Chosen so `floor(910 / 455) = 2 > floor(900 / 455) = 1` — the naive
+    // comparison (ignoring that the baseline was captured under a
+    // *different* period) reports a wrap that was never actually crossed
+    // under any single period the loop consistently ran under between the
+    // two ticks.
+    instance.update({ period: 455 });
+
+    mockNow = 910;
+    fire(910);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    // The guard resetting the baseline (rather than comparing across the
+    // change) must not swallow a *genuine* wrap under the new period either.
+    mockNow = 1400; // floor(1400/455) = 3 > floor(910/455) = 2: a real wrap.
+    fire(1400);
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
 });

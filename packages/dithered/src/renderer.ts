@@ -965,6 +965,16 @@ export function createDithered(
    * never mentioned it lands: `t.patch` is the exact patch that started
    * (or superseded into) this morph, so `isPaused` only moves when that
    * patch actually asked it to.
+   *
+   * A morph landing can itself be what stops the loop — the patch it
+   * carries can set `paused: true`, or reduced motion can have turned on
+   * during the `duration` window and only get re-read here via `reduced =
+   * prefersReducedMotion(opts)` — so this also has to check `drainIfHalted()`
+   * on the way out. `update()`/`cutToTarget()` already do; a morph
+   * completing on its own (the `p >= 1` branch in `tick()`, which calls
+   * this directly rather than through either of those) was the one path
+   * that didn't, and a `finishLoop()` awaited before such a morph landed
+   * would hang forever even though the loop had, in fact, just stopped.
    */
   function finishTransitionNow(): void {
     if (!transition) return;
@@ -986,6 +996,7 @@ export function createDithered(
     buildCache();
     paintForPhase();
     for (const resolve of t.resolvers) resolve();
+    drainIfHalted();
   }
 
   /**

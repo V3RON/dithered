@@ -218,7 +218,13 @@ applies uniformly regardless of _which_ call is what actually stops the
 loop — `update()`/`cutToTarget()` landing on a patch that halts it (an
 explicit `paused: true`, or reduced motion having turned on since the last
 check) drain exactly like `setPaused(true)` does, not only the calls that are
-always a halt by construction.
+always a halt by construction. A morph completing on its own — `finishTransitionNow`
+running from `tick()`'s `p >= 1` branch, with nothing else in the call stack
+to drain afterward — is the same case again: the patch that started (or
+superseded into) the morph can itself carry `paused: true`, or reduced motion
+can have turned on during `duration` and only get re-read there, so
+`finishTransitionNow` drains on its way out exactly like `update()`/`cutToTarget()`
+do.
 
 `transition.onLoopEnd` is **not** implemented as `await finishLoop()` before
 starting the morph. It has its own mechanism: a `transitionTo` call with

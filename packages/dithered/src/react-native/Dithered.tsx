@@ -314,6 +314,16 @@ export function Dithered({
    */
   const morphFromRef = useRef<Snapshot | null>(null);
 
+  // The morph actively in flight, if any — see the `useState` below for the
+  // full description. Declared here, ahead of its usual position among the
+  // other transition-state hooks further down, because the render-time
+  // freeze logic immediately below has to read it: whether the freeze
+  // re-bases onto a superseding morph's target depends on whether the
+  // episode it's superseding was actively playing or merely queued (see
+  // the `else if (morph !== null)` branch), and that decision has to be
+  // made in *this* render, not an effect a commit later.
+  const [morph, setMorph] = useState<MorphState | null>(null);
+
   if (holding) {
     // ADR 0004 §7: a halted loop (paused, backgrounded, reduced motion,
     // controlled `progress`) never plays a morph — any episode in flight
@@ -328,10 +338,28 @@ export function Dithered({
     if (morphFromRef.current === null) {
       // The first change of a fresh episode: freeze what's on screen now.
       morphFromRef.current = prevSnapshot;
+    } else if (morph !== null) {
+      // Already mid-episode, but the episode being superseded was
+      // *actively playing* (not merely queued behind `onLoopEnd`) — ADR
+      // 0004 §7 / the core renderer's `finishTransitionNow`: "a
+      // transitionTo while another morph is running finishes the running
+      // one instantly (its target becomes the current steady state) and
+      // starts the new morph from there." `morph.to` is exactly that
+      // target — it's what the running morph was actually approaching,
+      // and unlike a *queued* episode's intermediate target, it really
+      // was the state this component was rendering toward on screen — so
+      // rebasing onto it (rather than keeping the original freeze, as
+      // the queued case still does just below) is what lets a change
+      // back toward the original shape dissolve back in instead of
+      // hard-snapping: the next morph's `from` is the half-dissolved
+      // state that was visible, not the fully-outgoing one from before
+      // the *first* morph ever started.
+      morphFromRef.current = morph.to;
     }
-    // Else: already mid-episode (queued or active) and superseded by a
-    // newer change before it resolved — keep the original freeze; only
-    // the target (`next`, captured fresh by the effect below) moves.
+    // Else: mid a merely *queued* episode, superseded by a newer change
+    // before its `onLoopEnd` wrap ever arrived — the intermediate target
+    // was never displayed, so keep the original freeze; only the target
+    // (`next`, captured fresh by the effect below) moves.
   } else if (changed) {
     // An ordinary cut: nothing to morph in front of (no `transition`, or
     // it was just unset). Release any stale pin too, in case `transition`
@@ -340,6 +368,16 @@ export function Dithered({
   }
 
   const steadySnapshot = morphFromRef.current ?? snapshot;
+  // `steadySnapshot.period`, not the live `period` prop — see the frame
+  // callback below (finding 4 of the closing review): the picture array
+  // and its `frameCount` are pinned to `steadySnapshot` for the whole of
+  // an episode (queued or active), and the phase math that indexes into
+  // that array has to stay pinned to the same source, or the outgoing
+  // recordings — which keep playing at their *own* pace for as long as an
+  // episode is unresolved (ADR 0004 §5) — would suddenly play at
+  // whatever period the *target* asked for, before the morph that's
+  // supposed to carry that change has even started.
+  const pinnedPeriod = steadySnapshot.period ?? period;
 
   const { pictures, width, height } = useDitheredPictures({
     shape: steadySnapshot.shape,
@@ -431,7 +469,6 @@ export function Dithered({
 
   // --- transitions (ADR 0004) ----------------------------------------
 
-  const [morph, setMorph] = useState<MorphState | null>(null);
   // A morph deferred by `transition.onLoopEnd`, waiting for the next
   // frame-index wrap — see the `useAnimatedReaction` below. Consumed by
   // `handleLoopWrap`.
@@ -511,7 +548,11 @@ export function Dithered({
     picture.value = pictures[frame];
   }, [holding, morph, pictures, frameCount, currentFrame, picture, externalPhase, internalPhase]);
 
-  const { pictures: morphPictures } = useDitheredTransition({
+  const {
+    pictures: morphPictures,
+    width: morphWidth,
+    height: morphHeight,
+  } = useDitheredTransition({
     from: morph?.from ?? snapshot,
     to: morph?.to ?? snapshot,
     duration,
@@ -520,6 +561,25 @@ export function Dithered({
   });
   const morphStartedAt = morph?.startedAt ?? 0;
   const morphActive = morph !== null && morphPictures.length > 0;
+
+  // The canvas's own size: the target's surface for as long as a morph is
+  // *actively* playing, the pinned outgoing `pictures`' surface otherwise
+  // (ADR 0004 §2/§5). `morphActive` — not merely `morph !== null` or
+  // `wantsMorph` — is deliberate: a *queued* episode hasn't recorded
+  // anything yet (`useDitheredTransition` above is fed `reducedMotion:
+  // !morph`, so its `pictures` is `[]` and its `width`/`height` are just
+  // whatever the *live*, not-yet-applied snapshot happens to resolve to),
+  // and sizing the canvas from that before the morph itself starts would
+  // race ahead of the picture array, which is still correctly showing the
+  // outgoing shape at the outgoing size. Once the morph *is* active,
+  // `useDitheredPictures`' `width`/`height` above stay pinned to the
+  // outgoing surface for the whole episode (see `steadySnapshot`), so
+  // reading canvas size from there — as an earlier version did — sized
+  // the `<Canvas>` from the wrong surface for the entire morph, only
+  // snapping to the target's size at the "done" beat (finding 1 of the
+  // closing review).
+  const canvasWidth = morphActive ? morphWidth : width;
+  const canvasHeight = morphActive ? morphHeight : height;
 
   // Ends an active morph from JS: flips `morph` back to `null` and
   // releases the picture-source pin together, so `pictures` above starts
@@ -668,10 +728,19 @@ export function Dithered({
           return;
         }
 
+        // `pinnedPeriod`, not the live `period` prop (finding 4 of the
+        // closing review): `frameCount` here is `pictures.length`, which
+        // stays pinned to `steadySnapshot` — the outgoing config — for as
+        // long as a morph episode (queued or active) is unresolved, so
+        // the period driving the accumulator has to be that same
+        // outgoing config's, or the outgoing recordings would suddenly
+        // play at whatever period the *target* most recently asked for,
+        // before the morph that's supposed to carry that change has even
+        // started.
         const dt = lastTimestamp.value === null ? 0 : info.timestamp - lastTimestamp.value;
         lastTimestamp.value = info.timestamp;
         const loopsBefore = loopsAtUI(internalPhase.value);
-        internalPhase.value = advancePhaseUI(internalPhase.value, dt, period, speed);
+        internalPhase.value = advancePhaseUI(internalPhase.value, dt, pinnedPeriod, speed);
         const loopsAfter = loopsAtUI(internalPhase.value);
         if (loopsAfter !== loopsBefore && hasOnLoop) runOnJS(notifyLoop)(loopsAfter);
         applyPhase(internalPhase.value);
@@ -688,7 +757,7 @@ export function Dithered({
         clockOffsetRef,
         lastTimestamp,
         internalPhase,
-        period,
+        pinnedPeriod,
         speed,
         hasOnLoop,
         notifyLoop,
@@ -790,7 +859,7 @@ export function Dithered({
 
   return (
     <Canvas
-      style={[{ width, height }, style]}
+      style={[{ width: canvasWidth, height: canvasHeight }, style]}
       accessible={label !== ''}
       accessibilityLabel={label || undefined}
       accessibilityRole="progressbar"

@@ -51,9 +51,12 @@ vi.mock('@shopify/react-native-skia', () => ({
   createPicture: (recorder: (canvas: unknown) => void, bounds: unknown) =>
     createPictureImpl(recorder, bounds),
   // Minimal stand-ins: this file never asserts on the rendered tree, only
-  // on the shared-value objects these components receive as props.
-  Canvas: ({ children }: { children?: React.ReactNode }) =>
-    React.createElement(React.Fragment, null, children),
+  // on the shared-value objects (and, for `Canvas`, the `style` prop) these
+  // components receive.
+  Canvas: ({ children, style }: { children?: React.ReactNode; style?: unknown }) => {
+    lastCanvasStyle = style;
+    return React.createElement(React.Fragment, null, children);
+  },
   Picture: ({ picture }: { picture: { value: unknown } }) => {
     lastPictureShared = picture;
     return null;
@@ -79,6 +82,7 @@ let frameCallbackEntries: FrameCallbackEntry[] = [];
 let reactionEntries: ReactionEntry[] = [];
 let reducedMotionValue = false;
 let lastPictureShared: { value: unknown } | null = null;
+let lastCanvasStyle: unknown = null;
 
 vi.mock('react-native-reanimated', () => ({
   // A real `useRef` under the hood, so each shared value stays the same
@@ -171,6 +175,12 @@ function cellsDrawnOf(picture: unknown): number {
   return (picture as FakePicture).canvas.drawRRect.mock.calls.length;
 }
 
+/** The `{ width, height }` the `<Canvas>` was last rendered with. */
+function canvasSize(): { width: number; height: number } {
+  const style = lastCanvasStyle as [{ width: number; height: number }, unknown];
+  return style[0];
+}
+
 const alwaysTrue = () => true;
 
 describe('Dithered (native)', () => {
@@ -179,6 +189,7 @@ describe('Dithered (native)', () => {
     reactionEntries = [];
     reducedMotionValue = false;
     lastPictureShared = null;
+    lastCanvasStyle = null;
     makeFromSVGString.mockClear();
     createPictureImpl.mockClear();
   });
@@ -882,5 +893,245 @@ describe('Dithered (native)', () => {
     // waiting for a wrap that reduced motion means will never usefully
     // come.
     expect(cellsDrawnOf(lastPictureShared!.value)).toBe(0);
+  });
+
+  // Closing-review finding 1: `useDitheredPictures`' `width`/`height` stay
+  // pinned to the *outgoing* surface for the whole episode (by design — see
+  // `steadySnapshot`), but the morph itself runs on the *target's* grid and
+  // surface (ADR 0004 §2). The `<Canvas>` has to size itself from
+  // `useDitheredTransition`'s own `width`/`height` while the morph is
+  // actively playing, not from the pinned pair — otherwise the incoming
+  // shape is clipped/cropped to the outgoing surface for the entire morph,
+  // only snapping to the right size on the "done" beat.
+  it('adopts the target surface size at morph start, not only on completion (closing review finding 1)', () => {
+    const { rerender } = render(
+      <Dithered
+        shape={SQUARE_SHAPE}
+        cols={4}
+        frames={48}
+        period={1000}
+        size={48}
+        brightness={alwaysTrue}
+        transition={{ duration: 400 }}
+      />,
+    );
+    // Before: the outgoing surface.
+    expect(canvasSize()).toEqual({ width: 48, height: 48 });
+
+    act(() => {
+      rerender(
+        <Dithered
+          shape={SQUARE_SHAPE}
+          cols={4}
+          frames={48}
+          period={1000}
+          size={96}
+          brightness={alwaysTrue}
+          transition={{ duration: 400 }}
+        />,
+      );
+    });
+    // At morph start — before any tick has run — the canvas has already
+    // adopted the target's (larger) surface, per ADR 0004 §2/§5.
+    expect(canvasSize()).toEqual({ width: 96, height: 96 });
+
+    // During: driving a tick partway through the morph must not regress
+    // the size back to the outgoing surface.
+    act(() => {
+      tick(200); // roughly halfway through the 400ms morph.
+    });
+    expect(canvasSize()).toEqual({ width: 96, height: 96 });
+
+    // After completion: still the target surface, once steady playback
+    // has taken back over.
+    act(() => {
+      tick(500);
+    });
+    expect(canvasSize()).toEqual({ width: 96, height: 96 });
+  });
+
+  // Closing-review finding: a second, superseding change that arrives
+  // while the first morph is *actively playing* (not merely queued behind
+  // `onLoopEnd`) must re-base onto the running morph's own target — ADR
+  // 0004 §7's "finishes the running one instantly ... and starts the new
+  // morph from there" — rather than keeping the original pre-episode
+  // freeze. Otherwise a change back toward the shape that was on screen
+  // *before the first morph ever started* is recorded as a same-shape
+  // morph (`from` and `to` identical) whose every step already draws the
+  // full target, hard-snapping instead of dissolving back in.
+  it('rebases an active morph onto its own target when superseded by a new change', () => {
+    const { rerender } = render(
+      <Dithered
+        shape={SQUARE_SHAPE}
+        hitTest={squareHitTest}
+        cols={4}
+        frames={48}
+        period={1000}
+        brightness={alwaysTrue}
+        transition={{ duration: 400 }}
+      />,
+    );
+    expect(cellsDrawnOf(lastPictureShared!.value)).toBe(16);
+
+    // Starts the first morph: square (16 cells) -> other (0 cells).
+    act(() => {
+      rerender(
+        <Dithered
+          shape={OTHER_SHAPE}
+          hitTest={otherHitTest}
+          cols={4}
+          frames={48}
+          period={1000}
+          brightness={alwaysTrue}
+          transition={{ duration: 400 }}
+        />,
+      );
+    });
+
+    act(() => {
+      tick(200); // roughly halfway through the first morph: genuinely mid-dissolve.
+    });
+    const midway = cellsDrawnOf(lastPictureShared!.value);
+    expect(midway).toBeGreaterThan(0);
+    expect(midway).toBeLessThan(16);
+
+    // A second change, before the first morph resolves, asks for the
+    // square again. The first morph was *actively* playing (not queued),
+    // so this must start a fresh morph from *its* target (other, 0 cells)
+    // back to the square — not snap straight to the square.
+    act(() => {
+      rerender(
+        <Dithered
+          shape={SQUARE_SHAPE}
+          hitTest={squareHitTest}
+          cols={4}
+          frames={48}
+          period={1000}
+          brightness={alwaysTrue}
+          transition={{ duration: 400 }}
+        />,
+      );
+    });
+
+    act(() => {
+      tick(400); // roughly halfway through the *second* morph (started at 200).
+    });
+    const midwayBack = cellsDrawnOf(lastPictureShared!.value);
+    // The pre-fix bug records a square -> square morph (re-based on the
+    // stale original freeze from before the *first* morph), whose every
+    // step already draws the full 16 cells — a hard snap, not a dissolve.
+    expect(midwayBack).toBeGreaterThan(0);
+    expect(midwayBack).toBeLessThan(16);
+  });
+
+  // Closing-review finding 4: the worklet must index the pinned steady
+  // `pictures` array with the *pinned* `period`, not the live prop — the
+  // two have to describe the same config, or the outgoing recordings (kept
+  // playing for as long as an episode is queued/active, per ADR 0004 §5)
+  // play back at whatever period the still-unapplied *target* asked for.
+  it('keeps the outgoing steady-state period pinned during a queued morph episode (finding 4)', () => {
+    const { rerender } = render(
+      <Dithered
+        shape={SQUARE_SHAPE}
+        hitTest={squareHitTest}
+        cols={4}
+        frames={4}
+        period={2000}
+        brightness={alwaysTrue}
+        transition={{ duration: 400, onLoopEnd: true }}
+      />,
+    );
+    // The 4 steady recordings for the outgoing (period 2000) loop, frame 0..3.
+    const framePictures = createPictureImpl.mock.results.map((r) => r.value);
+    expect(framePictures.length).toBe(4);
+
+    createPictureImpl.mockClear();
+    act(() => {
+      rerender(
+        <Dithered
+          shape={OTHER_SHAPE}
+          hitTest={otherHitTest}
+          cols={4}
+          frames={4}
+          period={500} // the target asks for a 4x faster loop.
+          brightness={alwaysTrue}
+          transition={{ duration: 400, onLoopEnd: true }}
+        />,
+      );
+    });
+    // Queued behind onLoopEnd: nothing about the steady config actually
+    // changed (still pinned to the outgoing snapshot), so no new steady
+    // recordings were needed.
+    expect(createPictureImpl).not.toHaveBeenCalled();
+
+    act(() => {
+      tick(300); // 300ms into the *outgoing* (period 2000) loop.
+    });
+    // Under the live (target) period of 500, `floor(300/500*4) = 2` — the
+    // outgoing recordings would appear to run 4x too fast, before the
+    // morph that's supposed to carry that change has even started. Pinned
+    // to the outgoing period of 2000, `floor(300/2000*4) = 0`.
+    expect(lastPictureShared!.value).toBe(framePictures[0]);
+    expect(lastPictureShared!.value).not.toBe(framePictures[2]);
+  });
+
+  // Defect 5 (native): the lower `Math.max(0, ...)` clamp on morph
+  // progress. The offset-correction in the frame callback (finding 2)
+  // already keeps a *legitimate* Reanimated clock restart from producing a
+  // meaningfully negative `elapsed`, so exercising this guard directly
+  // means feeding the worklet a raw time that violates that correction's
+  // only assumption (that `timeSinceFirstFrame` is never negative) —
+  // this is the guard's actual job: making sure a negative `t` still
+  // selects a valid, in-range recorded step (`morphPictures[0]`) instead
+  // of indexing the array with a negative number and reading `undefined`.
+  it('clamps morph progress at 0 instead of indexing the recordings with a negative step (defect 5)', () => {
+    const { rerender } = render(
+      <Dithered
+        shape={SQUARE_SHAPE}
+        hitTest={squareHitTest}
+        cols={4}
+        frames={48}
+        period={1000}
+        brightness={alwaysTrue}
+        transition={{ duration: 400 }}
+      />,
+    );
+
+    act(() => {
+      tick(9000); // establishes a nonzero baseline on the virtual clock.
+    });
+
+    act(() => {
+      rerender(
+        <Dithered
+          shape={OTHER_SHAPE}
+          hitTest={otherHitTest}
+          cols={4}
+          frames={48}
+          period={1000}
+          brightness={alwaysTrue}
+          transition={{ duration: 400 }}
+        />,
+      );
+    });
+    // The morph's `startedAt` is captured as 9000 (the virtual clock as of
+    // the last tick above).
+
+    act(() => {
+      // A raw time far enough below the last observed raw time that, even
+      // after the clock-restart correction folds the *previous* raw value
+      // into the running offset, the resulting `elapsed` is still deeply
+      // negative — a strictly larger regression than any real Reanimated
+      // restart (which never goes below 0) could ever produce.
+      tick(-1_000_000);
+    });
+
+    const picture = lastPictureShared!.value;
+    expect(picture).not.toBeUndefined();
+    // Clamped to progress 0: the first recorded step, the full outgoing
+    // square. Without the clamp, a negative `t` indexes the recordings
+    // array with a large negative number, reading `undefined` — a picture
+    // whose `.canvas` access throws instead of a valid cell count.
+    expect(cellsDrawnOf(picture)).toBe(16);
   });
 });
