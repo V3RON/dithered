@@ -34,6 +34,28 @@ export function makeFakeCanvas() {
   return { canvas: canvas as unknown as HTMLCanvasElement, ctx };
 }
 
+/**
+ * Replaces `HTMLCanvasElement.prototype.getContext` with a stub returning
+ * `ctx`.
+ *
+ * Swapping the method out rather than `vi.spyOn(...).mockReturnValue(...)`
+ * is deliberate: `getContext` is overloaded once per context type ('2d',
+ * 'webgl', 'webgpu', ...), so a mocked return value has to satisfy
+ * whichever overload TypeScript happens to resolve last — which changes
+ * as ambient DOM/WebGPU types come and go with unrelated dependencies.
+ */
+export function stubGetContext(ctx: unknown) {
+  const original = HTMLCanvasElement.prototype.getContext;
+  const stub = vi.fn(() => ctx);
+  HTMLCanvasElement.prototype.getContext = stub as unknown as typeof original;
+  return {
+    stub,
+    restore: () => {
+      HTMLCanvasElement.prototype.getContext = original;
+    },
+  };
+}
+
 export interface IntersectionObserverInstance {
   callback: IntersectionObserverCallback;
   observe: ReturnType<typeof vi.fn>;

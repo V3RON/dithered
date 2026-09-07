@@ -2,7 +2,15 @@
 
 [Live demo →](https://v3ron.github.io/dithered/)
 
-`dithered` renders an animated ordered (Bayer) dither pattern masked to an SVG silhouette: it samples a coarse grid of cells inside a shape and, each frame, draws or skips a rounded square per cell by comparing a caller-supplied brightness value against a 4x4 Bayer threshold. The core is framework-agnostic canvas 2D; an optional React wrapper (`dithered/react`) is a separate entry point. The project started as a generalization of the Rozenite loading spinner into a standalone animated-shape primitive.
+`dithered` renders an animated ordered (Bayer) dither pattern masked to an SVG silhouette: it samples a coarse grid of cells inside a shape and, each frame, draws or skips a rounded square per cell by comparing a caller-supplied brightness value against a 4x4 Bayer threshold. The project started as a generalization of the Rozenite loading spinner into a standalone animated-shape primitive.
+
+The library is a platform-free core plus thin per-platform renderers, in three entry points:
+
+| Entry             | Renders with                 | Needs                                                                            |
+| ----------------- | ---------------------------- | -------------------------------------------------------------------------------- |
+| `dithered`        | canvas 2D                    | nothing                                                                          |
+| `dithered/react`  | canvas 2D, in a `<canvas>`   | `react`, `react-dom`                                                             |
+| `dithered/native` | `@shopify/react-native-skia` | `react`, `react-native`, `@shopify/react-native-skia`, `react-native-reanimated` |
 
 ## Install
 
@@ -10,7 +18,15 @@
 pnpm add dithered
 ```
 
-React is optional — `react`/`react-dom` are peer dependencies marked optional, only needed if you import from `dithered/react`.
+Every peer dependency is optional; you only need the ones your entry point uses. The plain `dithered` entry has none.
+
+For React Native:
+
+```sh
+pnpm add dithered @shopify/react-native-skia react-native-reanimated
+```
+
+Reanimated needs its babel plugin in your `babel.config.js` (`plugins: ['react-native-reanimated/plugin']`) — that is what turns the playback worklet in `dithered/native` into a UI-thread function.
 
 ## Quick start
 
@@ -24,6 +40,24 @@ function LoadingIndicator() {
   return <Dithered shape={shapes.rozenite} brightness={presets.gem()} fg="#8232ff" size={48} />;
 }
 ```
+
+### React Native
+
+```tsx
+import { Dithered, shapes, presets } from 'dithered/native';
+
+// Module scope: `<Dithered>` re-records every frame when `shape` or
+// `brightness` changes identity, so keep those references stable.
+const GEM = presets.gem();
+
+function LoadingIndicator() {
+  return <Dithered shape={shapes.rozenite} brightness={GEM} fg="#8232ff" size={48} />;
+}
+```
+
+The props are the web component's, minus the DOM-only ones: `className` and `style: CSSProperties` become `style: StyleProp<ViewStyle>`, `label` maps to `accessibilityLabel` rather than `role="status"`, `cache` is gone (see [Performance notes](#performance-notes)), and `cells` is new. Everything else — `shape`, `brightness`, `size`, `cols`, `rows`, `frames`, `period`, `fg`, `bg`, `gap`, `radius`, `paused`, `progress`, `initialFrame`, `respectReducedMotion` — behaves identically, so a shared component can spread the same props object at both.
+
+To draw into a Skia canvas you already own, `dithered/native` also exports the pieces: `useDitheredPictures(options)` returns one `SkPicture` per frame plus the canvas size, and `skiaPaintContext(canvas)` adapts an `SkCanvas` to the `PaintContext` that `paintFrame` draws through.
 
 ### Vanilla
 
@@ -85,6 +119,28 @@ const shape = shapeFromSvg(`
 `);
 ```
 
+`shapeFromSvg` uses `DOMParser`, so it is web-only. `shapeFromSvgLite` is the same contract implemented by scanning the source text, and is exported from both `dithered` and `dithered/native`:
+
+```ts
+import { shapeFromSvgLite } from 'dithered/native';
+```
+
+It handles well-formed SVG as design tools emit it — comments and CDATA are skipped, attributes may be single- or double-quoted — but it is not an XML parser: entity references are not expanded, and a `>` inside an attribute value will confuse it. On the web, prefer `shapeFromSvg`.
+
+A `Shape` is plain data (`{ path, viewBox }`), so the other option is to convert once at build time and commit the result — which is all `shapes.ts` is:
+
+```ts
+// scripts/shapes.mjs, run in Node
+import { readFileSync, writeFileSync } from 'node:fs';
+import { shapeFromSvgLite } from 'dithered';
+
+const shape = shapeFromSvgLite(readFileSync('assets/logo.svg', 'utf8'));
+writeFileSync(
+  'src/shapes.generated.ts',
+  `export const logo = ${JSON.stringify(shape)} as const;\n`,
+);
+```
+
 ## Custom animations
 
 A `Brightness` is `(cell: Cell, t: number) => number | boolean`:
@@ -111,32 +167,42 @@ For a progress indicator rather than a loop, pass `progress` (`0`–`1`) to `Dit
 
 ## Performance notes
 
+### Web
+
 - **Sprite-strip cache**: with `cache: 'auto'` (the default), instances at `size <= 120` pre-render every frame of the loop into an offscreen canvas once; steady-state playback then costs a single `drawImage` per frame instead of redrawing every cell.
 - **Pauses automatically** when the tab is hidden (`document.visibilitychange`) or the canvas scrolls out of the viewport (`IntersectionObserver`), and resumes when either condition clears.
 - **`prefers-reduced-motion`**: a single static frame is rendered and the animation loop never starts, unless `respectReducedMotion: false` is set.
 - Frame index is quantized to `frames` steps per `period`, and a repeated frame index is never redrawn.
 
+### React Native
+
+- **Every frame is pre-recorded** as an `SkPicture`, and playback only swaps which recording the canvas draws — from a Reanimated frame callback, so the loop runs entirely on the UI thread with no per-frame JS work and no bridge traffic. `cache` is therefore ignored: pictures are display lists rather than bitmaps, so the memory trade-off that makes pre-rendering optional on the web does not apply.
+- Recordings are in dp. Skia scales to the device pixel ratio itself and the output is vector, so there is nothing to re-record per device.
+- **Pauses automatically** when the app leaves the foreground (`AppState`). There is no `IntersectionObserver` equivalent, so a scrolled-away instance keeps playing — cheaply, on the UI thread.
+- **Reduced motion** comes from Reanimated's `useReducedMotion()`, honoured unless `respectReducedMotion: false` is set.
+- Pass `cells` (from `sampleCells`) to skip the shape hit-test at mount if you are creating many instances of the same shape and grid.
+
 ## API
 
 ### `DitheredOptions`
 
-| Option                 | Type                | Default                   | Description                                                               |
-| ---------------------- | ------------------- | ------------------------- | ------------------------------------------------------------------------- |
-| `shape`                | `Shape`             | —                         | Required. Silhouette to sample cells inside.                              |
-| `brightness`           | `Brightness`        | —                         | Required. Per-cell, per-frame brightness function.                        |
-| `size`                 | `number`            | `48`                      | CSS px height; width follows the shape's aspect ratio.                    |
-| `cols`                 | `number`            | `16`                      | Grid columns.                                                             |
-| `rows`                 | `number`            | derived from aspect ratio | Grid rows.                                                                |
-| `frames`               | `number`            | `48`                      | Frames per loop.                                                          |
-| `period`               | `number`            | `2000`                    | Loop duration, ms.                                                        |
-| `fg`                   | `string`            | `'#000'`                  | Fill color for drawn cells.                                               |
-| `bg`                   | `string`            | `'transparent'`           | Background fill, or `'transparent'`.                                      |
-| `cache`                | `boolean \| 'auto'` | `'auto'`                  | Pre-render the loop into a sprite strip. `'auto'` = on for `size <= 120`. |
-| `paused`               | `boolean`           | `false`                   | Freeze the animation.                                                     |
-| `gap`                  | `number`            | `0.09`                    | Gap between cells, as a fraction of cell size (min 0.6px).                |
-| `radius`               | `number`            | `0.14`                    | Corner radius, as a fraction of cell size.                                |
-| `respectReducedMotion` | `boolean`           | `true`                    | Render a single static frame under `prefers-reduced-motion`.              |
-| `initialFrame`         | `number`            | `0`                       | Frame drawn synchronously on create, so there is no blank flash.          |
+| Option                 | Type                | Default                   | Description                                                                         |
+| ---------------------- | ------------------- | ------------------------- | ----------------------------------------------------------------------------------- |
+| `shape`                | `Shape`             | —                         | Required. Silhouette to sample cells inside.                                        |
+| `brightness`           | `Brightness`        | —                         | Required. Per-cell, per-frame brightness function.                                  |
+| `size`                 | `number`            | `48`                      | Height in CSS px (web) or dp (native); width follows the shape's aspect ratio.      |
+| `cols`                 | `number`            | `16`                      | Grid columns.                                                                       |
+| `rows`                 | `number`            | derived from aspect ratio | Grid rows.                                                                          |
+| `frames`               | `number`            | `48`                      | Frames per loop.                                                                    |
+| `period`               | `number`            | `2000`                    | Loop duration, ms.                                                                  |
+| `fg`                   | `string`            | `'#000'`                  | Fill color for drawn cells.                                                         |
+| `bg`                   | `string`            | `'transparent'`           | Background fill, or `'transparent'`.                                                |
+| `cache`                | `boolean \| 'auto'` | `'auto'`                  | Web only. Pre-render the loop into a sprite strip. `'auto'` = on for `size <= 120`. |
+| `paused`               | `boolean`           | `false`                   | Freeze the animation.                                                               |
+| `gap`                  | `number`            | `0.09`                    | Gap between cells, as a fraction of cell size (min 0.6px).                          |
+| `radius`               | `number`            | `0.14`                    | Corner radius, as a fraction of cell size.                                          |
+| `respectReducedMotion` | `boolean`           | `true`                    | Render a single static frame under `prefers-reduced-motion`.                        |
+| `initialFrame`         | `number`            | `0`                       | Frame drawn synchronously on create, so there is no blank flash.                    |
 
 ### `DitheredInstance`
 
@@ -147,7 +213,34 @@ For a progress indicator rather than a loop, pass `progress` (`0`–`1`) to `Dit
 | `renderFrame(frame: number)`                | Draw a specific frame directly, bypassing the animation loop.                           |
 | `destroy()`                                 | Stop the loop and release all listeners/observers.                                      |
 
-`dithered/react`'s `Dithered` component accepts the same options as props (`shape`/`brightness` still required), plus `label` (accessible label, default `'Loading'`, `''` hides it from assistive tech), `className`, `style`, and `progress` — see [Determinate progress](#determinate-progress) and [React](#quick-start) above.
+`dithered/react`'s `Dithered` component accepts the same options as props (`shape`/`brightness` still required), plus `label` (accessible label, default `'Loading'`, `''` hides it from assistive tech), `className`, `style`, and `progress` — see [Determinate progress](#determinate-progress) and [React](#quick-start) above. `dithered/native`'s takes the same props with `style: StyleProp<ViewStyle>` in place of `className`/`style`, no `cache`, and an extra `cells` — see [React Native](#react-native) above.
+
+### Sampling
+
+`sampleCells(shape, cols, hitTest, rows?)` returns the cells inside a shape. The point-in-path test is injected because no platform provides one portably: use `domHitTester(shape, ctx?)` from `dithered` (backed by `Path2D`) or `skiaHitTester(shape)` from `dithered/native` (backed by `SkPath.contains`).
+
+```ts
+import { sampleCells, domHitTester, shapes } from 'dithered';
+
+const cells = sampleCells(shapes.heart, 16, domHitTester(shapes.heart));
+```
+
+## Repository layout
+
+This repo is a pnpm workspace:
+
+| Package                    | What it is                                                              |
+| -------------------------- | ----------------------------------------------------------------------- |
+| `packages/dithered`        | the published library                                                   |
+| `packages/playground-web`  | the Vite demo behind the [live demo](https://v3ron.github.io/dithered/) |
+| `packages/playground-expo` | an Expo app exercising `dithered/native` on device                      |
+
+```sh
+pnpm install
+pnpm dev                              # web playground
+pnpm test                             # library test suite
+pnpm --filter playground-expo start   # Expo playground (builds the library first)
+```
 
 ## License
 

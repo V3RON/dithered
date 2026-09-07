@@ -22,6 +22,17 @@ export interface Cell {
   threshold: number;
 }
 
+/**
+ * Tests whether a point, in a shape's own viewBox units, falls inside its
+ * silhouette. This is the one piece of shape sampling that no platform
+ * can provide portably — the browser has `Path2D` + `isPointInPath`,
+ * React Native has Skia's `SkPath.contains` — so it is injected rather
+ * than assumed.
+ *
+ * @see `domHitTester` in `dithered` and `skiaHitTester` in `dithered/native`.
+ */
+export type HitTester = (x: number, y: number) => boolean;
+
 /** Classic 4x4 Bayer ordered-dither matrix. */
 export const BAYER_4: readonly (readonly number[])[] = [
   [0, 8, 2, 10],
@@ -35,22 +46,24 @@ export function aspectOf(shape: Shape): number {
   return shape.viewBox.width / shape.viewBox.height;
 }
 
+/** The row count that keeps cells roughly square for `cols` columns. */
+export function defaultRowsFor(shape: Shape, cols: number): number {
+  return Math.max(1, Math.round(cols / aspectOf(shape)));
+}
+
 /**
  * Samples a `cols` x `rows` grid of cell centres over `shape`'s viewBox,
- * keeping only the cells whose centre falls inside the shape's path.
+ * keeping only the cells whose centre `hitTest` accepts.
  *
  * `rows` defaults to a value that keeps cells roughly square given the
- * shape's aspect ratio. A `CanvasRenderingContext2D` is used to test
- * point-in-path; if none is supplied, a throwaway canvas is created.
+ * shape's aspect ratio.
  */
 export function sampleCells(
   shape: Shape,
   cols: number,
-  rows: number = Math.max(1, Math.round(cols / aspectOf(shape))),
-  ctx?: CanvasRenderingContext2D,
+  hitTest: HitTester,
+  rows: number = defaultRowsFor(shape, cols),
 ): Cell[] {
-  const context = ctx ?? createScratchContext();
-  const path = new Path2D(shape.path);
   const { x, y, width, height } = shape.viewBox;
 
   const cells: Cell[] = [];
@@ -58,7 +71,7 @@ export function sampleCells(
     for (let i = 0; i < cols; i++) {
       const px = x + ((i + 0.5) / cols) * width;
       const py = y + ((j + 0.5) / rows) * height;
-      if (context.isPointInPath(path, px, py)) {
+      if (hitTest(px, py)) {
         cells.push({
           i,
           j,
@@ -70,13 +83,4 @@ export function sampleCells(
     }
   }
   return cells;
-}
-
-function createScratchContext(): CanvasRenderingContext2D {
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
-    throw new Error('dithered: unable to create a 2D canvas context for sampling.');
-  }
-  return ctx;
 }

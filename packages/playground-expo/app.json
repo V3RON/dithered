@@ -1,0 +1,17 @@
+{
+  "expo": {
+    "name": "dithered playground",
+    "slug": "dithered-playground",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "dev.dithered.playground"
+    },
+    "android": {
+      "package": "dev.dithered.playground"
+    }
+  }
+}
