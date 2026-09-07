@@ -6,7 +6,7 @@
  * Nothing here is reachable from `dithered` or `dithered/react`, so web
  * consumers never resolve a native module.
  */
-export type { Shape, Cell, HitTester } from './shape';
+export type { Shape, Cell, FillRule, HitTester } from './shape';
 export { BAYER_4, aspectOf, defaultRowsFor, sampleCells } from './shape';
 export { hash, valueNoise, fbm } from './noise';
 export type { Brightness, DitheredOptions, PaintContext, PaintGeometry, Palette } from './core';
@@ -31,6 +31,8 @@ export {
   resolveMatrix,
   thresholdFor,
 } from './matrix';
+export type { PathSegment } from './core';
+export { arcToCubics, parsePath, serializePath, toAbsolute, transformSegments } from './core';
 export { presets, gem, sweep, pulse, rain, wave, fill, gameOfLife } from './presets';
 export type { MixAmount, CellPredicate } from './compose';
 export { compose, blend, mask, timeScale, reverse, offset, invert, clamp } from './compose';

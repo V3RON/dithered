@@ -27,3 +27,11 @@ export {
   resolveMatrix,
   thresholdFor,
 } from '../matrix';
+export type { PathSegment } from './path';
+export { arcToCubics, parsePath, serializePath, toAbsolute, transformSegments } from './path';
+export type { Matrix } from './transform';
+export { IDENTITY, apply, isIdentity, multiply, parseTransform } from './transform';
+export type { AttrGetter } from './svg-shapes';
+export { basicShapeToPath } from './svg-shapes';
+export type { SvgNode } from './svg-tree';
+export { collectGeometry } from './svg-tree';

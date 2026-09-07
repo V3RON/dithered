@@ -1,15 +1,23 @@
+import { collectGeometry, type SvgNode } from './core/svg-tree';
 import type { Shape } from './shape';
 
 /**
  * Builds a {@link Shape} from an SVG document: reads the root `viewBox`
- * attribute and concatenates the `d` attribute of every `<path>`
- * descendant into a single path string.
+ * attribute, then walks the tree collecting geometry in document order —
+ * `<path>` verbatim, `<rect>` (including `rx`/`ry`), `<circle>`,
+ * `<ellipse>`, `<polygon>` and `<polyline>` converted to path data — and
+ * concatenates it all into one path string.
  *
- * Concatenation assumes each `<path>`'s `d` starts with an absolute
- * moveto (`M`/`m`), which is how SVG authoring tools normally emit
- * paths — joining such strings with whitespace produces one valid
- * multi-subpath `d`. Only `<path>` elements are read; other shape
- * elements (`<circle>`, `<rect>`, `<polygon>`, ...) are ignored for now.
+ * `transform` on an element or an ancestor `<g>` is composed and baked
+ * into that element's coordinates. `<defs>`, `<clipPath>`, `<mask>` and
+ * similar non-rendered containers are skipped, as is anything hidden via
+ * `display="none"` or paint-invisible (`fill="none"` with no stroke).
+ * `fill-rule="evenodd"` is carried onto the resulting `Shape` when every
+ * contributing element agrees on it; a document that mixes the two rules
+ * throws, since one `Shape` can't represent both.
+ *
+ * `<use>`, `<text>` and `<image>` are not supported — see `svg-tree.ts`
+ * for the full set of rules, shared verbatim with `shapeFromSvgLite`.
  *
  * @param svg An SVG source string, or an already-parsed `<svg>` element.
  */
@@ -29,19 +37,26 @@ export function shapeFromSvg(svg: string | SVGSVGElement): Shape {
   }
   const [x, y, width, height] = parts as [number, number, number, number];
 
-  const pathEls = root.querySelectorAll('path');
-  const path = Array.from(pathEls)
-    .map((el) => el.getAttribute('d') ?? '')
-    .filter((d) => d.length > 0)
-    .join(' ');
+  const { path, fillRule } = collectGeometry(new DomSvgNode(root), 'shapeFromSvg');
 
-  if (!path) {
-    throw new Error(
-      'shapeFromSvg: no <path> elements with a `d` attribute were found (only <path> is supported).',
-    );
+  return { path, viewBox: { x, y, width, height }, ...(fillRule ? { fillRule } : {}) };
+}
+
+/** Adapts a DOM `Element` to the parser-agnostic {@link SvgNode} `collectGeometry` walks. */
+class DomSvgNode implements SvgNode {
+  constructor(private readonly el: Element) {}
+
+  get tag(): string {
+    return this.el.localName.toLowerCase();
   }
 
-  return { path, viewBox: { x, y, width, height } };
+  attr(name: string): string | null {
+    return this.el.getAttribute(name);
+  }
+
+  get children(): readonly SvgNode[] {
+    return Array.from(this.el.children).map((child) => new DomSvgNode(child));
+  }
 }
 
 function parseSvgString(svg: string): SVGSVGElement {

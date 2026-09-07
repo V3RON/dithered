@@ -85,9 +85,48 @@ describe('shapeFromSvgLite', () => {
     );
   });
 
-  it('throws a clear error when no <path> elements are found', () => {
+  it('throws a clear error when no drawable geometry is found', () => {
+    // <rect> is itself supported (see svg-fixtures.test.ts); wrapping it in
+    // <defs> is what makes this document empty of drawable geometry.
     expect(() =>
-      shapeFromSvgLite('<svg viewBox="0 0 10 10"><rect width="10" height="10"/></svg>'),
+      shapeFromSvgLite(
+        '<svg viewBox="0 0 10 10"><defs><rect width="10" height="10"/></defs></svg>',
+      ),
     ).toThrow(/path/i);
+  });
+
+  it('converts a <rect> with rx/ry, and bakes an ancestor <g transform>', () => {
+    const svg =
+      '<svg viewBox="0 0 100 100"><g transform="translate(10 10)"><rect width="20" height="20" /></g></svg>';
+    // H/V fold into L once a transform is baked (toAbsolute normalizes to L before transforming).
+    expect(shapeFromSvgLite(svg).path).toBe('M 10 10 L 30 10 L 30 30 L 10 30 Z');
+  });
+
+  it('sets fillRule when every contributing element declares evenodd', () => {
+    const svg = '<svg viewBox="0 0 10 10"><path fill-rule="evenodd" d="M0 0 Z" /></svg>';
+    expect(shapeFromSvgLite(svg).fillRule).toBe('evenodd');
+  });
+
+  it('omits fillRule when the document only uses the default (nonzero) rule', () => {
+    expect(shapeFromSvgLite(TWO_PATH_SVG).fillRule).toBeUndefined();
+  });
+
+  it('throws when fill-rule disagrees across contributing elements', () => {
+    const svg =
+      '<svg viewBox="0 0 10 10"><path fill-rule="nonzero" d="M0 0 Z" />' +
+      '<path fill-rule="evenodd" d="M1 1 Z" /></svg>';
+    expect(() => shapeFromSvgLite(svg)).toThrow(/fill-rule/i);
+  });
+
+  it('throws the <use>/<text>-specific message when that is all the geometry there is', () => {
+    const svg = '<svg viewBox="0 0 10 10"><text x="0" y="0">hi</text></svg>';
+    expect(() => shapeFromSvgLite(svg)).toThrow(/<text>/);
+    expect(() => shapeFromSvgLite(svg)).not.toThrow(/no drawable geometry/i);
+  });
+
+  it('throws the generic empty-document message for a truly empty <svg>', () => {
+    expect(() => shapeFromSvgLite('<svg viewBox="0 0 10 10"></svg>')).toThrow(
+      /no drawable geometry/i,
+    );
   });
 });
