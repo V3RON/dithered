@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { jsHitTester } from './core/path-hit-test';
 import { BAYER_4, aspectOf, defaultRowsFor, sampleCells, type Shape } from './shape';
 import { BLUE_NOISE_16, resolveMatrix } from './matrix';
 import { rozenite } from './shapes';
@@ -290,5 +291,15 @@ describe('sampleCells with a matrix argument', () => {
       [1, 2],
     ];
     expect(() => sampleCells(SQUARE, 4, ACCEPT_ALL, 4, ragged)).toThrow(/ragged/);
+  });
+});
+
+describe('sampleCells default hitTest', () => {
+  it('omitting hitTest is equivalent to passing jsHitTester(shape) explicitly', () => {
+    expect(sampleCells(SQUARE, 16)).toEqual(sampleCells(SQUARE, 16, jsHitTester(SQUARE)));
+  });
+
+  it('still honours an explicitly passed hitTest (a tester rejecting everything samples nothing)', () => {
+    expect(sampleCells(SQUARE, 16, () => false)).toEqual([]);
   });
 });

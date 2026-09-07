@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import { createRef } from 'react';
+import { renderToString } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Dithered } from './react';
 import type { DitheredInstance } from './renderer';
@@ -340,5 +341,66 @@ describe('Dithered', () => {
       expect.anything(),
       expect.objectContaining({ fg: palette }),
     );
+  });
+});
+
+describe('Dithered SSR fallback', () => {
+  let env: ReturnType<typeof stubAnimationGlobals>;
+  let getContextStub: ReturnType<typeof stubGetContext>;
+
+  beforeEach(() => {
+    mockedCreateDithered.mockClear();
+    env = stubAnimationGlobals();
+    getContextStub = stubGetContext(make2dCtx());
+  });
+
+  afterEach(() => {
+    env.restore();
+    getContextStub.restore();
+  });
+
+  it('renderToString includes a non-blank background-image data URL fallback', () => {
+    const html = renderToString(<Dithered shape={SQUARE_SHAPE} brightness={() => true} />);
+
+    expect(html).toContain('<canvas');
+    expect(html).toMatch(/background-image:\s*url\(data:image\/svg\+xml;utf8,/);
+  });
+
+  it('ssrFallback={false} omits the background-image', () => {
+    const html = renderToString(
+      <Dithered shape={SQUARE_SHAPE} brightness={() => true} ssrFallback={false} />,
+    );
+
+    expect(html).not.toContain('background-image');
+  });
+
+  it('the background-image is gone once the component has mounted', () => {
+    render(<Dithered shape={SQUARE_SHAPE} brightness={() => true} />);
+    const canvas = document.querySelector('canvas')!;
+
+    expect(canvas.style.backgroundImage).toBe('');
+  });
+
+  it('hydrating the server-rendered markup logs no hydration mismatch warning', () => {
+    const html = renderToString(<Dithered shape={SQUARE_SHAPE} brightness={() => true} />);
+    const container = document.createElement('div');
+    container.innerHTML = html;
+    document.body.appendChild(container);
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      // RTL's `hydrate` option drives `hydrateRoot` wrapped in `act()`, so
+      // passive effects (the mount effect that clears the fallback) flush
+      // synchronously within this test rather than after teardown.
+      render(<Dithered shape={SQUARE_SHAPE} brightness={() => true} />, {
+        container,
+        hydrate: true,
+      });
+      const messages = errorSpy.mock.calls.map((args) => String(args[0]));
+      expect(messages.filter((m) => /did not match|hydrat/i.test(m))).toEqual([]);
+    } finally {
+      errorSpy.mockRestore();
+      container.remove();
+    }
   });
 });

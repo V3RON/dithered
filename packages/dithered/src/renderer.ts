@@ -16,7 +16,6 @@ import {
   type Palette,
   type ResolvedOptions,
 } from './core';
-import { domHitTester } from './hit-test';
 import { sampleCells, type Cell } from './shape';
 
 // Re-exported so `dithered`'s public surface (and the deep import
@@ -175,13 +174,7 @@ export function createDithered(
     // running it before the throw would poison `paintOpts` with that
     // candidate and leave it poisoned even after `update()` rolls `opts`
     // back, since only `opts` is restored on catch.
-    const newCells = sampleCells(
-      opts.shape,
-      opts.cols,
-      domHitTester(opts.shape, ctx),
-      resolveRows(opts),
-      opts.matrix,
-    );
+    const newCells = sampleCells(opts.shape, opts.cols, opts.hitTest, resolveRows(opts), opts.matrix);
     applyResolvedFg();
 
     canvas.style.width = css.width + 'px';

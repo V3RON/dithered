@@ -280,6 +280,57 @@ For a progress indicator rather than a loop, pass `progress` (`0`–`1`) to `Dit
 <Dithered shape={shapes.square} brightness={presets.fill()} progress={downloadedFraction} />
 ```
 
+## Static rendering
+
+`renderToSvg` and `renderToDataURL` render a single frame to an SVG string (or a `data:image/svg+xml` URL) with no DOM, canvas or Skia — they run under plain Node, in a Web Worker, or on an edge runtime. They draw through the same `paintFrame` the live canvas/Skia renderers use, so static output cannot drift from what a mounted `<Dithered>` shows:
+
+```ts
+import { renderToSvg, renderToDataURL, shapes, presets } from 'dithered';
+
+const svg = renderToSvg({
+  shape: shapes.rozenite,
+  brightness: presets.gem(),
+  fg: '#8232ff',
+  cols: 16,
+});
+
+const dataUrl = renderToDataURL({ shape: shapes.heart, brightness: presets.pulse(), frame: 12 });
+```
+
+Both take the same `DitheredOptions` as `createDithered`/`<Dithered>`, plus:
+
+| Option      | Type     | Default | Description                                                          |
+| ----------- | -------- | ------- | -------------------------------------------------------------------- |
+| `frame`     | `number` | `0`     | Frame index to render, taken modulo `frames`.                        |
+| `precision` | `number` | `3`     | Decimal places in emitted coordinates.                               |
+| `title`     | `string` | —       | Emitted as `<title>`, for accessible inline SVG. Omitted when unset. |
+
+The `viewBox` is `0 0 W H`, where `W`/`H` are the same CSS-pixel size (`surfaceSize` at `devicePixelRatio` 1) the canvas renderer draws at — output is both resolution independent and byte-comparable with the live canvas.
+
+### Use a frame as a favicon
+
+```ts
+import { renderToDataURL, shapes, presets } from 'dithered';
+
+const link = document.createElement('link');
+link.rel = 'icon';
+link.href = renderToDataURL({
+  shape: shapes.rozenite,
+  brightness: presets.pulse(),
+  size: 32,
+  cols: 12,
+});
+document.head.appendChild(link);
+```
+
+### Determinism: `jsHitTester`
+
+Sampling which cells fall inside a shape needs a point-in-path test, and `Path2D`/Skia don't have to agree with each other at a cell centre that lands within a fraction of a pixel of the silhouette edge. `jsHitTester(shape, options?)` is a pure-JS, dependency-free point-in-path test (parses the path's `d` string, flattens curves adaptively, then does scanline point-in-polygon) that answers identically everywhere, so it is the **default** hit tester for `sampleCells`, `createDithered`, `<Dithered>` (web and native) and static rendering alike — canvas playback, Skia playback and server-rendered SVG all sample the same cells from the same code. `domHitTester`/`skiaHitTester` remain available as an explicit `hitTest` option for callers who specifically want canvas/Skia rasterization instead. `jsHitTester` defaults to the `'nonzero'` fill rule (matching `Path2D`/Skia's own default); pass `{ fillRule: 'evenodd' }` for shapes authored that way.
+
+### SSR fallback
+
+`dithered/react`'s `<Dithered>` renders the `initialFrame` SVG as a `background-image` data URL (with matching CSS width/height) on the `<canvas>` until the component has mounted and painted for real, so server-rendered HTML shows the shape instead of a blank canvas. Opt out with `ssrFallback={false}`.
+
 ## Performance notes
 
 ### Web
@@ -319,6 +370,7 @@ For a progress indicator rather than a loop, pass `progress` (`0`–`1`) to `Dit
 | `radius`               | `number`                      | `0.14`                    | Corner radius, as a fraction of cell size.                                               |
 | `respectReducedMotion` | `boolean`                     | `true`                    | Render a single static frame under `prefers-reduced-motion`.                             |
 | `initialFrame`         | `number`                      | `0`                       | Frame drawn synchronously on create, so there is no blank flash.                         |
+| `hitTest`              | `HitTester`                   | `jsHitTester(shape)`      | Point-in-path test used to sample cells. See [Determinism](#determinism-jshittester).    |
 
 ### `DitheredInstance`
 
@@ -330,16 +382,16 @@ For a progress indicator rather than a loop, pass `progress` (`0`–`1`) to `Dit
 | `refreshColors()`                           | Re-resolve `'currentColor'` in `fg` and repaint if it changed. Web only — see [Palettes](#palettes). |
 | `destroy()`                                 | Stop the loop and release all listeners/observers.                                                   |
 
-`dithered/react`'s `Dithered` component accepts the same options as props (`shape`/`brightness` still required), plus `label` (accessible label, default `'Loading'`, `''` hides it from assistive tech), `className`, `style`, `progress`, and `instanceRef` (a `Ref<DitheredInstance | null>`, populated on mount and cleared on unmount — an escape hatch onto the instance, e.g. for calling `refreshColors()`; the regular `ref` keeps forwarding the canvas element, unchanged) — see [Determinate progress](#determinate-progress) and [React](#quick-start) above. `dithered/react-native`'s takes the same props with `style: StyleProp<ViewStyle>` in place of `className`/`style`, no `cache`, and an extra `cells` — see [React Native](#react-native) above.
+`dithered/react`'s `Dithered` component accepts the same options as props (`shape`/`brightness` still required, `hitTest` not exposed as a prop), plus `label` (accessible label, default `'Loading'`, `''` hides it from assistive tech), `className`, `style`, `progress`, `ssrFallback` (default `true`), and `instanceRef` (a `Ref<DitheredInstance | null>`, populated on mount and cleared on unmount — an escape hatch onto the instance, e.g. for calling `refreshColors()`; the regular `ref` keeps forwarding the canvas element, unchanged) — see [Determinate progress](#determinate-progress), [SSR fallback](#ssr-fallback) and [React](#quick-start) above. `dithered/react-native`'s takes the same props with `style: StyleProp<ViewStyle>` in place of `className`/`style`, no `cache`, and an extra `cells` — see [React Native](#react-native) above.
 
 ### Sampling
 
-`sampleCells(shape, cols, hitTest, rows?, matrix?)` returns the cells inside a shape. The point-in-path test is injected because no platform provides one portably: use `domHitTester(shape, ctx?)` from `dithered` (backed by `Path2D`) or `skiaHitTester(shape)` from `dithered/react-native` (backed by `SkPath.contains`). `matrix` defaults to `'bayer4'` and picks the dither threshold pattern — see [Dither matrices](#dither-matrices).
+`sampleCells(shape, cols, hitTest?, rows?, matrix?)` returns the cells inside a shape. `hitTest` defaults to `jsHitTester(shape)` (pure JS, no DOM or Skia — see [Determinism](#determinism-jshittester) above); pass `domHitTester(shape, ctx?)` from `dithered` (backed by `Path2D`) or `skiaHitTester(shape)` from `dithered/react-native` (backed by `SkPath.contains`) to sample against canvas/Skia rasterization instead. `matrix` defaults to `'bayer4'` and picks the dither threshold pattern — see [Dither matrices](#dither-matrices).
 
 ```ts
-import { sampleCells, domHitTester, shapes } from 'dithered';
+import { sampleCells, jsHitTester, shapes } from 'dithered';
 
-const cells = sampleCells(shapes.heart, 16, domHitTester(shapes.heart));
+const cells = sampleCells(shapes.heart, 16); // same as sampleCells(shapes.heart, 16, jsHitTester(shapes.heart))
 ```
 
 ## Dither matrices

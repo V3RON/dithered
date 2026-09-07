@@ -1,6 +1,6 @@
-import { forwardRef, useEffect, useRef } from 'react';
+import { forwardRef, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, MutableRefObject, Ref } from 'react';
-import { hasCurrentColor, toPalette } from './core';
+import { hasCurrentColor, renderToDataURL, resolveOptions, surfaceSize, toPalette } from './core';
 import { gem } from './presets';
 import { createDithered } from './renderer';
 import type { Brightness, DitheredInstance, DitheredOptions } from './renderer';
@@ -15,6 +15,10 @@ export { domHitTester } from './hit-test';
 export { hash, valueNoise, fbm } from './noise';
 export type { Brightness, DitheredOptions, PaintContext, PaintGeometry } from './core';
 export { computeGeometry, frameAt, paintFrame, resolveOptions, resolveRows } from './core';
+export type { JsHitTesterOptions } from './core';
+export { jsHitTester, pointInPolygons } from './core';
+export type { RenderToSvgOptions } from './core';
+export { renderToDataURL, renderToSvg } from './core';
 export type { DitheredInstance } from './renderer';
 export { createDithered } from './renderer';
 export { presets, gem, sweep, pulse, rain, wave, fill, gameOfLife } from './presets';
@@ -24,7 +28,7 @@ export { shapeFromSvgLite } from './svg-lite';
 export type { MixAmount, CellPredicate } from './compose';
 export { compose, blend, mask, timeScale, reverse, offset, invert, clamp } from './compose';
 
-export interface DitheredProps extends Omit<DitheredOptions, 'brightness' | 'shape'> {
+export interface DitheredProps extends Omit<DitheredOptions, 'brightness' | 'shape' | 'hitTest'> {
   shape: Shape;
   /** Per-cell, per-frame brightness. Default `presets.gem()`. */
   brightness?: Brightness;
@@ -48,6 +52,15 @@ export interface DitheredProps extends Omit<DitheredOptions, 'brightness' | 'sha
    * the README).
    */
   instanceRef?: Ref<DitheredInstance | null>;
+  /**
+   * Render the `initialFrame` SVG as a `background-image` (with matching
+   * CSS width/height) until the first client render has painted, so
+   * server-rendered HTML shows the shape instead of a blank canvas. The
+   * data URL is computed in a `useMemo` that is only entered while the
+   * fallback is live, so a mounted component never pays for it. Default
+   * true.
+   */
+  ssrFallback?: boolean;
 }
 
 // Stable across renders so an un-memoized caller (the common case: nobody
@@ -132,6 +145,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     className,
     style,
     instanceRef: instanceRefProp,
+    ssrFallback = true,
   },
   forwardedRef,
 ) {
@@ -142,6 +156,58 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
 
   // Stabilized by value, not identity — see `useStablePalette`.
   const fg = useStablePalette(fgProp);
+
+  // Starts equal to `ssrFallback` on both server and client, so the first
+  // client render's markup matches the server's exactly (no hydration
+  // mismatch); an effect below then drops it once `createDithered` has
+  // painted the real canvas.
+  const [showFallback, setShowFallback] = useState(ssrFallback);
+
+  useEffect(() => {
+    setShowFallback(false);
+  }, []);
+
+  // Width/height are cheap and kept in the style object for as long as
+  // `ssrFallback` is true (even after the fallback image itself is
+  // dropped), so a later re-render never has React clear a size that
+  // `createDithered` already set imperatively on the same element.
+  const fallbackStyle = useMemo((): CSSProperties | undefined => {
+    if (!ssrFallback) return undefined;
+    const resolved = resolveOptions({ shape, brightness, size });
+    const { width, height } = surfaceSize(resolved);
+    if (!showFallback) return { width, height };
+    const dataUrl = renderToDataURL({
+      shape,
+      brightness,
+      size,
+      cols,
+      rows,
+      matrix,
+      frames,
+      fg,
+      bg,
+      gap,
+      radius,
+      frame: initialFrame,
+    });
+    return { width, height, backgroundImage: `url(${dataUrl})`, backgroundSize: '100% 100%' };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    ssrFallback,
+    showFallback,
+    shape,
+    brightness,
+    size,
+    cols,
+    rows,
+    matrix,
+    frames,
+    fg,
+    bg,
+    gap,
+    radius,
+    initialFrame,
+  ]);
 
   // Mount/unmount only. Re-creating the instance on every prop change
   // would throw away its cache/animation state for no benefit — that's
@@ -273,7 +339,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     <canvas
       ref={mergeRefs(canvasRef, forwardedRef)}
       className={className}
-      style={{ imageRendering: 'pixelated', ...style }}
+      style={{ imageRendering: 'pixelated', ...fallbackStyle, ...style }}
       role={label ? 'status' : undefined}
       aria-label={label || undefined}
       aria-hidden={label ? undefined : true}
