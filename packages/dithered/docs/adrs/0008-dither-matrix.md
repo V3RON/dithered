@@ -213,6 +213,33 @@ offending coordinates named, never once per cell:
 The ragged case is called out in the PRD's acceptance criteria, so it
 gets a message naming both the offending row and the expected width.
 
+`resolveMatrix` also accepts a `ResolvedMatrix` — that is what lets a
+caller resolve once and pass the result to `thresholdFor` per cell. Since
+`ResolvedMatrix` is exported, a caller can hand-build one rather than
+getting it from `resolveMatrix`, so recognition is **structural**, not
+brand-based: an object carrying `width`, `height` and `thresholds` is
+diagnosed _as a resolved matrix_ and validated on the same terms as any
+other input, then returned branded and defensively copied. Gating the
+pass-through on the private brand alone would make a value the signature
+advertises fail with a message about malformed 2D arrays, which is worse
+than no error at all. A structurally-invalid one gets its own errors:
+
+| Condition              | Message                                                                       |
+| ---------------------- | ----------------------------------------------------------------------------- |
+| bad `width` / `height` | `dithered: resolved matrix width must be a positive integer, got 0.`          |
+| row count mismatch     | `dithered: resolved matrix declares height 3 but thresholds has 2 rows.`      |
+| row width mismatch     | `dithered: resolved matrix declares width 2 but thresholds[0] has 3 entries.` |
+| non-finite threshold   | `dithered: resolved matrix thresholds[1][0] is not a finite number.`          |
+| threshold out of range | `dithered: resolved matrix thresholds[0][0] is 5, outside the range 0..1.`    |
+
+That last row matters more than it looks. `ResolvedMatrix.thresholds`
+holds _thresholds_, not ranks, so `{ width: 4, height: 4, thresholds:
+BAYER_4 }` is a plausible thing to write and it typechecks — and without
+a range check it would be accepted verbatim, giving every cell a
+threshold of 0.5 to 15.5 and drawing essentially nothing, silently. The
+range check turns the ADR's own "wrong in a way no error message would
+ever surface" failure mode into a loud one.
+
 ### Plumbing
 
 - `sampleCells(shape, cols, hitTest, rows?, matrix?)` — a fifth optional
@@ -225,6 +252,15 @@ gets a message naming both the offending row and the expected width.
   so passing `opts.matrix` into `sampleCells` is the whole change there —
   `update({ matrix })` resamples and rebuilds the sprite strip on the
   same path as `update({ cols })`.
+- **A rejected `update()` leaves the instance untouched.** Validation now
+  throws from `configure()`, and `update()` merges the patch into the
+  live options before calling it — so without care an invalid `matrix`
+  would commit the whole patch, halt the loop, and then re-throw on every
+  later `update()`, bricking the instance for good. `configure()`
+  therefore resamples (the step that can throw) before mutating anything,
+  and `update()` applies the merged options as a candidate it reverts on
+  failure. The error still propagates; the instance keeps its options,
+  its surface and its running loop.
 - `dithered/react` forwards `matrix` in the create effect, in the
   `update()` effect's payload **and in that effect's dependency array**.
   Omitting the dep is the failure mode that makes `update({ matrix })`
