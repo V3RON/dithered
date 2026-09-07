@@ -50,3 +50,4 @@ export type { SvgPaintContext } from './svg-paint';
 export { escapeXml, formatNumber, svgPaintContext } from './svg-paint';
 export type { RenderToSvgOptions } from './static';
 export { renderToDataURL, renderToSvg } from './static';
+export { advancePhase, frameForPhase, loopsAt, wrapPhase } from './clock';

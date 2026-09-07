@@ -159,17 +159,98 @@ describe('Dithered', () => {
     expect(setPausedSpy).toHaveBeenCalledWith(false);
   });
 
-  it('progress={0.5} pauses and renders the expected frame index (default frames=48)', () => {
+  it('progress={0.5} pauses and drives the expected phase (default frames=48)', () => {
     const { rerender } = render(<Dithered shape={SQUARE_SHAPE} />);
     const instance = lastInstance();
     const setPausedSpy = vi.spyOn(instance, 'setPaused');
-    const renderFrameSpy = vi.spyOn(instance, 'renderFrame');
+    const setTimeSpy = vi.spyOn(instance, 'setTime');
 
     rerender(<Dithered shape={SQUARE_SHAPE} progress={0.5} />);
 
     expect(setPausedSpy).toHaveBeenCalledWith(true);
-    // round(0.5 * (48 - 1)) = round(23.5) = 24
-    expect(renderFrameSpy).toHaveBeenCalledWith(24);
+    // progress is sugar over setTime: 0.5 * (48 - 1) / 48 -> frame floor(...) = 23,
+    // one lower than the old round-based mapping (frame 24) — see ADR 0006 §8.
+    expect(setTimeSpy).toHaveBeenCalledWith((0.5 * 47) / 48);
+  });
+
+  it('progress endpoints 0 and 1 map to frame 0 and frame frames - 1', () => {
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} frames={10} />);
+    const instance = lastInstance();
+    const setTimeSpy = vi.spyOn(instance, 'setTime');
+
+    rerender(<Dithered shape={SQUARE_SHAPE} frames={10} progress={0} />);
+    expect(setTimeSpy).toHaveBeenLastCalledWith(0);
+
+    rerender(<Dithered shape={SQUARE_SHAPE} frames={10} progress={1} />);
+    expect(setTimeSpy).toHaveBeenLastCalledWith(0.9);
+  });
+
+  it('time takes precedence over progress when both are set', () => {
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} progress={0.5} />);
+    const instance = lastInstance();
+    const setTimeSpy = vi.spyOn(instance, 'setTime');
+
+    rerender(<Dithered shape={SQUARE_SHAPE} progress={0.5} time={0.2} />);
+
+    expect(setTimeSpy).toHaveBeenCalledWith(0.2);
+    expect(setTimeSpy).not.toHaveBeenCalledWith((0.5 * 47) / 48);
+  });
+
+  it('time renders the matching frame and pauses the loop, then clearTime resumes on removal', () => {
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} />);
+    const instance = lastInstance();
+    const setTimeSpy = vi.spyOn(instance, 'setTime');
+    const clearTimeSpy = vi.spyOn(instance, 'clearTime');
+
+    rerender(<Dithered shape={SQUARE_SHAPE} time={0.35} />);
+    expect(setTimeSpy).toHaveBeenCalledWith(0.35);
+
+    rerender(<Dithered shape={SQUARE_SHAPE} />);
+    expect(clearTimeSpy).toHaveBeenCalled();
+  });
+
+  it('time changing does not trigger update() (no reconfigure)', () => {
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} time={0} />);
+    const instance = lastInstance();
+    const updateSpy = vi.spyOn(instance, 'update');
+
+    rerender(<Dithered shape={SQUARE_SHAPE} time={0.1} />);
+    rerender(<Dithered shape={SQUARE_SHAPE} time={0.2} />);
+
+    expect(updateSpy).not.toHaveBeenCalled();
+    expect(mockedCreateDithered).toHaveBeenCalledTimes(1);
+  });
+
+  it('speed forwards to the instance via update() without recreating it', () => {
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} speed={1} />);
+    const instance = lastInstance();
+    const updateSpy = vi.spyOn(instance, 'update');
+
+    rerender(<Dithered shape={SQUARE_SHAPE} speed={2} />);
+
+    expect(updateSpy).toHaveBeenCalledWith(expect.objectContaining({ speed: 2 }));
+    expect(mockedCreateDithered).toHaveBeenCalledTimes(1);
+  });
+
+  it('an inline onFrame that changes identity every render never triggers update(), and the latest callback is invoked', () => {
+    let latestReported = -1;
+    const { rerender } = render(
+      <Dithered shape={SQUARE_SHAPE} onFrame={() => (latestReported = -2)} />,
+    );
+    const instance = lastInstance();
+    const updateSpy = vi.spyOn(instance, 'update');
+
+    // A fresh arrow function every render — the common, unmemoized case.
+    rerender(<Dithered shape={SQUARE_SHAPE} onFrame={(f) => (latestReported = f)} />);
+    rerender(<Dithered shape={SQUARE_SHAPE} onFrame={(f) => (latestReported = f)} />);
+
+    expect(updateSpy).not.toHaveBeenCalled();
+
+    // Directly exercise the trampoline `createDithered` was actually
+    // constructed with, simulating the core reporting a painted frame.
+    const optionsPassed = mockedCreateDithered.mock.calls[0]![1];
+    optionsPassed.onFrame?.(7, 0.5);
+    expect(latestReported).toBe(7); // the *latest* render's callback ran, not the first's
   });
 
   it('does not recreate the instance when only progress changes', () => {

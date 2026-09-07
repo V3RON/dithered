@@ -423,6 +423,8 @@ export interface PlaygroundState {
   setMatrix: (matrix: Extract<DitherMatrix, string>) => void;
   period: number;
   setPeriod: (period: number) => void;
+  speed: number;
+  setSpeed: (speed: number) => void;
   noiseAmt: number;
   setNoiseAmt: (n: number) => void;
   golSeed: number;
@@ -450,6 +452,8 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
     setMatrix,
     period,
     setPeriod,
+    speed,
+    setSpeed,
     noiseAmt,
     setNoiseAmt,
     golSeed,
@@ -540,6 +544,7 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
         cols,
         matrix,
         period,
+        speed,
       }),
     [
       isCustomShape,
@@ -554,6 +559,7 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
       cols,
       matrix,
       period,
+      speed,
     ],
   );
 
@@ -581,6 +587,7 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
             cols={cols}
             matrix={matrix}
             period={period}
+            speed={speed}
             label="Preview"
           />
         </div>
@@ -730,7 +737,7 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
                 </select>
               </label>
               <label style={row}>
-                <span style={label}>Speed: {period}ms per loop</span>
+                <span style={label}>Loop duration: {period}ms</span>
                 <input
                   type="range"
                   min={200}
@@ -738,6 +745,17 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
                   step={100}
                   value={period}
                   onChange={(e) => setPeriod(Number(e.target.value))}
+                />
+              </label>
+              <label style={row}>
+                <span style={label}>Playback speed: {speed.toFixed(1)}x</span>
+                <input
+                  type="range"
+                  min={-3}
+                  max={3}
+                  step={0.1}
+                  value={speed}
+                  onChange={(e) => setSpeed(Number(e.target.value))}
                 />
               </label>
               {presetKey === 'gem' && (
@@ -806,6 +824,7 @@ function buildSnippet(opts: {
   cols: number;
   matrix: Extract<DitherMatrix, string>;
   period: number;
+  speed: number;
 }): string {
   const {
     isCustomShape,
@@ -820,6 +839,7 @@ function buildSnippet(opts: {
     cols,
     matrix,
     period,
+    speed,
   } = opts;
 
   const presetArgParts: string[] = [];
@@ -846,6 +866,7 @@ function buildSnippet(opts: {
   if (cols !== 16) propParts.push(`cols={${cols}}`);
   if (matrix !== 'bayer4') propParts.push(`matrix="${matrix}"`);
   if (period !== 2000) propParts.push(`period={${period}}`);
+  if (speed !== 1) propParts.push(`speed={${speed}}`);
 
   const jsx = `<Dithered\n  ${propParts.join('\n  ')}\n/>`;
 
@@ -862,6 +883,86 @@ function buildSnippet(opts: {
   return (
     `import { ${namedImports(['Dithered', 'shapes', 'presets', isBlending && 'compose'])} } from 'dithered/react';\n\n` +
     jsx
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Scrub: a range input driving `time` directly, next to a free-running
+// instance of the same shape/animation — the acceptance criterion for
+// external playback control (issue #6). `time` bypasses the internal
+// clock entirely, so the left indicator only ever shows what the slider
+// says, however fast or slow it's dragged.
+// ---------------------------------------------------------------------------
+
+// Stable references so neither `<Dithered>` below re-records/reconfigures
+// on every render of the slider's own state.
+const SCRUB_SHAPE = shapes.heart;
+const SCRUB_BRIGHTNESS = presets.pulse();
+
+const SCRUB_SNIPPET = `import { Dithered } from 'dithered/react';
+import { shapes, presets } from 'dithered';
+
+// \`time\` is in loop units (1 = one full loop) and pauses the internal
+// clock — drive it from a slider, a scroll position, or a shared value.
+<Dithered shape={shapes.heart} brightness={presets.pulse()} time={scrubPosition} />`;
+
+function ScrubExample() {
+  const [scrub, setScrub] = useState(0);
+
+  return (
+    <section style={panel}>
+      <h2 style={sectionTitle}>Scrub playback</h2>
+      <p style={sectionHint}>
+        Drag the slider to drive the left indicator with the <code>time</code> prop directly — no
+        animation loop, no internal clock. The right one keeps looping on its own, for comparison.
+      </p>
+      <div style={{ display: 'flex', gap: 28, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 24 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+            <Dithered
+              shape={SCRUB_SHAPE}
+              brightness={SCRUB_BRIGHTNESS}
+              size={90}
+              fg={ACCENT}
+              time={scrub}
+              label="Scrubbed preview"
+            />
+            <span style={label}>time = {scrub.toFixed(3)}</span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+            <Dithered
+              shape={SCRUB_SHAPE}
+              brightness={SCRUB_BRIGHTNESS}
+              size={90}
+              fg={ACCENT}
+              label="Free-running preview"
+            />
+            <span style={label}>free-running</span>
+          </div>
+        </div>
+
+        <div style={{ flex: '1 1 260px', minWidth: 220 }}>
+          <label style={row}>
+            <span style={label}>Scrub position</span>
+            <input
+              type="range"
+              min={0}
+              max={0.999}
+              step={0.001}
+              value={scrub}
+              onChange={(e) => setScrub(Number(e.target.value))}
+              style={fieldStyle}
+              aria-label="Scrub position"
+            />
+          </label>
+        </div>
+      </div>
+
+      <div style={divider}>
+        <h3 style={sectionTitle}>Grab the code</h3>
+        <pre style={codeBlockStyle}>{SCRUB_SNIPPET}</pre>
+      </div>
+    </section>
   );
 }
 
@@ -898,6 +999,7 @@ const DEFAULTS = {
   cols: 16,
   matrix: 'bayer4' as Extract<DitherMatrix, string>,
   period: 2000,
+  speed: 1,
   noiseAmt: 0.8,
   golSeed: 1,
 };
@@ -911,6 +1013,7 @@ function App() {
   const [cols, setCols] = useState(DEFAULTS.cols);
   const [matrix, setMatrix] = useState(DEFAULTS.matrix);
   const [period, setPeriod] = useState(DEFAULTS.period);
+  const [speed, setSpeed] = useState(DEFAULTS.speed);
   const [noiseAmt, setNoiseAmt] = useState(DEFAULTS.noiseAmt);
   const [golSeed, setGolSeed] = useState(DEFAULTS.golSeed);
   const [svgText, setSvgText] = useState(DEFAULT_CUSTOM_SVG);
@@ -932,6 +1035,7 @@ function App() {
     setCols(DEFAULTS.cols);
     setMatrix(DEFAULTS.matrix);
     setPeriod(DEFAULTS.period);
+    setSpeed(DEFAULTS.speed);
     setNoiseAmt(DEFAULTS.noiseAmt);
     setGolSeed(DEFAULTS.golSeed);
 
@@ -974,6 +1078,8 @@ function App() {
         setMatrix={setMatrix}
         period={period}
         setPeriod={setPeriod}
+        speed={speed}
+        setSpeed={setSpeed}
         noiseAmt={noiseAmt}
         setNoiseAmt={setNoiseAmt}
         golSeed={golSeed}
@@ -982,6 +1088,7 @@ function App() {
         setSvgText={setSvgText}
         highlighted={highlighted}
       />
+      <ScrubExample />
       <Footer />
     </div>
   );

@@ -2314,3 +2314,373 @@ describe('createDithered — responsive sizing', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Playback controls: speed, onFrame, onLoop, setTime/clearTime, and the
+// update() structural/runtime split (ADR 0006).
+// ---------------------------------------------------------------------------
+
+describe('createDithered playback controls', () => {
+  let env: ReturnType<typeof stubAnimationGlobals>;
+
+  beforeEach(() => {
+    env = stubAnimationGlobals();
+  });
+
+  afterEach(() => {
+    env.restore();
+  });
+
+  function baseOptions(overrides: Partial<DitheredOptions> = {}): DitheredOptions {
+    return {
+      shape: SQUARE_SHAPE,
+      brightness: () => true,
+      size: 40,
+      cols: 4,
+      cache: false,
+      ...overrides,
+    };
+  }
+
+  /**
+   * Spies on `document.createElement`, so a test can assert whether the
+   * sprite-strip cache was (re)built without asserting on its contents.
+   * Real canvases still get created for non-'canvas' tags and for the
+   * caller's own `<canvas>`; jsdom has no 2D context implementation, so
+   * a stub context stands in only for the strip itself, keeping the
+   * cache path exercised without an unimplemented-API console error.
+   */
+  function spyCreateElement() {
+    const real = document.createElement.bind(document);
+    return vi.spyOn(document, 'createElement').mockImplementation(((tag: string) => {
+      if (tag !== 'canvas') return real(tag);
+      const strip = real('canvas') as HTMLCanvasElement;
+      strip.getContext = vi.fn(() => make2dCtx()) as unknown as HTMLCanvasElement['getContext'];
+      return strip;
+    }) as typeof document.createElement);
+  }
+
+  /** The RAF callback most recently registered by `requestAnimationFrame`. */
+  function lastTick(): FrameRequestCallback {
+    const cb = env.rafCallbacks[env.rafCallbacks.length - 1];
+    if (!cb) throw new Error('no animation frame is currently scheduled');
+    return cb;
+  }
+
+  it('speed=2 advances twice as far per RAF tick as speed=1', () => {
+    // Drives a fresh instance through two ticks (a dt=0 baseline, then a
+    // 500ms step) and returns the last frame index reported to onFrame.
+    function driveTwoTicks(speed: number): number {
+      const reported: number[] = [];
+      const onFrame = vi.fn((f: number) => reported.push(f));
+      const { canvas } = makeFakeCanvas();
+      createDithered(canvas, baseOptions({ speed, onFrame }));
+      lastTick()(0); // dt=0: establishes lastNow, no movement yet
+      lastTick()(500);
+      return reported[reported.length - 1]!;
+    }
+
+    // period=2000, frames=48: 500ms is a quarter loop at speed 1.
+    expect(driveTwoTicks(1)).toBe(12);
+    expect(driveTwoTicks(2)).toBe(24);
+  });
+
+  it('update({ speed }) does not move the frame at the moment of the change, only the subsequent rate', () => {
+    const onFrame = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ speed: 1, onFrame }));
+    lastTick()(0);
+    lastTick()(500); // phase 0.25 -> frame 12
+    expect(onFrame).toHaveBeenLastCalledWith(12, expect.any(Number));
+
+    onFrame.mockClear();
+    instance.update({ speed: 4 }); // non-structural: no repaint at all
+    expect(onFrame).not.toHaveBeenCalled();
+
+    lastTick()(600); // dt=100 at the new speed: +0.2 -> phase 0.45 -> frame 21
+    expect(onFrame).toHaveBeenLastCalledWith(21, expect.any(Number));
+  });
+
+  it('negative speed walks the frame index backwards and wraps 0 -> frames - 1', () => {
+    const onFrame = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    createDithered(canvas, baseOptions({ speed: -1, onFrame }));
+    lastTick()(0);
+    lastTick()(1); // dt=1ms: phase nudges just below 0
+    expect(onFrame).toHaveBeenLastCalledWith(47, expect.any(Number));
+  });
+
+  it('onFrame never fires twice for the same index across consecutive ticks', () => {
+    const onFrame = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    createDithered(canvas, baseOptions({ onFrame }));
+    onFrame.mockClear(); // drop the initial-paint call
+
+    lastTick()(0); // dt=0: no change
+    expect(onFrame).not.toHaveBeenCalled();
+
+    lastTick()(1); // dt=1ms: phase 0.0005 -> still frame 0
+    expect(onFrame).not.toHaveBeenCalled();
+
+    lastTick()(50); // dt=49ms: phase 0.025 -> frame 1
+    expect(onFrame).toHaveBeenCalledTimes(1);
+    expect(onFrame).toHaveBeenLastCalledWith(1, expect.any(Number));
+
+    onFrame.mockClear();
+    lastTick()(50.4); // dt=0.4ms: still frame 1
+    expect(onFrame).not.toHaveBeenCalled();
+  });
+
+  it('onFrame does not fire for a non-structural update, since nothing is repainted', () => {
+    const onFrame = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ onFrame }));
+    onFrame.mockClear();
+    instance.update({ period: 4000 });
+    expect(onFrame).not.toHaveBeenCalled();
+  });
+
+  it("onFrame's t is the wrapped phase, always in [0, 1)", () => {
+    const seenPhases: number[] = [];
+    const onFrame = vi.fn((_f: number, t: number) => seenPhases.push(t));
+    const { canvas } = makeFakeCanvas();
+    createDithered(canvas, baseOptions({ onFrame, speed: -1 }));
+    lastTick()(0);
+    lastTick()(1); // negative speed nudges phase just below 0
+
+    for (const t of seenPhases) {
+      expect(t).toBeGreaterThanOrEqual(0);
+      expect(t).toBeLessThan(1);
+    }
+    expect(seenPhases[seenPhases.length - 1]).toBeCloseTo(0.9995, 5);
+  });
+
+  it('onLoop fires once per whole-loop crossing, with the cumulative signed count', () => {
+    const onLoop = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    createDithered(canvas, baseOptions({ onLoop, period: 1000 }));
+    lastTick()(0);
+    lastTick()(1000); // one full period
+    expect(onLoop).toHaveBeenCalledTimes(1);
+    expect(onLoop).toHaveBeenLastCalledWith(1);
+
+    lastTick()(2000); // another full period
+    expect(onLoop).toHaveBeenCalledTimes(2);
+    expect(onLoop).toHaveBeenLastCalledWith(2);
+  });
+
+  it('onLoop coalesces several boundary crossings inside one tick into a single call', () => {
+    const onLoop = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    createDithered(canvas, baseOptions({ onLoop, period: 1000 }));
+    lastTick()(0);
+    lastTick()(5000); // a stall: 5 periods elapse in a single tick
+    expect(onLoop).toHaveBeenCalledTimes(1);
+    expect(onLoop).toHaveBeenLastCalledWith(5);
+  });
+
+  it('onLoop reports -1 when a negative speed wraps backward past 0', () => {
+    const onLoop = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    createDithered(canvas, baseOptions({ onLoop, period: 1000, speed: -1 }));
+    lastTick()(0);
+    lastTick()(1);
+    expect(onLoop).toHaveBeenCalledTimes(1);
+    expect(onLoop).toHaveBeenLastCalledWith(-1);
+  });
+
+  it('onFrame fires for the initial paint at initialFrame', () => {
+    const onFrame = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    createDithered(canvas, baseOptions({ onFrame, initialFrame: 5, frames: 20 }));
+    expect(onFrame).toHaveBeenCalledTimes(1);
+    expect(onFrame).toHaveBeenLastCalledWith(5, expect.closeTo(5 / 20, 5));
+  });
+
+  it('setTime halts the internal loop: no new RAF is scheduled and the frame stops advancing', () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+    const rafCountBefore = env.rafCallbacks.length;
+
+    instance.setTime(0.5);
+
+    expect(cancelAnimationFrame).toHaveBeenCalled();
+    expect(env.rafCallbacks.length).toBe(rafCountBefore);
+  });
+
+  it('setTime paints the frame for the phase; repeated calls within one frame index paint once', () => {
+    const onFrame = vi.fn();
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ onFrame, frames: 10 }));
+    onFrame.mockClear();
+    ctx.clearRect.mockClear();
+
+    instance.setTime(0.35); // floor(0.35 * 10) = 3
+    expect(onFrame).toHaveBeenCalledTimes(1);
+    expect(onFrame.mock.calls[0]![0]).toBe(3);
+    expect(onFrame.mock.calls[0]![1]).toBeCloseTo(0.35);
+    expect(ctx.clearRect).toHaveBeenCalledTimes(1);
+
+    onFrame.mockClear();
+    ctx.clearRect.mockClear();
+    instance.setTime(0.38); // still floor(0.38 * 10) = 3
+    expect(onFrame).not.toHaveBeenCalled();
+    expect(ctx.clearRect).not.toHaveBeenCalled();
+  });
+
+  it('setTime never fires onLoop, even crossing a whole-loop boundary, but does fire onFrame', () => {
+    const onLoop = vi.fn();
+    const onFrame = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ onLoop, onFrame, frames: 10 }));
+    onFrame.mockClear();
+
+    instance.setTime(2.5); // several whole loops away from the initial phase
+
+    expect(onLoop).not.toHaveBeenCalled();
+    expect(onFrame).toHaveBeenCalledTimes(1);
+    expect(onFrame.mock.calls[0]![0]).toBe(5); // wrapPhase(2.5) = 0.5 -> floor(0.5*10)
+  });
+
+  it('clearTime resumes the internal clock from the external phase, without a jump', () => {
+    const onFrame = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ onFrame, frames: 10, period: 1000 }));
+
+    instance.setTime(0.42); // floor(4.2) = 4
+    onFrame.mockClear();
+    instance.clearTime();
+
+    expect(env.rafCallbacks.length).toBeGreaterThan(0);
+    lastTick()(123); // first resumed tick: dt must be 0, so the frame holds
+    expect(onFrame).not.toHaveBeenCalled();
+
+    lastTick()(123 + 100); // dt=100: +0.1 from the resumed phase (0.42) -> 0.52 -> frame 5
+    expect(onFrame).toHaveBeenCalledTimes(1);
+    expect(onFrame.mock.calls[0]![0]).toBe(5);
+  });
+
+  it('clearTime is a safe no-op when the instance is not currently driven', () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+    expect(() => instance.clearTime()).not.toThrow();
+  });
+
+  it('clearTime re-applies `paused`: it does not resume playback while paused is true', () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ paused: true }));
+    expect(env.rafCallbacks.length).toBe(0);
+
+    instance.setTime(0.5);
+    instance.clearTime();
+
+    expect(env.rafCallbacks.length).toBe(0);
+  });
+
+  // The PRD's explicit acceptance criterion: two differently-configured
+  // instances handed the same `time` render the same frame, because the
+  // frame is a pure function of (phase, frames) with no hidden origin.
+  it('two instances given the same time render the same frame', () => {
+    let frameA = 0;
+    let frameB = 0;
+    const onFrameA = vi.fn((f: number) => {
+      frameA = f;
+    });
+    const onFrameB = vi.fn((f: number) => {
+      frameB = f;
+    });
+    const { canvas: canvasA } = makeFakeCanvas();
+    const { canvas: canvasB } = makeFakeCanvas();
+    const instanceA = createDithered(
+      canvasA,
+      baseOptions({ onFrame: onFrameA, frames: 24, period: 3000, fg: '#111', cols: 4 }),
+    );
+    const instanceB = createDithered(
+      canvasB,
+      baseOptions({ onFrame: onFrameB, frames: 24, period: 700, fg: '#222', cols: 12, gap: 0.2 }),
+    );
+
+    for (const t of [0, 0.1, 0.33, 0.5, 0.999, 1.4, -0.2, 2.75]) {
+      instanceA.setTime(t);
+      instanceB.setTime(t);
+      expect(frameA).toBe(frameB);
+    }
+  });
+
+  it('update({ speed }) / update({ period }) / update({ paused }) do not rebuild the sprite strip', () => {
+    const createElementSpy = spyCreateElement();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ cache: true }));
+    createElementSpy.mockClear(); // drop the initial build
+
+    instance.update({ speed: 3 });
+    instance.update({ period: 5000 });
+    instance.update({ paused: true });
+
+    expect(createElementSpy).not.toHaveBeenCalledWith('canvas');
+    createElementSpy.mockRestore();
+  });
+
+  it('update() re-passing identical structural values (e.g. a React re-render) is also a no-op rebuild', () => {
+    const createElementSpy = spyCreateElement();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ cache: true, fg: '#123456' }));
+    createElementSpy.mockClear(); // drop the initial build
+
+    // The React wrapper builds a full options object from its props on
+    // every render, so `fg`/`cols`/`size` are compared by value, not
+    // just presence, against what's already resolved.
+    instance.update({ fg: '#123456', cols: 4, size: 40 });
+
+    expect(createElementSpy).not.toHaveBeenCalledWith('canvas');
+    createElementSpy.mockRestore();
+  });
+
+  it('update({ cols }) does rebuild the sprite strip', () => {
+    const createElementSpy = spyCreateElement();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ cache: true }));
+    createElementSpy.mockClear(); // drop the initial build
+
+    instance.update({ cols: 8 });
+
+    expect(createElementSpy).toHaveBeenCalledWith('canvas');
+    createElementSpy.mockRestore();
+  });
+
+  it('update({ frames }) preserves the phase rather than the raw frame index', () => {
+    const onFrame = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ onFrame, frames: 10 }));
+
+    instance.setTime(0.5); // frame floor(0.5 * 10) = 5
+    onFrame.mockClear();
+    instance.update({ frames: 20 }); // same phase 0.5 -> floor(0.5 * 20) = 10, not 5 % 20
+
+    expect(onFrame).toHaveBeenCalledTimes(1);
+    expect(onFrame.mock.calls[0]![0]).toBe(10);
+  });
+
+  it('pausing and resuming does not jump the phase', () => {
+    // dt values deliberately avoid landing the phase exactly on a frame
+    // boundary (e.g. 0.3, 0.4 of a 10-frame loop) — floating point makes
+    // `wrapPhase` of an exact boundary an unreliable side of the floor(),
+    // which is a test-authoring hazard here, not a playback bug.
+    const onFrame = vi.fn();
+    const lastFrame = () => onFrame.mock.calls[onFrame.mock.calls.length - 1]?.[0];
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ onFrame, frames: 10, period: 1000 }));
+    lastTick()(0);
+    lastTick()(333); // phase 0.333 -> frame 3
+    expect(lastFrame()).toBe(3);
+
+    instance.setPaused(true);
+    instance.setPaused(false); // resume — long afterwards in wall-clock terms
+
+    lastTick()(999_999); // huge `now`, but dt must be 0 on the first resumed tick
+    expect(lastFrame()).toBe(3); // unchanged: no jump
+
+    lastTick()(999_999 + 133); // dt=133 now behaves normally from the resumed phase
+    expect(lastFrame()).toBe(4);
+  });
+});

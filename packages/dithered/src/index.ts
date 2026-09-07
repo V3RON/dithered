@@ -11,11 +11,15 @@ export type {
   Size,
 } from './core';
 export {
+  advancePhase,
   computeGeometry,
   frameAt,
+  frameForPhase,
+  loopsAt,
   paintFrame,
   resolveOptions,
   resolveRows,
+  wrapPhase,
   CURRENT_COLOR,
   hasCurrentColor,
   resolvePalette,

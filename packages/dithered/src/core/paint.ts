@@ -1,4 +1,5 @@
 import type { Cell } from '../shape';
+import { frameForPhase } from './clock';
 import type { Brightness, ResolvedOptions } from './options';
 import { toneLevel, toPalette, type Palette } from './palette';
 
@@ -45,10 +46,16 @@ export interface PaintGeometry {
 /**
  * Quantizes wall-clock time to a frame index in `[0, frames)`, looping
  * every `period` ms.
+ *
+ * A wall-clock convenience, not the playback path: `createDithered`
+ * drives frames from a phase accumulator (see `core/clock.ts` and ADR
+ * 0006) so that `speed`, direction and `onLoop` are possible. `frameAt`
+ * stays exported and behaves exactly as before — it's the direct
+ * `nowMs -> frame` mapping to reach for outside that instance, e.g. to
+ * align a one-off render with a `performance.now()` timestamp.
  */
 export function frameAt(nowMs: number, period: number, frames: number): number {
-  const phase = ((nowMs % period) + period) % period; // guard negative nowMs
-  return Math.floor((phase / period) * frames) % frames;
+  return frameForPhase(nowMs / period, frames);
 }
 
 /**
