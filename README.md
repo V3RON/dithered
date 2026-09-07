@@ -193,7 +193,10 @@ const brightness = compose.mask(presets.sweep(), (cell) => cell.u <= 0);
 ```
 
 ```tsx
-<Dithered shape={shapes.heart} brightness={brightness} period={4000} />
+import { Dithered } from 'dithered/react';
+import { shapes } from 'dithered';
+
+<Dithered shape={shapes.heart} brightness={brightness} period={4000} />;
 ```
 
 For "slower", raise `period` on `Dithered` (or the core's frame timing) instead of reaching for `compose.timeScale` — `period` stretches the whole loop seamlessly, `compose` output included. `timeScale(source, factor)` scales a `Brightness`'s own loop instead, but a slowdown needs `factor < 1`, and the only integer in that range is the degenerate `0`, so slowing down through `timeScale` always means a non-integer factor and the seam described above. Concretely, `compose.timeScale(presets.sweep(), 0.5)` doesn't have a small, easy-to-miss seam — at `t → 1` the loop is at the exact centre of the sweep and snaps back to the sweep's start, the largest jump the shape can produce. `timeScale` is the right tool for _speeding up_ with an integer factor (`compose.timeScale(presets.sweep(), 2)` doubles the speed with no seam); for a seamless slowdown, use `period`.

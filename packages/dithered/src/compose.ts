@@ -2,13 +2,50 @@ import type { Brightness } from './core';
 import type { Cell } from './shape';
 
 // `process.env.NODE_ENV` below is a build-time convention every bundler
-// (webpack, Vite, Rollup, Metro) statically replaces — not an actual Node
-// global this platform-free library depends on. This ambient declaration
-// exists only so the expression typechecks without pulling in `@types/node`.
-// The `typeof process !== 'undefined'` guard at the call site (not here)
-// keeps a plain, unbundled browser ESM import (no `process` global at all)
-// from throwing a `ReferenceError` on a bare read.
-declare const process: { env: { NODE_ENV?: string } } | undefined;
+// (webpack, Vite, Rollup, Metro) statically replaces with a string literal —
+// not an actual Node global this platform-free library depends on. This
+// ambient declaration exists only so the expression typechecks without
+// pulling in `@types/node`.
+declare const process: { env: { NODE_ENV?: string } };
+
+// Resolved once, at module load, into a plain boolean — not read as
+// `process.env.NODE_ENV` at each call site — for a reason that isn't
+// obvious from the shape alone: `typeof process !== 'undefined'` looks like
+// the safe guard, but it is dead in every bundler. A bundler substitutes the
+// *token* `process.env.NODE_ENV` with a literal; it does not define a
+// `process` global for the browser. So after substitution the guard reads
+// `typeof process !== 'undefined' && "development" !== 'production'` and
+// `process` is still undefined at runtime — the whole block never runs, in
+// bundled dev or bundled prod alike. A `try`/`catch` around the bare read
+// gets all four cases right:
+//   - bundled dev (`process.env.NODE_ENV` -> `"development"`): the token is
+//     replaced before this ever runs, so the assignment reduces to
+//     `"development" !== 'production'` with no `process` reference left to
+//     throw — evaluates to `true`.
+//   - bundled prod (`process.env.NODE_ENV` -> `"production"`): same
+//     substitution, evaluates to `false`.
+//   - unbundled ESM in a browser (no substitution, no `process` global at
+//     all): the bare read throws a `ReferenceError`, caught below, and dev
+//     warnings stay off rather than crashing the module.
+//   - Node / vitest / Metro (a real `process` global): reads it directly,
+//     same as any other Node code.
+// This trades away one thing: a minifier can constant-fold the old bare
+// `if (process.env.NODE_ENV !== 'production')` down to `if (false)` and
+// delete the dead `console.warn` branch under a production define. Hoisting
+// the check into a `try`/`catch`-assigned `let` here means minifiers no
+// longer see a foldable boolean *expression* at the `timeScale` call site —
+// only a runtime boolean read — so the warning string can survive into a
+// production consumer bundle as unreachable dead code. That's the
+// documented trade (see ADR 0009 amendments): a few hundred bytes of inert
+// string is an acceptable price for the warning actually firing in dev.
+let devWarningsEnabled: boolean;
+try {
+  devWarningsEnabled = process.env.NODE_ENV !== 'production';
+} catch {
+  // No `process` global at all (unbundled ESM in a browser): stay quiet
+  // rather than throw.
+  devWarningsEnabled = false;
+}
 
 /**
  * `blend`'s mix weight: a constant, or `(cell, t) => number` for a
@@ -20,7 +57,14 @@ export type MixAmount = number | ((cell: Cell, t: number) => number);
 /** A spatial-only predicate used by `mask`. Never sees `t` — masks are shape, not time. */
 export type CellPredicate = (cell: Cell) => boolean;
 
-/** Wraps `t` into `[0, 1)`. */
+/**
+ * Wraps `t` into `[0, 1)` for essentially all inputs. Exception: for a tiny
+ * negative `t` very close to a multiple of 1 (e.g. `-1e-20`), floating-point
+ * rounding of `t - Math.floor(t)` lands exactly on `1.0` rather than `0`, so
+ * the result can briefly touch the closed end. No preset or documented use
+ * operates at that magnitude, periodicity is unaffected either way, and a
+ * branch to special-case it does not belong in this hot path.
+ */
 function wrap01(t: number): number {
   return t - Math.floor(t);
 }
@@ -75,8 +119,10 @@ export function mask(source: Brightness, predicate: CellPredicate): Brightness {
 
 // Non-integer factors are logged at most once per distinct factor value, so
 // a re-render loop doesn't spam the console but two different bad factors
-// are both reported. Lazily created so a production bundle keeps only an
-// unused `let` once this whole block is stripped (see below).
+// are both reported. Lazily created so that in a production bundle — where
+// `devWarningsEnabled` is `false` at runtime but, per the trade-off above,
+// not necessarily eliminated by the minifier — this `Set` is at worst
+// allocated-and-unused rather than pre-populated.
 //
 // Capped at MAX_WARNED_FACTORS distinct values: an animated or slider-bound
 // factor (e.g. `compose.timeScale(sweep(), speed)` behind a range input)
@@ -105,7 +151,7 @@ const MAX_WARNED_FACTORS = 8;
  * factor would otherwise retain).
  */
 export function timeScale(source: Brightness, factor: number): Brightness {
-  if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
+  if (devWarningsEnabled) {
     if (!Number.isInteger(factor)) {
       warnedTimeScaleFactors ??= new Set();
       if (!warnedTimeScaleFactors.has(factor) && warnedTimeScaleFactors.size < MAX_WARNED_FACTORS) {

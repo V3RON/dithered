@@ -53,6 +53,15 @@ describe('compose is re-exported from the native entry (./native)', () => {
     .split('\n')
     .find((line) => line.includes("from './compose'") && line.startsWith('export {'));
 
+  // Match only the text *inside* the braces, not the whole line: the line
+  // also ends in `from './compose';`, and `\bcompose\b` matches that module
+  // specifier regardless of whether `compose` itself is actually re-exported
+  // — the exact gap this test exists to close. Verified by removing
+  // `compose` from native.ts's re-export list: against the whole-line match
+  // this test still passed (168 tests green); against the braces-only match
+  // below it fails, as it should.
+  const exportedNames = composeExportLine?.match(/\{([^}]*)\}/)?.[1] ?? '';
+
   it("has a `export { ... } from './compose'` line", () => {
     expect(composeExportLine).toBeDefined();
   });
@@ -61,7 +70,7 @@ describe('compose is re-exported from the native entry (./native)', () => {
     for (const name of COMPOSE_RUNTIME_NAMES) {
       // Word-boundary match so `mask` doesn't accidentally match inside a
       // longer identifier.
-      expect(composeExportLine).toMatch(new RegExp(`\\b${name}\\b`));
+      expect(exportedNames).toMatch(new RegExp(`\\b${name}\\b`));
     }
   });
 });

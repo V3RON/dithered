@@ -137,31 +137,83 @@ describe('timeScale non-integer warning', () => {
     warnSpy.mockRestore();
   });
 
-  // Factor values below are unique across test cases (and to this describe
-  // block) so the module-level dedupe Set — which persists for the life of
-  // the module — can't make one test's warning look like another's no-op.
-  it('a non-integer factor warns once', () => {
-    timeScale(sweep(), 11.5);
+  // The dedupe Set is module-level state that persists for the life of the
+  // module, so two tests sharing one module instance can only stay
+  // independent by using globally-unique factor values — a fragility in
+  // itself (any non-integer `timeScale` factor added anywhere else in this
+  // file could silently pre-populate the Set and break one of these). Each
+  // test below instead gets its own fresh module instance via
+  // `vi.resetModules()` plus a dynamic import, so the factor values only
+  // need to be unique *within* a test.
+  async function freshTimeScale() {
+    vi.resetModules();
+    const mod = await import('./compose');
+    return mod.timeScale;
+  }
+
+  it('a non-integer factor warns once', async () => {
+    const freshTimeScaleFn = await freshTimeScale();
+    freshTimeScaleFn(sweep(), 1.5);
     expect(warnSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('constructing again with the same factor does not warn again', () => {
-    timeScale(sweep(), 12.5);
-    timeScale(sweep(), 12.5);
-    timeScale(sweep(), 12.5);
+  it('constructing again with the same factor does not warn again', async () => {
+    const freshTimeScaleFn = await freshTimeScale();
+    freshTimeScaleFn(sweep(), 1.5);
+    freshTimeScaleFn(sweep(), 1.5);
+    freshTimeScaleFn(sweep(), 1.5);
     expect(warnSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('a different non-integer factor warns again', () => {
-    timeScale(sweep(), 13.5);
-    timeScale(sweep(), 14.5);
+  it('a different non-integer factor warns again', async () => {
+    const freshTimeScaleFn = await freshTimeScale();
+    freshTimeScaleFn(sweep(), 1.5);
+    freshTimeScaleFn(sweep(), 2.5);
     expect(warnSpy).toHaveBeenCalledTimes(2);
   });
 
-  it('an integer factor never warns', () => {
-    timeScale(sweep(), 15);
-    timeScale(sweep(), 16);
+  it('an integer factor never warns', async () => {
+    const freshTimeScaleFn = await freshTimeScale();
+    freshTimeScaleFn(sweep(), 15);
+    freshTimeScaleFn(sweep(), 16);
     expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  // Regression test for the cap itself (ADR 0009 amendments): deleting the
+  // `&& warnedTimeScaleFactors.size < MAX_WARNED_FACTORS` guard in
+  // compose.ts leaves every other test in this file green, since none of
+  // them constructs more than a handful of distinct non-integer factors.
+  // The cap is 8 (see compose.ts); this feeds it 11 distinct non-integer
+  // factors and checks warnings stop exactly at the cap, not before or after.
+  // The ADR explicitly rejects "emitting the warning per call, with a
+  // call-site guard" — construction time is where the factor is known and
+  // where the cost of the check is paid once, not per cell per frame.
+  // Verified: adding a per-call `console.warn` inside `timeScale`'s returned
+  // closure leaves every other test in this file green (none of them clears
+  // the spy and calls the composed function afterward), so this is the only
+  // test that would catch that regression.
+  it('warns only at construction time, never per call', async () => {
+    const freshTimeScaleFn = await freshTimeScale();
+    const s = freshTimeScaleFn(sweep(), 1.5);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+
+    warnSpy.mockClear();
+    for (const cell of SAMPLE_CELLS) {
+      for (const t of [0, 0.13, 0.5, 0.87, 0.999]) {
+        s(cell, t);
+      }
+    }
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('stops warning once the cap of 8 distinct factors is reached', async () => {
+    const freshTimeScaleFn = await freshTimeScale();
+    const MAX_WARNED_FACTORS = 8;
+    const factorCount = MAX_WARNED_FACTORS + 3;
+    for (let i = 0; i < factorCount; i++) {
+      freshTimeScaleFn(sweep(), 1.5 + i); // 1.5, 2.5, 3.5, ... all non-integer and distinct
+    }
+    expect(warnSpy).toHaveBeenCalledTimes(MAX_WARNED_FACTORS);
   });
 });
 

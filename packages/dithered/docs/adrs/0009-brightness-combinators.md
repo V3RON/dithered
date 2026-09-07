@@ -329,6 +329,64 @@ is substituted with a literal — and was re-verified against `dist/` and an esb
 production-define consumer bundle after the change, per the ADR's own "must be verified by
 grepping the built output, not assumed" instruction.
 
+**Correction: the `typeof process` guard above was itself dead in every bundler, on the
+platform the warning matters most for.** A second adversarial review found that the fix
+described in the previous amendment does not do what it says. Bundlers substitute the
+_token_ `process.env.NODE_ENV` with a string literal; none of them define a `process`
+global for the browser. So after substitution, `typeof process !== 'undefined' &&
+process.env.NODE_ENV !== 'production'` reads as `typeof process !== 'undefined' &&
+"development" !== 'production'` — and `process` is still undefined at runtime, so
+`typeof process !== 'undefined'` is `false` and the whole block never runs. This was
+verified empirically, not assumed: this repo's own Vite dev server serves `compose.ts`
+transformed to exactly that shape, and an esbuild bundle of `dist/index.js` with
+`--define:process.env.NODE_ENV='"development"'`, executed in a Node `vm` context with no
+`process` global (simulating an unbundled browser after bundling), produced zero warnings
+for a non-integer factor. The "re-verified against `dist/`" claim in the previous amendment
+checked that the guard's _shape_ survived the build unchanged; it did not check whether that
+shape actually warns in a browser-like environment, which is the failure this correction
+fixes.
+
+The guard is now resolved once at module load into a plain boolean, via `try`/`catch` around
+the bare read:
+
+```ts
+let devWarningsEnabled: boolean;
+try {
+  devWarningsEnabled = process.env.NODE_ENV !== 'production';
+} catch {
+  devWarningsEnabled = false;
+}
+```
+
+`timeScale` then checks `if (devWarningsEnabled)` instead of re-reading `process.env.NODE_ENV`
+(or a `typeof` guard around it). This was verified against all four scenarios that matter,
+each executed rather than inferred:
+
+- **Bundled dev browser app** (esbuild `--define:process.env.NODE_ENV='"development"'`,
+  evaluated in a `vm` context with no `process` global): **warns.** The `define` replaces
+  the token before the module ever runs, so the `try` body reduces to a literal comparison
+  with no `process` reference left to throw.
+- **Bundled production browser app** (same, with `"production"`): **does not warn.**
+- **Unbundled ESM in a browser** (`dist/index.js` imported directly, no substitution, no
+  `process` global at all, evaluated in a `vm` context with a recursive module linker):
+  **does not throw** — the bare read throws a `ReferenceError` inside the `try`, the `catch`
+  sets the flag to `false`, and the module finishes evaluating and running normally.
+- **Node** (`NODE_ENV` unset, and again with `NODE_ENV=development`, importing the real
+  built `dist/index.js`): **warns.** (`NODE_ENV=production`): **does not warn.**
+
+**Trade-off, measured rather than assumed:** the previous, foldable `if (process.env.NODE_ENV
+!== 'production')` let a minifier constant-fold the whole guard away under a production
+`define`, deleting the dead `console.warn` branch entirely. Hoisting the flag into a
+`try`/`catch`-assigned `let` defeats that: the minifier can still fold the _assignment_
+(`devWarningsEnabled = false` in a production build), but the `if (devWarningsEnabled)` check
+inside `timeScale` is a runtime read of a `let`, not a foldable literal, so the branch and its
+`console.warn` string are not eliminated. Measured with esbuild's minifier on both a
+`"development"`- and a `"production"`-defined bundle of the same entry point: both minified
+outputs are byte-identical in size (954 bytes) and both contain the full warning string
+verbatim. This is judged an acceptable trade — a few hundred bytes of unreachable string in
+a production bundle, versus a warning that silently never fires in the one environment
+(bundled browser dev) the PRD's "warn once in dev" is mainly for.
+
 **`mask`'s `false` sentinel does not survive `invert` or `clamp` placed after it.** This was
 always true given the semantics decided above — `invert` and `clamp` each have an explicit,
 documented rule for _any_ boolean input, and neither rule distinguishes "this is `false`

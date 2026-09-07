@@ -342,8 +342,14 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
   // `mix` only parameterizes the closure `compose.blend` returns — it plays
   // no part in constructing `primary`/`secondary` — so it's kept out of this
   // memo's deps. Otherwise every slider step would rebuild both presets
-  // (e.g. re-running 48 generations of `gameOfLife`'s board) and force a
-  // full sprite-strip repaint, for a change that only needs a new closure.
+  // (e.g. re-running 48 generations of `gameOfLife`'s board), which this
+  // split avoids. It does *not* avoid a repaint: the `brightness` memo below
+  // still returns a new `compose.blend(...)` closure on every `mix` step,
+  // `Dithered`'s reconfigure effect depends on `brightness` by identity, and
+  // `renderer.ts`'s `update()` unconditionally calls `configure()` — which
+  // re-samples cells and repaints every frame regardless. The slider still
+  // works correctly; this split just keeps a mix drag from *also* re-running
+  // the (possibly expensive) preset factories on top of that.
   const presetsForBlend = useMemo(() => {
     const factory = presets[presetKey as keyof typeof presets];
     const primary =
