@@ -14,14 +14,47 @@
  * same arithmetic.
  */
 
-/** Wraps a phase in loop units into `[0, 1)`, guarding negative input. */
+/**
+ * Wraps a phase in loop units into `[0, 1)`, guarding negative input.
+ *
+ * `phase - Math.floor(phase)` rather than the more obvious
+ * `((phase % 1) + 1) % 1`: the latter is not the identity on `[0, 1)`,
+ * because adding 1 to a fraction below 1 costs a mantissa bit and the
+ * second `% 1` cannot give it back. That perturbation is small but
+ * visible at the API surface — `setTime(0.35)` would report
+ * `onFrame(_, 0.35000000000000009)`, so a caller could not round-trip
+ * the value they set, and `setTime(0.3)` with `frames: 10` would land on
+ * frame 3 where `Math.floor(0.3 * 10)` is 2. Subtracting the floor is
+ * exact on `[0, 1)` and agrees with the modulo form everywhere else.
+ *
+ * Total, like {@link frameForPhase}: a non-finite `phase` returns `0`.
+ * The `w < 1` guard also catches the one case where the subtraction
+ * lands *on* 1 — a phase a hair below zero (`-1e-18 - -1` rounds to
+ * exactly `1`), which would otherwise escape the half-open range this
+ * function exists to guarantee.
+ */
 export function wrapPhase(phase: number): number {
-  return ((phase % 1) + 1) % 1;
+  const w = phase - Math.floor(phase);
+  return w < 1 ? w : 0;
 }
 
-/** `phase + (dt / period) * speed` — the entire accumulator step. */
+/**
+ * `phase + (dt / period) * speed` — the entire accumulator step.
+ *
+ * A step that would not be finite leaves `phase` untouched. `setTime` is
+ * not the only way a bad number reaches the accumulator: `speed={a / b}`
+ * with `b === 0`, `period={0}`, or a `Number('')`-style parse all reach
+ * here, and because nothing but `setTime` ever *resets* `phase`, a
+ * single `NaN` step would poison playback permanently — the frame frozen
+ * (`frameForPhase` floors a non-finite phase to 0) while
+ * `loopsAt(NaN) !== loopsAt(NaN)` fires `onLoop(NaN)` on every tick
+ * forever, since `NaN !== NaN`. Not even `update({ speed: 1 })` would
+ * recover it. Refusing the step keeps the accumulator in a state a later
+ * good value can still drive.
+ */
 export function advancePhase(phase: number, dtMs: number, period: number, speed: number): number {
-  return phase + (dtMs / period) * speed;
+  const next = phase + (dtMs / period) * speed;
+  return Number.isFinite(next) ? next : phase;
 }
 
 /**
@@ -59,8 +92,12 @@ export function loopsAt(phase: number): number {
  * the centre of the frame's phase band, not its leading edge.
  *
  * `frame / frames` does not survive the round trip: `frameForPhase(k /
- * n, n)` returns `k - 1` whenever `k / n` rounds down in binary, which
- * at the default `frames = 48` is 16 of the 48 valid indices. Anything
+ * n, n)` returns `k - 1` whenever `k / n` rounds down in binary — 4560
+ * `(n, k)` pairs across 396 of the frame counts in `1..512`, e.g.
+ * `n = 49, k = 1` and `n = 22, k = 15`. Note that the common, round
+ * frame counts (24, 36, 48, 60, 64, 120) are *not* among them now that
+ * `wrapPhase` is exact, so a bare division looks fine until someone
+ * picks an awkward number. Anything
  * that starts from a frame *index* and needs a phase — seeding
  * `initialFrame`, mapping `progress` — must go through this, never a
  * bare division. See ADR 0006 §1 and §8.
@@ -78,5 +115,9 @@ export function phaseForFrame(frame: number, frames: number): number {
  * first. See ADR 0006 §6.
  */
 export function wrapFrame(frame: number, frames: number): number {
+  // Total for the same reason `frameForPhase` is: `initialFrame` is a
+  // caller-supplied number, and `Math.round(Infinity) % n` is `NaN`,
+  // which would seed the accumulator with a phase nothing can recover.
+  if (!Number.isFinite(frame) || !(frames > 0)) return 0;
   return ((Math.round(frame) % frames) + frames) % frames;
 }

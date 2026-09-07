@@ -203,7 +203,11 @@ describe('Dithered', () => {
   // ADR 0006 test 39, swept across frame counts that include several
   // where `progress * (frames - 1) / frames` is not exact.
   it('progress endpoints paint frame 0 and frame frames - 1 across a sweep of frame counts', () => {
-    for (const frames of [48, 36, 3, 12, 19, 27, 46, 47, 54]) {
+    // 49, 22 and 26 are the load-bearing entries: they are frame counts
+    // where a bare `k / frames` still rounds down even with an exact
+    // `wrapPhase`, so they catch a regression to the formula ADR 0006
+    // §8 rejects. The round numbers alone would not.
+    for (const frames of [48, 36, 3, 12, 19, 27, 46, 47, 54, 49, 22, 26]) {
       const reported: number[] = [];
       const onFrame = (f: number) => reported.push(f);
       const { rerender, unmount } = render(
@@ -322,6 +326,22 @@ describe('Dithered', () => {
     // The real instance actually resumed scheduling — not just a spy
     // recording that the method was called.
     expect(env.rafCallbacks.length).toBeGreaterThan(rafCountWhileDriven);
+  });
+
+  // Finding 3 (third review). `time={null}` is documented as behaving
+  // exactly like an absent prop, and the time effect hands it to
+  // `clearTime()` — so it does not own pausing and must not suppress the
+  // paused effect. The gate was `time === undefined`, which `null` fails,
+  // silently disabling the `paused` prop for the whole
+  // `time={sharedValue ?? null}` pattern the docs recommend.
+  it('paused still works while time={null}', () => {
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} time={null} paused={false} />);
+    const instance = lastInstance();
+    const setPausedSpy = vi.spyOn(instance, 'setPaused');
+
+    rerender(<Dithered shape={SQUARE_SHAPE} time={null} paused={true} />);
+
+    expect(setPausedSpy).toHaveBeenCalledWith(true);
   });
 
   it('time changing does not trigger update() (no reconfigure)', () => {

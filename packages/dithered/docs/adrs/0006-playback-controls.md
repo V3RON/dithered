@@ -106,8 +106,19 @@ paint frame 0.
 `phaseForFrame` is `(frame + 0.5) / frames` — **the centre of the
 frame's phase band, not its leading edge** — and it exists because
 `frame / frames` does not survive the round trip. `frameForPhase(k / n, n)`
-returns `k - 1` whenever `k / n` rounds down in binary: at the default
-`frames = 48` that is 16 of the 48 valid indices (1, 4, 7, 10, …, 47).
+returns `k - 1` whenever `k / n` rounds down in binary. With `wrapPhase`
+subtracting the floor (exact on `[0, 1)`) the damage is much smaller
+than it was under the `((p % 1) + 1) % 1` form — which alone accounted
+for 16 of the 48 indices at the default frame count, and for the great
+majority of the ~43k failures across `n` in `1..512` — but it does not
+go away: 4560 `(n, k)` pairs across 396 of those frame counts still
+round down, among them `n = 49, k = 1` (→ 0), `n = 22, k = 15` (→ 14)
+and `n = 100, k = 29` (→ 28). The common counts are now clean, which is
+worse rather than better for anyone testing this: a bare division looks
+correct at 24, 36, 48, 60, 64 and 120, so a regression to it would pass
+any sweep built from round numbers. The centre is exact for every `k`
+and every `n` (verified exhaustively to 512), and the tests that pin it
+deliberately include counts from the failing set.
 Anything that starts from a frame _index_ and needs a phase — seeding
 `initialFrame`, and mapping `progress` (§8) — must go through
 `phaseForFrame`, never through a bare division. The half-frame offset it
@@ -421,6 +432,59 @@ the first tick after mount.
 **`time` wins** and `progress` is ignored (with a doc note). Mixing them
 is a caller bug, and silently letting the effect that happens to run
 last win would be worse.
+
+### 9. Non-finite inputs, and where the guards actually go
+
+The first two review rounds established that `frameForPhase` must be
+total (§1) and that the drivers ignore a non-finite `t` (§3). A third
+round showed both were guarding the wrong end of the pipe. Three
+corrections:
+
+**Guard storage, not just painting.** `frameForPhase`'s totality keeps a
+bad frame off screen; it does nothing about a bad phase being _kept_.
+Native stored the raw value in `externalPhase` on all three write paths
+and only refused to paint it, so `progress={loaded / total}` with
+`total === 0` parked a `NaN` in the accumulator; when the caller later
+dropped the prop, the hand-back branch copied it into `internalPhase`,
+and from there `loopsAt(NaN) !== loopsAt(NaN)` — `NaN` compares unequal
+to itself — fired `onLoop(NaN)` at frame rate, forever, while the
+picture never changed again. Every write path now checks before storing.
+
+**`setTime` is not the only door.** `speed`, `period` and `initialFrame`
+reach the accumulator without passing `setTime`'s guard, and nothing but
+`setTime` ever _resets_ `phase` — so one `speed={a / b}` with `b === 0`
+wedged playback permanently, and `update({ speed: 1 })` could not
+recover it. `advancePhase` now refuses a step that would not be finite
+(returning the phase unchanged), and `wrapFrame` is total for the same
+reason. The guard belongs at the accumulator, where every one of those
+inputs meets, rather than replicated at each caller.
+
+**Ignoring the value is not ignoring the call.** `setTime(NaN)` returned
+before marking the instance driven, so the internal clock kept running
+and the indicator animated freely until a finite value arrived — while
+native, which treats a non-finite `time` as driving, held. The README's
+"the displayed frame just holds" was true of native and aspirational on
+web. `driven`/`halt()` now happen first, and only the value is
+discarded.
+
+`wrapPhase` also becomes `phase - Math.floor(phase)` rather than
+`((phase % 1) + 1) % 1`. The modulo form is not the identity on
+`[0, 1)` — adding 1 to a fraction costs a mantissa bit the second
+modulo cannot give back — so `setTime(0.35)` reported
+`onFrame(_, 0.35000000000000009)` and a caller could not read back the
+value they set. Subtracting the floor is exact there and agrees
+everywhere else, with a `w < 1` guard for the one input (`-1e-18`) whose
+subtraction lands exactly on 1.
+
+That change has a consequence worth stating plainly, because it makes
+this codebase's tests easier to fool: an exact `wrapPhase` removes most
+of the bare-division round-trip failures §1 describes, including _all_
+of them at the common frame counts (24, 36, 48, 60, 64, 120). 4560
+`(n, k)` pairs across 396 frame counts still fail — `n = 49, k = 1`,
+`n = 22, k = 15`, `n = 100, k = 29` — so `phaseForFrame` is still
+required, but a sweep built from round numbers would now pass with the
+rejected formula restored. The sweeps therefore include counts drawn
+from the failing set, and say so.
 
 ## Alternatives considered
 

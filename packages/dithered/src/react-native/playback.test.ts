@@ -28,6 +28,28 @@ const PERIODS = [500, 1000, 2000, 3333];
 const SPEEDS = [-3, -1, -0.5, 0, 0.5, 1, 2.5];
 const FRAME_COUNTS = [1, 8, 24, 48, 60];
 
+describe('UI twins match core totality', () => {
+  it('advancePhaseUI leaves the phase untouched when the step would not be finite', () => {
+    const cases: Array<[number, number, number, number]> = [
+      [0.25, 16, 2000, NaN],
+      [0.25, 16, 2000, Infinity],
+      [0.25, 16, 0, 1],
+      [0.25, NaN, 2000, 1],
+    ];
+    for (const [phase, dt, period, speed] of cases) {
+      expect(advancePhaseUI(phase, dt, period, speed)).toBe(advancePhase(phase, dt, period, speed));
+      expect(advancePhaseUI(phase, dt, period, speed)).toBe(0.25);
+    }
+  });
+
+  it('wrapPhaseUI is exact on [0, 1) and total, exactly like wrapPhase', () => {
+    for (const p of [0, 0.1, 0.3, 0.35, 0.9, -1e-18, NaN, Infinity, -0.25, 2.5]) {
+      expect(Object.is(wrapPhaseUI(p), wrapPhase(p))).toBe(true);
+    }
+    expect(wrapPhaseUI(0.35)).toBe(0.35);
+  });
+});
+
 describe('native/playback parity with core/clock', () => {
   it('wrapPhaseUI matches wrapPhase across a sweep of phases', () => {
     for (const phase of PHASES) {

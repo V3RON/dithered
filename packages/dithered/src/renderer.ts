@@ -1123,18 +1123,23 @@ export function createDithered(
     },
 
     setTime(t: number) {
-      // A non-finite `t` is ignored outright (ADR 0006 §3), not clamped
-      // to frame 0 — `frameForPhase`'s totality is a backstop for
-      // anything that slips past every driver, not license for a driver
-      // to snap to frame 0 on its own. Left completely untouched: the
-      // displayed frame holds, `onFrame` does not fire, and the
-      // instance is exactly as driveable by a subsequent finite
-      // `setTime` as it was before this call. This is the PRD's
-      // flagship case: `time={scrollY / contentHeight}` is `NaN` on the
-      // first render, before layout.
-      if (!Number.isFinite(t)) return;
+      // Calling `setTime` at all is the statement that this instance is
+      // externally driven, so `driven`/`halt()` come first and apply
+      // even to a non-finite `t`. Otherwise the PRD's flagship case —
+      // `time={scrollY / contentHeight}`, which is `NaN` on the first
+      // render, before layout — would leave the internal clock running
+      // and the indicator animating freely until a finite ratio
+      // arrived, which is neither what the README promises ("the
+      // displayed frame just holds") nor what native does (it treats a
+      // non-finite `time` as driving, and holds).
       driven = true;
       halt();
+      // The *value* is then ignored (ADR 0006 §3) rather than clamped to
+      // frame 0: `frameForPhase`'s totality is a backstop for anything
+      // that slips past every driver, not license for a driver to snap
+      // to frame 0 on its own. The phase is left where it was, so the
+      // displayed frame holds and `onFrame` does not fire.
+      if (!Number.isFinite(t)) return;
       phase = t;
       paintForPhase();
     },

@@ -2586,15 +2586,18 @@ describe('createDithered playback controls', () => {
     const { canvas } = makeFakeCanvas();
     createDithered(canvas, baseOptions({ onFrame, initialFrame: 1, frames: 48 }));
     expect(onFrame).toHaveBeenCalledTimes(1);
-    expect(onFrame.mock.calls[0]![0]).toBe(1); // not 0 (the bare-division bug)
+    expect(onFrame.mock.calls[0]![0]).toBe(1);
     expect(onFrame.mock.calls[0]![1]).toBeCloseTo(1.5 / 48, 10);
   });
 
   // ADR 0006 test 40: initialFrame paints exactly that frame for every
-  // valid index, at frame counts that include ones where `k / frames`
-  // is not exactly representable in binary (48, 60, 36).
-  it('initialFrame paints frame k for every k in [0, frames), at frames 48, 60 and 36', () => {
-    for (const frames of [48, 60, 36]) {
+  // valid index. The frame counts matter: 48/60/36 are round numbers
+  // where a bare `k / frames` happens to round-trip correctly, so a
+  // regression to it would slip past them. 49, 22 and 26 are counts
+  // where it still fails (49/1 -> 0, 22/15 -> 14, 26/15 -> 14), and
+  // they are what actually pins `phaseForFrame` here.
+  it('initialFrame paints frame k for every k in [0, frames), at frames 48, 60, 36, 49, 22 and 26', () => {
+    for (const frames of [48, 60, 36, 49, 22, 26]) {
       for (let k = 0; k < frames; k++) {
         const onFrame = vi.fn();
         const { canvas } = makeFakeCanvas();
@@ -2716,6 +2719,88 @@ describe('createDithered playback controls', () => {
     instance.setTime(0.72); // floor(7.2) = 7
     expect(onFrame).toHaveBeenCalledTimes(1);
     expect(onFrame.mock.calls[0]![0]).toBe(7);
+  });
+
+  // Finding 5 (third review). Ignoring the *value* is not the same as
+  // ignoring the *call*: passing `time` at all means "this instance is
+  // externally driven", so a non-finite `t` must still halt the internal
+  // clock. Otherwise `time={scrollY / contentHeight}` would leave the
+  // indicator animating freely until layout produced a finite ratio —
+  // and native, which treats a non-finite `time` as driving, would hold
+  // while web ran.
+  it('setTime(NaN) still halts the internal clock, so the displayed frame really does hold', () => {
+    const onFrame = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ onFrame, frames: 10 }));
+    expect(env.rafCallbacks.length).toBe(1); // free-running at mount
+
+    instance.setTime(NaN);
+    onFrame.mockClear();
+
+    // No new frame is ever scheduled, and driving the one already in
+    // flight paints nothing further.
+    const scheduled = env.rafCallbacks.length;
+    lastTick()(10_000);
+    expect(env.rafCallbacks.length).toBe(scheduled);
+    expect(onFrame).not.toHaveBeenCalled();
+  });
+
+  // Finding 2 (third review). `speed`/`period`/`initialFrame` reach the
+  // accumulator without passing `setTime`'s guard, and nothing but
+  // `setTime` ever resets `phase` — so before `advancePhase` was made
+  // total, one bad `speed` froze the frame permanently while firing
+  // `onLoop(NaN)` on every tick, because `NaN !== NaN`.
+  it('a non-finite speed does not poison the accumulator, and update() recovers', () => {
+    const onFrame = vi.fn();
+    const onLoop = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ onFrame, onLoop, frames: 10 }));
+
+    lastTick()(0);
+    instance.update({ speed: NaN });
+    onFrame.mockClear();
+    onLoop.mockClear();
+
+    // Ticking with a NaN speed advances nothing and reports nothing —
+    // in particular it does not fire onLoop once per frame forever.
+    for (let i = 1; i <= 20; i++) lastTick()(i * 16);
+    expect(onLoop).not.toHaveBeenCalled();
+    expect(onFrame).not.toHaveBeenCalled();
+
+    // And the instance is not wedged: a good speed drives it again.
+    instance.update({ speed: 1 });
+    lastTick()(20 * 16);
+    lastTick()(20 * 16 + 400); // dt=400ms of a 2000ms period -> +0.2
+    expect(onFrame).toHaveBeenCalled();
+  });
+
+  it('a non-finite period or initialFrame does not wedge playback', () => {
+    const onFrame = vi.fn();
+    const onLoop = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    createDithered(canvas, baseOptions({ onFrame, onLoop, frames: 10, initialFrame: Infinity }));
+    // `wrapFrame` is total, so the seed falls back to frame 0 rather
+    // than seeding the accumulator with NaN. Asserting the painted frame
+    // alone would not catch an un-total `wrapFrame`: `frameForPhase` is
+    // itself total, so a NaN phase still *paints* frame 0. The tell is
+    // `loopsAt(NaN) !== loopsAt(NaN)` — NaN compares unequal to itself —
+    // firing `onLoop(NaN)` on every single tick.
+    expect(onFrame.mock.calls[0]![0]).toBe(0);
+    for (let i = 0; i <= 10; i++) lastTick()(i * 16);
+    expect(onLoop).not.toHaveBeenCalled();
+
+    const onFrame2 = vi.fn();
+    const { canvas: canvas2 } = makeFakeCanvas();
+    const instance = createDithered(canvas2, baseOptions({ onFrame: onFrame2, frames: 10 }));
+    lastTick()(0);
+    instance.update({ period: 0 }); // dt/0 -> Infinity
+    onFrame2.mockClear();
+    for (let i = 1; i <= 10; i++) lastTick()(i * 16);
+    expect(onFrame2).not.toHaveBeenCalled();
+    instance.update({ period: 2000 });
+    lastTick()(10 * 16);
+    lastTick()(10 * 16 + 400);
+    expect(onFrame2).toHaveBeenCalled();
   });
 
   it('clearTime re-applies `paused`: it does not resume playback while paused is true', () => {

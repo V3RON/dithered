@@ -96,6 +96,38 @@ describe('frameForPhase', () => {
   });
 });
 
+describe('advancePhase totality', () => {
+  // Nothing but `setTime` ever *resets* `phase`, so a single non-finite
+  // step would poison playback permanently: the frame freezes (a
+  // non-finite phase floors to 0) while `loopsAt(NaN) !== loopsAt(NaN)`
+  // fires `onLoop(NaN)` every tick forever, and not even
+  // `update({ speed: 1 })` recovers it. `setTime` guards its own input;
+  // `speed`, `period` and `dt` are guarded here, at the one place they
+  // all meet.
+  it('leaves the phase untouched when the step would not be finite', () => {
+    expect(advancePhase(0.25, 16, 2000, NaN)).toBe(0.25);
+    expect(advancePhase(0.25, 16, 2000, Infinity)).toBe(0.25);
+    expect(advancePhase(0.25, 16, 0, 1)).toBe(0.25); // period 0 -> Infinity
+    expect(advancePhase(0.25, NaN, 2000, 1)).toBe(0.25);
+    expect(advancePhase(0.25, Infinity, 2000, 1)).toBe(0.25);
+  });
+
+  it('still advances normally for finite inputs', () => {
+    expect(advancePhase(0, 1000, 2000, 1)).toBe(0.5);
+    expect(advancePhase(0.25, 16, 2000, 0)).toBe(0.25); // speed 0 is a real no-op
+  });
+});
+
+describe('wrapFrame totality', () => {
+  it('returns 0 for a non-finite index or a non-positive frame count', () => {
+    // `Math.round(Infinity) % 48` is `NaN`, which would seed the
+    // accumulator with a phase nothing can recover.
+    expect(wrapFrame(Infinity, 48)).toBe(0);
+    expect(wrapFrame(NaN, 48)).toBe(0);
+    expect(wrapFrame(5, 0)).toBe(0);
+  });
+});
+
 describe('phaseForFrame', () => {
   // The property `phaseForFrame` exists to guarantee (ADR 0006 §1): a
   // frame index survives the round trip through a phase exactly, for
@@ -112,14 +144,44 @@ describe('phaseForFrame', () => {
     }
   });
 
+  it('round-trips a phase exactly, so a caller can read back what they set', () => {
+    // `((p % 1) + 1) % 1` perturbs values already inside [0, 1) — adding
+    // 1 to a fraction costs a mantissa bit the second modulo cannot give
+    // back — so `setTime(0.35)` used to report `onFrame(_, 0.3500000000
+    // 0000009)`. Subtracting the floor is exact there.
+    for (const p of [0, 0.1, 0.2, 0.3, 0.35, 0.5, 0.7, 0.9, 0.999999]) {
+      expect(wrapPhase(p)).toBe(p);
+    }
+  });
+
+  it('stays inside [0, 1) for a phase a hair below zero', () => {
+    // `-1e-18 - Math.floor(-1e-18)` is `-1e-18 + 1`, which rounds to
+    // exactly 1 — outside the half-open range this function guarantees.
+    expect(wrapPhase(-1e-18)).toBe(0);
+    expect(wrapPhase(-Number.MIN_VALUE)).toBe(0);
+  });
+
+  it('is total: a non-finite phase wraps to 0', () => {
+    expect(wrapPhase(NaN)).toBe(0);
+    expect(wrapPhase(Infinity)).toBe(0);
+    expect(wrapPhase(-Infinity)).toBe(0);
+  });
+
   it('is the centre of the frame band, not frame / frames', () => {
-    // At frames=48, frame 1's band is [1/48, 2/48); a bare `1/48` sits at
-    // its leading edge, and `frameForPhase(1/48, 48)` actually returns 0
-    // (finding 3) because 1/48 is not exactly representable in binary
-    // and rounds down. The centre does not have that problem.
-    expect(phaseForFrame(1, 48)).toBeCloseTo(1.5 / 48, 10);
-    expect(frameForPhase(1 / 48, 48)).toBe(0); // the bare-division bug, pinned so it can't silently "fix itself"
-    expect(frameForPhase(phaseForFrame(1, 48), 48)).toBe(1); // the correct mapping
+    // A frame's band is [k/n, (k+1)/n); a bare `k/n` sits on its leading
+    // edge, where the division's own rounding can drop it into the band
+    // below. `wrapPhase` subtracting the floor (rather than the old
+    // `((p % 1) + 1) % 1`) made that far rarer — every index at
+    // frames=48 now round-trips through a bare division — but it did not
+    // make it safe: frames=49 and frames=22 still round down. Those are
+    // pinned here precisely because the round numbers no longer are, so
+    // a regression to the bare division cannot hide behind a tidy frame
+    // count.
+    expect(phaseForFrame(1, 49)).toBeCloseTo(1.5 / 49, 10);
+    expect(frameForPhase(1 / 49, 49)).toBe(0); // the bare-division bug
+    expect(frameForPhase(phaseForFrame(1, 49), 49)).toBe(1); // the centre
+    expect(frameForPhase(15 / 22, 22)).toBe(14); // and again at frames=22
+    expect(frameForPhase(phaseForFrame(15, 22), 22)).toBe(15);
   });
 });
 

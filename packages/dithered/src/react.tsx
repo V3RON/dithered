@@ -379,7 +379,12 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
       skipNextPaused.current = false;
       return;
     }
-    if (progress === undefined && time === undefined) instanceRef.current?.setPaused(paused);
+    // `time == null` — loose, so it covers `null` as well as `undefined`.
+    // `null` is documented as behaving exactly like an absent prop (the
+    // `time={sharedValue ?? null}` pattern), and the effect below hands
+    // it to `clearTime()` rather than to `setTime`, so it does not own
+    // pausing and must not suppress it here.
+    if (progress === undefined && time == null) instanceRef.current?.setPaused(paused);
   }, [paused, progress, time]);
 
   // Re-resolve `'currentColor'` on *every* render, not just when

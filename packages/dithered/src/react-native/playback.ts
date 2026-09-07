@@ -22,13 +22,15 @@
 /** Wraps a phase in loop units into `[0, 1)`, guarding negative input. */
 export function wrapPhaseUI(phase: number): number {
   'worklet';
-  return ((phase % 1) + 1) % 1;
+  const w = phase - Math.floor(phase);
+  return w < 1 ? w : 0;
 }
 
 /** `phase + (dt / period) * speed` — the entire accumulator step. */
 export function advancePhaseUI(phase: number, dtMs: number, period: number, speed: number): number {
   'worklet';
-  return phase + (dtMs / period) * speed;
+  const next = phase + (dtMs / period) * speed;
+  return Number.isFinite(next) ? next : phase;
 }
 
 /**

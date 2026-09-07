@@ -190,20 +190,6 @@ export function Dithered({
   // `useFrameCallback` re-registers its worklet (finding 4).
   const lastTimestamp = useSharedValue<number | null>(null);
 
-  // Re-point at the new recordings whenever they are rebuilt, so an
-  // option change is visible even while playback is halted. Re-derives
-  // the frame from whichever of `externalPhase`/`internalPhase` is
-  // currently driving (finding 2): `wrapFrame(currentFrame.value,
-  // frameCount)` — the old frame index modulo the new count — is
-  // exactly the `currentFrame % opts.frames` mapping ADR 0006 §4
-  // replaced on the web, and disagrees with the web driver (which
-  // re-points from the preserved *phase*) whenever `frames` changes.
-  useEffect(() => {
-    const frame = frameForRepoint(externalPhase.value, internalPhase.value, frameCount);
-    currentFrame.value = frame;
-    picture.value = pictures[frame];
-  }, [pictures, frameCount, currentFrame, picture, externalPhase, internalPhase]);
-
   // Latest-value ref trampolines, mirroring `dithered/react`: `onFrame`
   // fires via `runOnJS` from the UI thread and must not itself force a
   // worklet rebuild every render, so the identity handed to `runOnJS`
@@ -214,6 +200,29 @@ export function Dithered({
   onLoopRef.current = onLoop;
   const notifyFrame = useCallback((frame: number, t: number) => onFrameRef.current?.(frame, t), []);
   const notifyLoop = useCallback((loops: number) => onLoopRef.current?.(loops), []);
+
+  // Re-point at the new recordings whenever they are rebuilt, so an
+  // option change is visible even while playback is halted. Re-derives
+  // the frame from whichever of `externalPhase`/`internalPhase` is
+  // currently driving (finding 2): `wrapFrame(currentFrame.value,
+  // frameCount)` — the old frame index modulo the new count — is
+  // exactly the `currentFrame % opts.frames` mapping ADR 0006 §4
+  // replaced on the web, and disagrees with the web driver (which
+  // re-points from the preserved *phase*) whenever `frames` changes.
+  useEffect(() => {
+    const previousFrame = currentFrame.value;
+    const phase = externalPhase.value ?? internalPhase.value;
+    const frame = frameForRepoint(externalPhase.value, internalPhase.value, frameCount);
+    currentFrame.value = frame;
+    picture.value = pictures[frame];
+    // Reports the move, matching the web driver's structural `update()`
+    // (finding 4). Without this a `frames` change repaints native
+    // silently while web fires `onFrame`, so a caller tracking "which
+    // frame is showing" diverges from the canvas until the accumulator
+    // happens to move it again. Called directly rather than through
+    // `runOnJS`: this is an effect, already on the JS thread.
+    if (frame !== previousFrame) onFrameRef.current?.(frame, wrapPhaseUI(phase));
+  }, [pictures, frameCount, currentFrame, picture, externalPhase, internalPhase, onFrameRef]);
 
   // The initial paint at `initialFrame` fires `onFrame`, on both
   // platforms (ADR 0006 §2) — already on the JS thread at mount, so no
@@ -309,8 +318,19 @@ export function Dithered({
   // by reading it from a worklet.
   useEffect(() => {
     if (typeof time === 'number') {
-      externalPhase.value = time;
-      applyPhase(time);
+      // Guarded at the point of *storage*, not just where it is painted.
+      // `applyPhase` refusing to paint a non-finite phase (ADR 0006 §3)
+      // keeps the wrong frame off screen, but storing one is what does
+      // the lasting damage: the hand-back branch below copies
+      // `externalPhase` into the accumulator, and from there
+      // `loopsAt(NaN) !== loopsAt(NaN)` fires `onLoop(NaN)` on every
+      // tick forever while the picture never changes again. Skipping the
+      // write leaves the previous phase in place, which is what "the
+      // displayed frame just holds" means.
+      if (Number.isFinite(time)) {
+        externalPhase.value = time;
+        applyPhase(time);
+      }
       return;
     }
     if (drivingSharedValue) return; // handled by the reaction below
@@ -323,8 +343,13 @@ export function Dithered({
       const clamped = Math.min(1, Math.max(0, progress));
       const frame = frameCount > 0 ? Math.floor(clamped * (frameCount - 1)) : 0;
       const phase = frameCount > 0 ? phaseForFrameUI(frame, frameCount) : 0;
-      externalPhase.value = phase;
-      applyPhase(phase);
+      // Same storage guard as the `time` branch above: `progress={loaded
+      // / total}` with `total === 0` is `NaN`, and `Math.floor(NaN * n)`
+      // survives every clamp on the way here.
+      if (Number.isFinite(phase)) {
+        externalPhase.value = phase;
+        applyPhase(phase);
+      }
       return;
     }
     // Neither `time` nor `progress`: hand control back to the internal
@@ -346,6 +371,10 @@ export function Dithered({
     (value) => {
       'worklet';
       if (!drivingSharedValue || value === null) return;
+      // Storage guard, as in write path 1: a gesture handler computing
+      // `time.value = x / width` can hand this a `NaN` on a zero-width
+      // layout pass, and a stored `NaN` outlives the bad frame.
+      if (!Number.isFinite(value)) return;
       externalPhase.value = value;
       applyPhase(value);
     },
