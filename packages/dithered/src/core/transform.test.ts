@@ -99,6 +99,10 @@ describe('parseTransform', () => {
     expect(parseTransform('   ')).toEqual(IDENTITY);
   });
 
+  it('returns the identity for "none", a legal value of the transform attribute', () => {
+    expect(parseTransform('none')).toEqual(IDENTITY);
+  });
+
   it('throws on an unknown function name', () => {
     expect(() => parseTransform('spin(10)')).toThrow(/spin/);
   });

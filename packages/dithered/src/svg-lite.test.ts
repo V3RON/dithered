@@ -13,6 +13,21 @@ describe('shapeFromSvgLite', () => {
     expect(shapeFromSvgLite(TWO_PATH_SVG)).toEqual(shapeFromSvg(TWO_PATH_SVG));
   });
 
+  it('agrees with shapeFromSvg when a d attribute is broken across multiple lines', () => {
+    // XML attribute-value normalization (DOMParser's, and now the lite
+    // scanner's) replaces every tab/newline/CR in an attribute value with
+    // a space — routine formatting for hand-written and Illustrator SVG.
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+        <path d="M10 10
+                 H90
+                 V90
+                 H10 Z" />
+      </svg>
+    `;
+    expect(shapeFromSvgLite(svg)).toEqual(shapeFromSvg(svg));
+  });
+
   it('reads the viewBox', () => {
     expect(shapeFromSvgLite(TWO_PATH_SVG).viewBox).toEqual({
       x: 0,
@@ -92,14 +107,21 @@ describe('shapeFromSvgLite', () => {
       shapeFromSvgLite(
         '<svg viewBox="0 0 10 10"><defs><rect width="10" height="10"/></defs></svg>',
       ),
-    ).toThrow(/path/i);
+    ).toThrow(/no drawable geometry/i);
   });
 
   it('converts a <rect> with rx/ry, and bakes an ancestor <g transform>', () => {
     const svg =
-      '<svg viewBox="0 0 100 100"><g transform="translate(10 10)"><rect width="20" height="20" /></g></svg>';
-    // H/V fold into L once a transform is baked (toAbsolute normalizes to L before transforming).
-    expect(shapeFromSvgLite(svg).path).toBe('M 10 10 L 30 10 L 30 30 L 10 30 Z');
+      '<svg viewBox="0 0 100 100"><g transform="translate(10 10)">' +
+      '<rect width="20" height="20" rx="4" ry="4" /></g></svg>';
+    // H/V fold into L, and the rounded corners' A arcs into C cubics, once
+    // a transform is baked (transformSegments converts every arc under
+    // any matrix, including a plain translation — see ADR 0010 §5).
+    expect(shapeFromSvgLite(svg).path).toBe(
+      'M 14 10 L 26 10 C 28.209139 10 30 11.790861 30 14 L 30 26 ' +
+        'C 30 28.209139 28.209139 30 26 30 L 14 30 C 11.790861 30 10 28.209139 10 26 ' +
+        'L 10 14 C 10 11.790861 11.790861 10 14 10 Z',
+    );
   });
 
   it('sets fillRule when every contributing element declares evenodd', () => {

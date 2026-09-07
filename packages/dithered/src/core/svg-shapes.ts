@@ -1,3 +1,5 @@
+import { readNumberToken } from './path';
+
 /**
  * Converts one SVG basic-shape element to path data. Platform-free: the
  * element is read through a plain attribute getter rather than a DOM
@@ -35,12 +37,26 @@ export function basicShapeToPath(tag: string, attr: AttrGetter): string | null {
   }
 }
 
-/** A numeric attribute; `null` for missing, blank, `"auto"`, or unparseable. */
+/**
+ * A numeric attribute; `null` for missing, blank, `"auto"`, or unparseable
+ * — which includes a percentage or any CSS unit other than `px` (a bare
+ * `px` suffix is accepted, since design tools emit it; other units stay
+ * unsupported rather than requiring a viewport to resolve against).
+ *
+ * `null` uniformly means "absent" here — it is each *caller* that turns
+ * that into a default: `x`/`y`/`cx`/`cy` fall back to 0 (SVG's default
+ * for them), while `width`/`height`/`r`/`rx`/`ry` have no valid default
+ * and so skip the element. So an unparseable `x` renders at 0 and an
+ * unparseable `width` drops the shape — different outcomes, but both the
+ * documented SVG default for that attribute, not an accident of this
+ * function treating the two differently.
+ */
 function numAttr(attr: AttrGetter, name: string): number | null {
   const raw = attr(name);
   if (raw === null) return null;
-  const trimmed = raw.trim();
+  let trimmed = raw.trim();
   if (trimmed === '' || trimmed.toLowerCase() === 'auto') return null;
+  if (trimmed.toLowerCase().endsWith('px')) trimmed = trimmed.slice(0, -2).trim();
   const value = Number(trimmed);
   return Number.isNaN(value) ? null : value;
 }
@@ -116,25 +132,44 @@ function polyPointsToPath(attr: AttrGetter, closed: boolean): string | null {
   const raw = attr('points');
   if (!raw) return null;
 
-  const tokens = raw
-    .trim()
-    .split(/[\s,]+/)
-    .filter((s) => s.length > 0);
+  const numbers = scanPointList(raw);
+  if (numbers === null) return null;
   // A trailing odd coordinate is dropped, same as a renderer parsing up to the error.
-  const coordCount = tokens.length - (tokens.length % 2);
+  const coordCount = numbers.length - (numbers.length % 2);
   if (coordCount < 4) return null;
 
-  const numbers: number[] = [];
-  for (let i = 0; i < coordCount; i++) {
-    const value = Number(tokens[i]);
-    if (Number.isNaN(value)) return null;
-    numbers.push(value);
-  }
-
   let d = `M ${numbers[0]} ${numbers[1]}`;
-  for (let i = 2; i < numbers.length; i += 2) {
+  for (let i = 2; i < coordCount; i += 2) {
     d += ` L ${numbers[i]} ${numbers[i + 1]}`;
   }
   if (closed) d += ' Z';
   return d;
+}
+
+const POINTS_SEPARATOR = new Set([' ', '\t', '\n', '\r', ',']);
+
+/**
+ * Scans a `points` attribute into a flat number list. Coordinates may be
+ * separated by whitespace and/or commas, or run straight into a signed
+ * number with no separator at all (`10-5`, legal SVG) — the same number
+ * grammar `parsePath` uses for path data, so the token reader is shared
+ * with it (`readNumberToken`) rather than re-split with a naive regex
+ * that would misparse the glued-sign case.
+ *
+ * Returns `null` on the first unparseable token; the caller treats that
+ * like any other degenerate shape (skip), not a loader error.
+ */
+function scanPointList(text: string): number[] | null {
+  const numbers: number[] = [];
+  const n = text.length;
+  let i = 0;
+  while (i < n) {
+    while (i < n && POINTS_SEPARATOR.has(text[i])) i++;
+    if (i >= n) break;
+    const token = readNumberToken(text, i);
+    if (!token) return null;
+    numbers.push(token.value);
+    i = token.end;
+  }
+  return numbers;
 }

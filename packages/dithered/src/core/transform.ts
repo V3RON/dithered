@@ -63,7 +63,10 @@ const FUNCTION_RE = /([a-zA-Z]+)\s*\(([^)]*)\)/g;
  */
 export function parseTransform(value: string): Matrix {
   const trimmed = value.trim();
-  if (!trimmed) return IDENTITY;
+  // `none` is a legal value of the transform presentation attribute (SVG 2
+  // / CSS transforms) and browsers honor it as the identity, same as an
+  // absent or blank attribute.
+  if (!trimmed || trimmed === 'none') return IDENTITY;
 
   let matrix = IDENTITY;
   let cursor = 0;

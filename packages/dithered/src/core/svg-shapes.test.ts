@@ -59,6 +59,19 @@ describe('basicShapeToPath: rect', () => {
     expect(basicShapeToPath('rect', attrs({ width: 'huge', height: '10' }))).toBeNull();
   });
 
+  it('accepts a trailing px unit', () => {
+    expect(basicShapeToPath('rect', attrs({ width: '10px', height: '10px' }))).toBe(
+      'M 0 0 H 10 V 10 H 0 Z',
+    );
+  });
+
+  it('treats a percentage or other CSS unit as absent, same as any other unparseable value', () => {
+    expect(basicShapeToPath('rect', attrs({ width: '50%', height: '10' }))).toBeNull();
+    expect(basicShapeToPath('rect', attrs({ x: '2em', width: '10', height: '10' }))).toBe(
+      'M 0 0 H 10 V 10 H 0 Z', // unparseable x falls back to 0, same as absent
+    );
+  });
+
   it('emits a rounded rect clockwise from the top-left corner', () => {
     const d = basicShapeToPath('rect', attrs({ width: '20', height: '10', rx: '2', ry: '2' }));
     expect(d).toBe(
@@ -137,6 +150,13 @@ describe('basicShapeToPath: polygon', () => {
 
   it('skips on an unparseable coordinate', () => {
     expect(basicShapeToPath('polygon', attrs({ points: '0,0 x,10' }))).toBeNull();
+  });
+
+  it('accepts a sign glued directly onto the next number with no separator', () => {
+    // "10-5" is a legal points value: the sign starts a new number.
+    expect(basicShapeToPath('polygon', attrs({ points: '0 0 10-5 20 20' }))).toBe(
+      'M 0 0 L 10 -5 L 20 20 Z',
+    );
   });
 });
 

@@ -31,6 +31,9 @@ const NON_RENDERED_CONTAINERS = new Set([
   'title',
   'desc',
   'metadata',
+  // Its children are XHTML, not SVG geometry — descending into it would
+  // leak foreign markup the same way <defs> would leak a definition.
+  'foreignobject',
 ]);
 
 /** Drawable in SVG, but out of scope here — recorded so the "nothing found" error can name them. */
@@ -71,16 +74,21 @@ export function collectGeometry(
   root: SvgNode,
   label: string,
 ): { path: string; fillRule?: FillRule } {
-  const base: Inherited = {
-    ctm: IDENTITY,
-    fill: root.attr('fill') ?? 'black',
-    stroke: root.attr('stroke') ?? 'none',
-    fillRule: root.attr('fill-rule') === 'evenodd' ? 'evenodd' : 'nonzero',
-  };
-
   const walked: Walked = { paths: [], fillRules: new Set(), unsupportedTags: new Set() };
-  for (const child of root.children) {
-    walk(child, base, walked, label);
+
+  // A display="none" root hides the entire document, same as it would on
+  // any descendant (ADR §7.2) — `walk` never sees the root itself to
+  // apply that rule to, so it's checked here instead.
+  if (root.attr('display') !== 'none') {
+    const base: Inherited = {
+      ctm: IDENTITY,
+      fill: root.attr('fill') ?? 'black',
+      stroke: root.attr('stroke') ?? 'none',
+      fillRule: root.attr('fill-rule') === 'evenodd' ? 'evenodd' : 'nonzero',
+    };
+    for (const child of root.children) {
+      walk(child, base, walked, label);
+    }
   }
 
   if (walked.paths.length === 0) {

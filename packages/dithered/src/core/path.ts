@@ -27,6 +27,40 @@ const ARG_COUNTS: Record<string, number> = {
 
 const COMMAND_LETTERS = new Set(Object.keys(ARG_COUNTS).flatMap((c) => [c, c.toLowerCase()]));
 
+const isDigit = (ch: string | undefined) => ch !== undefined && ch >= '0' && ch <= '9';
+
+/**
+ * Reads one number token — SVG's shared grammar for path data and
+ * `points` lists: an optional sign, digits, an optional fraction, an
+ * optional exponent — from `s` starting at `i`, which must not be on
+ * whitespace or a comma (the caller skips separators; the two callers
+ * disagree on what those are).
+ *
+ * Returns `null`, rather than throwing, when `s[i..]` doesn't start with
+ * a valid number: `parsePath` turns that into a thrown error (a bad `d`
+ * is a loader error), while `svg-shapes.ts`'s `points` scanner turns it
+ * into "skip this element" (a bad `points` value just means the element
+ * is degenerate, like any other invalid geometry attribute).
+ */
+export function readNumberToken(s: string, i: number): { value: number; end: number } | null {
+  const start = i;
+  if (s[i] === '+' || s[i] === '-') i++;
+  while (isDigit(s[i])) i++;
+  if (s[i] === '.') {
+    i++;
+    while (isDigit(s[i])) i++;
+  }
+  if (s[i] === 'e' || s[i] === 'E') {
+    i++;
+    if (s[i] === '+' || s[i] === '-') i++;
+    while (isDigit(s[i])) i++;
+  }
+  const text = s.slice(start, i);
+  const value = Number(text);
+  if (!text || text === '+' || text === '-' || text === '.' || Number.isNaN(value)) return null;
+  return { value, end: i };
+}
+
 /**
  * Tokenizes an SVG path `d` attribute into {@link PathSegment}s.
  *
@@ -47,28 +81,15 @@ export function parsePath(d: string): PathSegment[] {
   const skipSeparators = () => {
     while (i < n && isSeparator(d[i])) i++;
   };
-  const isDigit = (ch: string | undefined) => ch !== undefined && ch >= '0' && ch <= '9';
 
   const readNumber = (): number => {
     skipSeparators();
-    const start = i;
-    if (d[i] === '+' || d[i] === '-') i++;
-    while (isDigit(d[i])) i++;
-    if (d[i] === '.') {
-      i++;
-      while (isDigit(d[i])) i++;
+    const token = readNumberToken(d, i);
+    if (!token) {
+      throw new Error(`parsePath: expected a number at position ${i} in "${d}".`);
     }
-    if (d[i] === 'e' || d[i] === 'E') {
-      i++;
-      if (d[i] === '+' || d[i] === '-') i++;
-      while (isDigit(d[i])) i++;
-    }
-    const text = d.slice(start, i);
-    const value = Number(text);
-    if (!text || text === '+' || text === '-' || text === '.' || Number.isNaN(value)) {
-      throw new Error(`parsePath: expected a number at position ${start} in "${d}".`);
-    }
-    return value;
+    i = token.end;
+    return token.value;
   };
 
   const readFlag = (): number => {
@@ -269,6 +290,8 @@ export function transformSegments(segments: PathSegment[], m: Matrix): PathSegme
   const result: PathSegment[] = [];
   let x = 0;
   let y = 0;
+  let startX = 0;
+  let startY = 0;
 
   for (const seg of segments) {
     switch (seg.command) {
@@ -278,6 +301,10 @@ export function transformSegments(segments: PathSegment[], m: Matrix): PathSegme
         result.push({ command: seg.command, values: [px, py] });
         x = seg.values[0];
         y = seg.values[1];
+        if (seg.command === 'M') {
+          startX = x;
+          startY = y;
+        }
         break;
       }
       case 'C': {
@@ -316,6 +343,11 @@ export function transformSegments(segments: PathSegment[], m: Matrix): PathSegme
       }
       case 'Z':
         result.push({ command: 'Z', values: [] });
+        // Restore the current point to the subpath start, exactly as
+        // `toAbsolute` does — otherwise an `A` right after a `Z` would be
+        // converted from the wrong start point (see `arcToCubics`'s x0/y0).
+        x = startX;
+        y = startY;
         break;
       default:
         throw new Error(

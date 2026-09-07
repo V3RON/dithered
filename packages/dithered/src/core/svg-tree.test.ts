@@ -46,6 +46,11 @@ describe('collectGeometry: basic concatenation', () => {
     const { path: d } = collectGeometry(tree, 'test');
     expect(d).toBe('M 0 0 H 10 V 10 H 0 Z M99 99 Z M 5 0 A 5 5 0 0 1 -5 0 A 5 5 0 0 1 5 0 Z');
   });
+
+  it('converts a <polyline> without closing it, end to end through the traversal', () => {
+    const tree = root([new Node('polyline', { points: '0,0 10,0 5,10' })]);
+    expect(collectGeometry(tree, 'test').path).toBe('M 0 0 L 10 0 L 5 10');
+  });
 });
 
 describe('collectGeometry: skip rules', () => {
@@ -56,6 +61,19 @@ describe('collectGeometry: skip rules', () => {
       const tree = root([new Node(tag, {}, [path('M9 9 Z')]), path('M1 1 Z')]);
       expect(collectGeometry(tree, 'test').path).toBe('M1 1 Z');
     }
+  });
+
+  it('skips geometry inside <pattern>, <marker>, <style>, <script>, <title>, <desc>, <metadata>', () => {
+    for (const tag of ['pattern', 'marker', 'style', 'script', 'title', 'desc', 'metadata']) {
+      const tree = root([new Node(tag, {}, [path('M9 9 Z')]), path('M1 1 Z')]);
+      expect(collectGeometry(tree, 'test').path).toBe('M1 1 Z');
+    }
+  });
+
+  it('skips <foreignObject> and its (XHTML) children, same as <defs>', () => {
+    // SvgNode.tag is lower-cased, so this arrives here as "foreignobject".
+    const tree = root([new Node('foreignobject', {}, [path('M9 9 Z')]), path('M1 1 Z')]);
+    expect(collectGeometry(tree, 'test').path).toBe('M1 1 Z');
   });
 
   it('skips a whole subtree under display="none", even a nested visible descendant', () => {
@@ -81,6 +99,11 @@ describe('collectGeometry: skip rules', () => {
 
   it('drops every path under a root fill="none" with no per-path override', () => {
     const tree = root([path('M9 9 Z')], { fill: 'none' });
+    expect(() => collectGeometry(tree, 'test')).toThrow(/no drawable geometry/i);
+  });
+
+  it('skips the entire document when the root <svg> itself has display="none"', () => {
+    const tree = root([path('M9 9 Z')], { display: 'none' });
     expect(() => collectGeometry(tree, 'test')).toThrow(/no drawable geometry/i);
   });
 
@@ -129,6 +152,12 @@ describe('collectGeometry: transform', () => {
   it("ignores the root <svg>'s own transform attribute", () => {
     const tree = root([path('M0 0 L10 0')], { transform: 'translate(1000 1000)' });
     expect(collectGeometry(tree, 'test').path).toBe('M0 0 L10 0');
+  });
+
+  it('bakes skewX/skewY, not just translate/scale/rotate', () => {
+    const tree = root([path('M0 0 L0 10', { transform: 'skewX(45)' })]);
+    // skewX(45) maps (x,y) -> (x + y*tan(45), y) = (x+y, y): (0,0)->(0,0), (0,10)->(10,10).
+    expect(collectGeometry(tree, 'test').path).toBe('M 0 0 L 10 10');
   });
 
   it('throws with the calling label on a malformed transform', () => {
@@ -181,6 +210,12 @@ describe('collectGeometry: errors', () => {
     const tree = root([new Node('use', { href: '#a' }), new Node('text', {}, [])]);
     expect(() => collectGeometry(tree, 'myLoader')).toThrow(/<use>.*<text>|<text>.*<use>/);
     expect(() => collectGeometry(tree, 'myLoader')).toThrow(/myLoader:/);
+  });
+
+  it('throws the <use>-specific message when <use> is the only geometry (no <text> involved)', () => {
+    const tree = root([new Node('use', { href: '#a' })]);
+    expect(() => collectGeometry(tree, 'myLoader')).toThrow(/<use>/);
+    expect(() => collectGeometry(tree, 'myLoader')).not.toThrow(/no drawable geometry/i);
   });
 
   it('throws the generic message for a document with no geometry and nothing unsupported', () => {

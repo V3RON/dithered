@@ -125,7 +125,20 @@ function parseAttrs(text: string): Map<string, string> {
   ATTR_RE.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = ATTR_RE.exec(text))) {
-    attrs.set(match[1], match[3] ?? match[4] ?? '');
+    attrs.set(match[1], normalizeAttrValue(match[3] ?? match[4] ?? ''));
   }
   return attrs;
+}
+
+/**
+ * XML attribute-value normalization: every tab, newline, and carriage
+ * return in an attribute's literal text becomes a single space. A real
+ * `DOMParser` does this for every attribute — not just whitespace-
+ * collapsing, one-for-one replacement — so a multi-line `d` (routine in
+ * hand-written and Illustrator-exported SVG) reads the same path data
+ * through both loaders instead of `shapeFromSvgLite` leaking raw
+ * newlines that `shapeFromSvg` never sees.
+ */
+function normalizeAttrValue(value: string): string {
+  return value.replace(/[\t\n\r]/g, ' ');
 }

@@ -199,10 +199,87 @@ describe('arcToCubics', () => {
   it('degenerates to a straight line when start equals end', () => {
     expect(arcToCubics(5, 5, 10, 10, 0, 0, 1, 5, 5)).toEqual([[5, 5, 5, 5, 5, 5]]);
   });
+
+  // The tests above only check that each cubic's *endpoints* land on the
+  // ellipse — that passes even with a badly wrong Bézier bulge (e.g. the
+  // `4/3*tan(delta/4)` control-point-length constant off by 30%), because
+  // endpoints don't depend on the tangent-length construction at all.
+  // These sample the curve *between* endpoints against the ellipse's own
+  // parametric definition — independent of arcToCubics's own algorithm —
+  // so a bad tangent length actually fails them. Verified by mutation:
+  // scaling that constant by 1.3 pushes the max error from ~0.008 to
+  // ~2.6 (circle) and from ~6e-5 to ~0.09 (rotated ellipse) — see the
+  // finding-1 writeup in the PR/commit message for the full check.
+  describe('midpoints trace the analytic ellipse, not just the endpoints', () => {
+    function evalCubic(x0: number, y0: number, c: number[], t: number): [number, number] {
+      const [x1, y1, x2, y2, x3, y3] = c;
+      const mt = 1 - t;
+      return [
+        mt * mt * mt * x0 + 3 * mt * mt * t * x1 + 3 * mt * t * t * x2 + t * t * t * x3,
+        mt * mt * mt * y0 + 3 * mt * mt * t * y1 + 3 * mt * t * t * y2 + t * t * t * y3,
+      ];
+    }
+
+    it('stays on a circle of the requested radius along a 270deg (3-segment) sweep', () => {
+      // Same arc as "splits a large arc into multiple <=90deg cubics" above,
+      // but here every point *along* each cubic is checked, not just joins.
+      const cubics = arcToCubics(10, 0, 10, 10, 0, 1, 1, 0, -10);
+      let x = 10;
+      let y = 0;
+      for (const c of cubics) {
+        for (let t = 0.1; t < 1; t += 0.1) {
+          const [px, py] = evalCubic(x, y, c, t);
+          expect(Math.hypot(px, py)).toBeCloseTo(10, 1); // within 0.05 of r=10
+        }
+        x = c[4];
+        y = c[5];
+      }
+    });
+
+    it('stays on a rotated, non-uniform ellipse (rx != ry, x-axis-rotation != 0)', () => {
+      // Built from the ellipse's own parametric definition — a
+      // *different* formula from arcToCubics's endpoint-to-center
+      // construction — so this doesn't share any machinery with the
+      // function under test beyond "what an ellipse point is".
+      const cx = 5;
+      const cy = -3;
+      const rx = 20;
+      const ry = 8;
+      const phiDeg = 30;
+      const phi = (phiDeg * Math.PI) / 180;
+      const cosPhi = Math.cos(phi);
+      const sinPhi = Math.sin(phi);
+      const ellipsePoint = (theta: number): [number, number] => [
+        cx + rx * Math.cos(theta) * cosPhi - ry * Math.sin(theta) * sinPhi,
+        cy + rx * Math.cos(theta) * sinPhi + ry * Math.sin(theta) * cosPhi,
+      ];
+      const [x0, y0] = ellipsePoint(0.2);
+      const [x1, y1] = ellipsePoint(3.5); // > 180deg away: exercises the large-arc split too
+
+      const cubics = arcToCubics(x0, y0, rx, ry, phiDeg, 1, 1, x1, y1);
+      let x = x0;
+      let y = y0;
+      for (const c of cubics) {
+        for (let t = 0.1; t < 1; t += 0.1) {
+          const [px, py] = evalCubic(x, y, c, t);
+          // Undo the ellipse's rotation and normalize by its radii: a
+          // point exactly on the ellipse lands at distance 1 from center.
+          const dx = px - cx;
+          const dy = py - cy;
+          const lx = dx * cosPhi + dy * sinPhi;
+          const ly = -dx * sinPhi + dy * cosPhi;
+          const normalized = (lx / rx) ** 2 + (ly / ry) ** 2;
+          expect(normalized).toBeCloseTo(1, 2); // within 0.005
+        }
+        x = c[4];
+        y = c[5];
+      }
+    });
+  });
 });
 
 describe('transformSegments', () => {
-  it('is a no-op under the identity matrix, but still expands arcs to cubics', () => {
+  it('is a no-op on M/L under the identity matrix', () => {
     const segs = toAbsolute(parsePath('M0 0 L10 10'));
     expect(transformSegments(segs, IDENTITY)).toEqual(segs);
   });
@@ -237,6 +314,20 @@ describe('transformSegments', () => {
     const last = scaled[scaled.length - 1];
     expect(last.values[4]).toBeCloseTo(0, 9);
     expect(last.values[5]).toBeCloseTo(20, 9);
+  });
+
+  it('restores the current point to the subpath start on Z, so a following A starts there', () => {
+    // M 10 10, H/V to (20,20), Z back to (10,10), then a relative arc to (20,10).
+    const segs = toAbsolute(parsePath('M 10 10 h 10 v 10 z a 5 5 0 0 1 10 0'));
+    const out = transformSegments(segs, IDENTITY);
+    const arcCubics = out.filter((s) => s.command === 'C');
+    // Computed independently from the correct start point (10,10) — not
+    // the pre-Z current point (20,20), which is the bug this guards.
+    const expected = arcToCubics(10, 10, 5, 5, 0, 0, 1, 20, 10).map((values) => ({
+      command: 'C',
+      values,
+    }));
+    expect(arcCubics).toEqual(expected);
   });
 });
 
