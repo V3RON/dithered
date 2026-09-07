@@ -227,57 +227,57 @@ _jumps_. That is also a pre-existing bug in its own right: today the canvas's
 appearance changes with the display, because a floor denominated in device pixels
 shrinks as pixels get smaller.
 
-So `computeGeometry` gains a `scale` parameter (default 1) that applies to the floor
-only:
+**The canvas must paint in CSS pixels under a device transform.** Two earlier attempts
+at this failed, and both failed the same way: they tried to make the canvas's
+_device-pixel_ geometry agree with the SVG's _CSS-pixel_ geometry by choosing a
+correction factor. First `dpr` (wrong: the backing store is rounded, so the real
+factor is not `1/dpr`), then `W / cssW` (wrong: the browser stretches a backing store
+of `W × H` into a CSS box of `cssW × cssH` with **two independent factors**,
+`cssW / W` horizontally and `cssH / H` vertically). No single scalar can reconcile
+two independent factors. The second attempt made `x` exact and left `y` off by
+`(W · cssH) / (H · cssW)` — 0.55 CSS px at the bottom row for `rozenite` at
+`size: 48`, dpr 1, which the ADR at the time claimed was the exact case.
+
+The fix is to stop correcting and instead remove the discrepancy at its source.
+`createDithered` sets a device transform once and then paints in CSS pixels:
 
 ```ts
-gap = Math.max(0.6 * scale, cellSize * opts.gap);
+const W = (canvas.width = Math.round(cssW * dpr)); // backing store, integer
+const H = (canvas.height = Math.round(cssH * dpr));
+ctx.setTransform(W / cssW, 0, 0, H / cssH, 0, 0); // the browser's own two factors
+paintFrame(ctx, cells, brightness, phase, computeGeometry(opts, cssW, cssH));
 ```
 
-`createDithered` passes `dpr`; the SVG and Skia paths pass the default 1. This
-establishes the invariant the no-drift guarantee actually needs:
+`computeGeometry(opts, cssW, cssH)` is now _literally the same call_ `renderToSvg`
+makes, so there is nothing left to reconcile: the two paths compute one set of numbers
+in one unit. A coordinate drawn at CSS `x` lands at device `x · W / cssW` and is
+displayed back at `x`; likewise `y` through `H / cssH`. Both axes are exact for every
+`size` and every `dpr`, integer or not.
 
-> **Geometry computed at scale `s` equals geometry computed at scale 1, multiplied by
-> `s`** — cell size, gap, radius and every cell's x/y/width alike.
+This also deletes machinery rather than adding it. `computeGeometry` needs **no
+`scale` parameter** — the earlier amendment's addition is removed, and with it the
+question of what unit the `0.6` floor is denominated in. It is CSS pixels, everywhere,
+because that is the only unit any caller now passes. The floor therefore still means
+the same thing on every display, which was the legitimate half of the first
+amendment.
 
-**The scale that matters is the backing store's, not `devicePixelRatio`.** A first
-attempt at this drew from the _unrounded_ `surfaceSize(opts, dpr)` while still setting
-`canvas.width = Math.round(...)`. That is wrong, and wrong in a way that is invisible
-if you compare backing-store coordinates: the browser stretches a backing store of
-`W` device px into a CSS box of `cssW` px, so a drawn coordinate is _displayed_
-multiplied by `cssW / W`. Drawing at the unrounded size and rounding the store means
-that factor is not `1 / dpr`, and the mount swap still shifts the right-hand cells
-(0.25 CSS px for `rozenite` at `size: 48`, dpr 1) — the bug merely moves from the y
-axis to the x axis.
+The backing-store rounding does not disappear; it moves to where it belongs. `W` and
+`H` are still integers, so the browser resamples by up to half a pixel — but that is
+a _rasterization_ difference, not a geometry one. Geometry is identical by
+construction.
 
-So `createDithered` rounds the backing store **first**, then derives geometry from the
-rounded integers, with the scale set to what the store actually is:
+Consequences for the rest of the renderer: `blit` must reset to the device transform
+(not the identity) before painting and clear in CSS units (`clearRect(0, 0, cssW, cssH)`);
+the sprite strip is painted with `ox = f * cssW` under the same transform, while
+`drawImage` from the strip runs under the identity transform in device units, since
+the strip's slots are `W` wide.
 
-```ts
-const W = Math.round(cssW * dpr); // the backing store, necessarily an integer
-const H = Math.round(cssH * dpr);
-computeGeometry(opts, W, H, ox, W / cssW); // not dpr
-```
-
-Then every displayed quantity matches the SVG's exactly. Cell size and radius cancel
-on their own — displayed cell size is `(W / cols) · (cssW / W) = cssW / cols` either
-way — and passing `W / cssW` rather than `dpr` is what makes the one term that does
-_not_ cancel, the absolute gap floor, cancel too: `0.6 · (W / cssW) · (cssW / W) = 0.6`
-displayed px, the same 0.6 the SVG floors at. Nothing is drawn outside the store
-either.
-
-This is exact whenever `cssH` (i.e. `size`) is an integer and `dpr` is an integer,
-which covers essentially every real render; otherwise the residual is the aspect error
-introduced by rounding `W` and `H` independently, bounded by half a device pixel over
-the whole surface. That residual is inherent — `canvas.width` is an integer and the
-CSS box is not — and the honest claim is therefore "identical displayed geometry, up
-to the half-pixel the backing store must round to", not "byte-identical".
-
-Because the mismatch lives in the mapping from backing store to CSS box, **the
-no-drift test must compare displayed coordinates** — canvas rects multiplied by
-`cssW / W` — against the SVG's. Comparing backing-store rects divided by `dpr`, as an
-earlier version of that test did, is a unit system in which this whole class of bug
-cannot appear.
+Because geometry is now unit-identical, **the no-drift test must still compare
+displayed coordinates on both axes independently** — canvas `x`/`width` through
+`cssW / W` and canvas `y`/`height` through `cssH / H`. Multiplying both axes by
+`cssW / W`, as an earlier version did, is a unit system in which a y-axis error cannot
+appear; multiplying by `1 / dpr` hides the whole class. The test must use a shape whose
+aspect is not 1 so the two factors actually differ.
 
 `renderToDataURL` returns `data:image/svg+xml;utf8,<encoded>`, percent-encoding `%`
 first, then `#`, `<`, `>`, `"`, `'`, `(`, `)`, `&`, and whitespace. Full
@@ -348,12 +348,13 @@ palette PRD's per-tone grouping harder. `<rect rx>` is what the PRD asks for.
   worth noting in the PR.
 - `ResolvedOptions` is no longer `Required<DitheredOptions>`. Any external code
   relying on that identity breaks; nothing in the workspace does.
-- `computeGeometry` gains a `scale` parameter, and the minimum cell gap is now 0.6
-  **CSS** pixels rather than 0.6 device pixels. On a retina display the canvas
-  therefore draws slightly narrower cells (larger gaps) than it does today. This is
-  a deliberate fix — the old behaviour made the same options look different on
-  different displays — but it is a visible change to existing web output, not only
-  to the new static path.
+- The minimum cell gap is now 0.6 **CSS** pixels rather than 0.6 device pixels,
+  because `createDithered` paints in CSS pixels under a device transform. On a retina
+  display the canvas therefore draws slightly narrower cells (larger gaps) than it
+  does today. This is a deliberate fix — the old behaviour made the same options look
+  different on different displays — but it is a visible change to existing web output,
+  not only to the new static path. `computeGeometry`'s signature is unchanged from
+  `master`.
 - **Parity testing is bounded by the test environment.** jsdom implements no
   `Path2D` and no `isPointInPath` (`src/test-setup.ts` already stubs a constructible
   `Path2D` for other tests), so a literal `jsHitTester` vs `domHitTester` comparison
@@ -383,19 +384,18 @@ palette PRD's per-tone grouping harder. `<rect rx>` is what the PRD asks for.
 
 ### Files to change
 
-| File                                                                                                                  | Change                                                                                                                                                                                                                                                        |
-| --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/core/options.ts`                                                                                                 | Add `hitTest?: HitTester` to `DitheredOptions`; redefine `ResolvedOptions` as `Required<Omit<DitheredOptions, 'hitTest'>> & { hitTest?: HitTester }`. `DEFAULTS` is unchanged (typed as `Omit<ResolvedOptions, 'shape' \| 'brightness' \| 'hitTest'>`).       |
-| `src/core/index.ts`                                                                                                   | Re-export the new path, hit-test, svg-paint and static surfaces.                                                                                                                                                                                              |
-| `src/shape.ts`                                                                                                        | `sampleCells`'s `hitTest` parameter becomes optional, defaulting to `jsHitTester(shape)`. Doc comment updated.                                                                                                                                                |
-| `src/core/paint.ts`                                                                                                   | `computeGeometry` gains a `scale` parameter (default 1) applied to the gap floor: `Math.max(0.6 * scale, cellSize * opts.gap)`.                                                                                                                               |
-| `src/renderer.ts`                                                                                                     | Drop the `domHitTester` import; pass `opts.hitTest` through to `sampleCells` (falling back to the default). Round the backing store first, then derive geometry from the rounded `W`/`H` with `computeGeometry`'s `scale` set to `W / cssW` — not `dpr`.      |
-| `src/native/pictures.ts`, `src/native/Dithered.tsx`                                                                   | Same: stop defaulting to `skiaHitTester`, honour `hitTest` when given.                                                                                                                                                                                        |
-| `src/index.ts`                                                                                                        | Export `jsHitTester`, `renderToSvg`, `renderToDataURL`, `svgPaintContext`, `parsePath`, `flattenPath`, `pathToPolygons`, and the `PathCommand` / `Point` / `FillRule` / `RenderToSvgOptions` / `SvgPaintContext` types.                                       |
-| `src/native.ts`                                                                                                       | Export the same additions (all DOM-free).                                                                                                                                                                                                                     |
-| `src/react.tsx`                                                                                                       | Add `ssrFallback?: boolean` (default `true`); render the frame-`initialFrame` data URL as `backgroundImage` plus explicit CSS width/height until the mount effect clears it.                                                                                  |
-| `src/test-setup.ts`                                                                                                   | Guard the `Path2D` stub and the Testing Library import so the file is a no-op without a DOM (the node-environment test must not trip over it).                                                                                                                |
-| `README.md` (repo root — `packages/dithered` has no README of its own, and `files: ["dist"]` means none is published) | New "Static rendering" section: `renderToSvg` / `renderToDataURL` / `jsHitTester`, the determinism note, the SSR fallback, and the PRD-required **"Use a frame as a favicon"** example. Note `jsHitTester` as the new `sampleCells` default in the API table. |
+| File                                                                                                                  | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/core/options.ts`                                                                                                 | Add `hitTest?: HitTester` to `DitheredOptions`; redefine `ResolvedOptions` as `Required<Omit<DitheredOptions, 'hitTest'>> & { hitTest?: HitTester }`. `DEFAULTS` is unchanged (typed as `Omit<ResolvedOptions, 'shape' \| 'brightness' \| 'hitTest'>`).                                                                                                                                                                                                              |
+| `src/core/index.ts`                                                                                                   | Re-export the new path, hit-test, svg-paint and static surfaces.                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `src/shape.ts`                                                                                                        | `sampleCells`'s `hitTest` parameter becomes optional, defaulting to `jsHitTester(shape)`. Doc comment updated.                                                                                                                                                                                                                                                                                                                                                       |
+| `src/renderer.ts`                                                                                                     | Drop the `domHitTester` import; pass `opts.hitTest` through to `sampleCells` (falling back to the default). Set a device transform (`ctx.setTransform(W / cssW, 0, 0, H / cssH, 0, 0)`) and paint in CSS pixels, calling `computeGeometry(opts, cssW, cssH)` — the same call `renderToSvg` makes. `blit` resets to that transform and clears in CSS units; the sprite strip uses `ox = f * cssW`, and `drawImage` runs under the identity transform in device units. |
+| `src/native/pictures.ts`, `src/native/Dithered.tsx`                                                                   | Same: stop defaulting to `skiaHitTester`, honour `hitTest` when given.                                                                                                                                                                                                                                                                                                                                                                                               |
+| `src/index.ts`                                                                                                        | Export `jsHitTester`, `renderToSvg`, `renderToDataURL`, `svgPaintContext`, `parsePath`, `flattenPath`, `pathToPolygons`, and the `PathCommand` / `Point` / `FillRule` / `RenderToSvgOptions` / `SvgPaintContext` types.                                                                                                                                                                                                                                              |
+| `src/native.ts`                                                                                                       | Export the same additions (all DOM-free).                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `src/react.tsx`                                                                                                       | Add `ssrFallback?: boolean` (default `true`); render the frame-`initialFrame` data URL as `backgroundImage` plus explicit CSS width/height until the mount effect clears it.                                                                                                                                                                                                                                                                                         |
+| `src/test-setup.ts`                                                                                                   | Guard the `Path2D` stub and the Testing Library import so the file is a no-op without a DOM (the node-environment test must not trip over it).                                                                                                                                                                                                                                                                                                                       |
+| `README.md` (repo root — `packages/dithered` has no README of its own, and `files: ["dist"]` means none is published) | New "Static rendering" section: `renderToSvg` / `renderToDataURL` / `jsHitTester`, the determinism note, the SSR fallback, and the PRD-required **"Use a frame as a favicon"** example. Note `jsHitTester` as the new `sampleCells` default in the API table.                                                                                                                                                                                                        |
 
 ### Tests to write
 
@@ -461,9 +461,11 @@ palette PRD's per-tone grouping harder. `<rect rx>` is what the PRD asks for.
     This test must use the library's own defaults (`shapes.rozenite`, `size: 48`,
     `cols: 16` — a non-integer surface width and an aspect ratio that is not 1) and
     must run at `devicePixelRatio` 1, 2 and 3. It must compare **displayed**
-    coordinates — canvas rects multiplied by `canvas.style.width / canvas.width` —
-    against the SVG's, never backing-store rects divided by `dpr`, which is the one
-    unit system in which backing-store rounding cannot show up. A fixture chosen so
+    coordinates, mapping each axis through its own factor — canvas `x`/`width` by
+    `cssW / canvas.width`, canvas `y`/`height` by `cssH / canvas.height` — against the
+    SVG's. Multiplying both axes by `cssW / canvas.width` hides a y-axis error;
+    dividing by `dpr` hides the whole class. The shape's aspect must not be 1, or the
+    two factors coincide and the distinction is untested. A fixture chosen so
     the gap floor and the rounding both happen to cancel (e.g. `shapes.square` at
     `size: 40, cols: 4, dpr: 1`) asserts a tautology and does not count. It must also
     use a frame-varying `brightness` and compare at more than one frame: with
@@ -472,10 +474,12 @@ palette PRD's per-tone grouping harder. `<rect rx>` is what the PRD asks for.
     cover the sprite-strip path (`cache: true`, with `stubGetContext`), not only the
     direct-paint path — `cache` defaults to `'auto'`, which is on at `size: 48`, so
     the strip is what a default web render actually uses.
-13. **Geometry scale invariant** — `computeGeometry(opts, w * s, h * s, 0, s)` equals
-    `computeGeometry(opts, w, h)` with `cellSize`, `gap` and `radius` each multiplied
-    by `s`, for `s` in 1, 2, 3 and for a `cellSize` both above and below the 0.6px
-    floor's crossover point.
+13. **Device transform** — `createDithered` sets `ctx.setTransform(W / cssW, 0, 0, H / cssH, 0, 0)`
+    with `W`/`H` the rounded backing store, and passes `cssW`/`cssH` (not device
+    dimensions) to `computeGeometry`, so the geometry it paints is identical to
+    `renderToSvg`'s for the same options — assert equality of the geometry objects
+    themselves, not just of the rendered output. `blit` re-establishes that transform
+    rather than the identity, and `clearRect` covers the whole surface in CSS units.
 14. **Degenerate input** — a `Shape` whose viewBox has zero width or height (making
     `aspectOf` non-finite) makes `renderToSvg` throw a named error rather than emit
     `viewBox="0 0 Infinity 40"`. `formatNumber` never emits `NaN` or `Infinity` into
