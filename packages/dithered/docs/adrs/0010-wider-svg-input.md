@@ -285,6 +285,25 @@ plumbing from `display`), and `opacity` interacts with group opacity. Deferred; 
   `<use>` expansion, `preserveAspectRatio`, and nested `<svg>` viewports remain unsupported. The
   `style` attribute in particular is worth flagging: `style="display:none"` will _not_ skip an
   element, only the presentation attribute will.
+- **Concatenation changes fill semantics across elements, and this decision does not fix that.**
+  Merging every element into one path string means overlapping regions of _separately filled_
+  elements cancel rather than union: a counter-clockwise author `<polygon>` overlapping the
+  clockwise `<rect>` this ADR emits punches a hole under `nonzero`, and once `fillRule: 'evenodd'`
+  is hoisted to the document (§6) _any_ overlap between two elements becomes a hole. SVG renders
+  both cases solid, because each element is filled independently. The single-path `Shape` predates
+  this change — two overlapping `<path>` elements with opposite winding always behaved this way —
+  but supporting basic shapes makes it reachable far more often, and §6 adds the evenodd case.
+  Fixing it properly means either `Shape` carrying a list of subpaths with per-subpath fill rules
+  (both hit testers OR-ing over them) or a boolean path union; both are larger than this change and
+  neither is in the PRD. Documented as a known limitation in the README, and left for a follow-up.
+
+- Each contributing element's _leading_ moveto is rewritten to an absolute `M` before
+  concatenation. In the source document every element's path data starts its own path, so its first
+  moveto is absolute-equivalent by definition; spliced into one string, a leading relative `m` would
+  otherwise resolve against the previous element's current point and displace the whole subpath.
+  Commands after the first moveto keep whatever form they were written in, so output stays
+  byte-identical for the absolute-`M` data that design tools usually emit.
+
 - `packages/dithered/src/core/path.ts` is now a shared surface. Issue #7 can import it as-is; if #7
   lands first with its own parser, one of the two should be deleted in favour of the other rather
   than left as a duplicate.
