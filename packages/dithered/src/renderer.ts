@@ -90,14 +90,16 @@ export function createDithered(
 
   // `W`/`H` are the backing store's *integer* pixel dimensions — what
   // `canvas.width`/`height`, the sprite strip, and `drawImage` need.
-  // `cssW`/`cssH` are the CSS-pixel size `canvas.style` is set to.
-  // Geometry is derived from the *rounded* `W`/`H`, scaled by `W / cssW`
-  // (not `devicePixelRatio`) — that is the factor the browser actually
-  // stretches the backing store by when painting it into the CSS box, so
-  // displayed coordinates match `renderToSvg`'s CSS-pixel geometry
-  // exactly (up to the half-device-pixel that rounding `W`/`H`
-  // independently can introduce). See the ADR's "scale that matters is
-  // the backing store's" section.
+  // `cssW`/`cssH` are the CSS-pixel size `canvas.style` is set to. The
+  // context is given a device transform, `setTransform(W / cssW, 0, 0,
+  // H / cssH, 0, 0)` — the browser's own two independent stretch
+  // factors — and everything is then painted in CSS pixels, through
+  // `computeGeometry(opts, cssW, cssH)`: the identical call
+  // `renderToSvg` makes. There is no correction factor left to get
+  // wrong on either axis; the backing store's rounding of `W`/`H` still
+  // resamples the result by a fraction of a device pixel, but that is
+  // rasterization, not geometry. See the ADR's "the canvas must paint
+  // in CSS pixels under a device transform" section.
   let W = 0;
   let H = 0;
   let cssW = 0;
@@ -158,19 +160,23 @@ export function createDithered(
       // box, so geometry matches `renderToSvg`'s CSS-pixel geometry
       // exactly (up to the half-device-pixel `W`/`H` rounding can
       // introduce) — see the field comments above.
-      const scale = W / cssW;
       const strip = document.createElement('canvas');
       strip.width = W * opts.frames;
       strip.height = H;
       const sctx = strip.getContext('2d');
       if (sctx) {
+        // One frame per `W`-wide device-pixel slot, painted in CSS
+        // pixels under the same device transform `blit` uses for the
+        // direct-paint path — `ox = f * cssW` lands each frame flush
+        // against `f * W` in the backing store.
+        sctx.setTransform(W / cssW, 0, 0, H / cssH, 0, 0);
         for (let f = 0; f < opts.frames; f++) {
           paintFrame(
             sctx,
             cells,
             opts.brightness,
             f / opts.frames,
-            computeGeometry(paintOpts, W, H, f * W, scale),
+            computeGeometry(paintOpts, cssW, cssH, f * cssW),
           );
         }
         sheet = strip;
@@ -219,9 +225,12 @@ export function createDithered(
 
   function blit(f: number): void {
     const frame = wrapFrame(f, opts.frames);
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, W, H);
+    ctx.setTransform(W / cssW, 0, 0, H / cssH, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
     if (sheet) {
+      // The strip's slots are `W` (device pixels) wide, so the blit
+      // itself runs under the identity transform in device units.
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.drawImage(sheet, frame * W, 0, W, H, 0, 0, W, H);
     } else {
       paintFrame(
@@ -229,7 +238,7 @@ export function createDithered(
         cells,
         opts.brightness,
         frame / opts.frames,
-        computeGeometry(paintOpts, W, H, 0, W / cssW),
+        computeGeometry(paintOpts, cssW, cssH),
       );
     }
     currentFrame = frame;

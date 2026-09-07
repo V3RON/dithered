@@ -305,7 +305,7 @@ Both take the same `DitheredOptions` as `createDithered`/`<Dithered>`, plus:
 | `precision` | `number` | `3`     | Decimal places in emitted coordinates.                               |
 | `title`     | `string` | —       | Emitted as `<title>`, for accessible inline SVG. Omitted when unset. |
 
-The `viewBox` is `0 0 W H`, where `W`/`H` are the same CSS-pixel size (`surfaceSize` at `devicePixelRatio` 1) the canvas renderer displays — output is resolution independent, and matches the live canvas's displayed geometry up to the half device pixel that rounding the canvas's backing store can introduce (exact whenever `size` and `devicePixelRatio` are both integers, which covers essentially every real render).
+The `viewBox` is `0 0 W H`, where `W`/`H` are the same CSS-pixel size (`surfaceSize`) `createDithered` paints under its device transform — output is resolution independent, and matches the live canvas's displayed geometry **exactly**, on both axes, for every `size` and `devicePixelRatio`. The canvas's rounded, integer backing store still introduces a sub-device-pixel rasterization difference, but that is pixel snapping, not a geometry mismatch.
 
 ### Use a frame as a favicon
 
@@ -329,7 +329,7 @@ Sampling which cells fall inside a shape needs a point-in-path test, and `Path2D
 
 ### SSR fallback
 
-`dithered/react`'s `<Dithered>` renders the `initialFrame` SVG as a `background-image` data URL (with matching CSS width/height) on the `<canvas>` until the component has mounted and painted for real, so server-rendered HTML shows the shape instead of a blank canvas. Opt out with `ssrFallback={false}`.
+`dithered/react`'s `<Dithered>` renders, as a `background-image` data URL (with matching CSS width/height) on the `<canvas>`, an SVG of the frame the component is about to paint on mount — `initialFrame`, or, when `progress` is set, `Math.round(clamp(progress) * (frames - 1))`, the same frame the determinate-progress effect renders — until the component has mounted and painted for real, so server-rendered HTML shows the shape instead of a blank canvas. A determinate `<Dithered progress={0.9} />` therefore server-renders frame 42 of a 48-frame loop directly, rather than flashing frame 0 first. Opt out with `ssrFallback={false}`.
 
 ## Performance notes
 

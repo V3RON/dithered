@@ -26,26 +26,42 @@ function wrapFrame(frame: number, count: number): number {
  * live output cannot drift apart.
  *
  * The `viewBox` is `0 0 W H`, where `W`/`H` are `surfaceSize`'s CSS-pixel
- * size at `devicePixelRatio` 1 — the same CSS-pixel geometry the canvas
- * renderer displays (see `createDithered`'s scale-by-the-backing-store
- * derivation), so this matches the live output up to the half device
- * pixel that rounding the canvas's backing store can introduce, as well
- * as being resolution independent. `hitTest` defaults to {@link jsHitTester}, like
- * `sampleCells`.
+ * size — the same CSS-pixel geometry `createDithered` paints under its
+ * device transform, computed by the identical `computeGeometry(opts, W,
+ * H)` call (its `cssW`/`cssH`, in the renderer's own naming). The two are
+ * geometrically exact on both axes for every `size` and
+ * `devicePixelRatio`; only the canvas's rounded, integer backing store
+ * introduces a (sub-device-pixel) rasterization difference, not a
+ * geometry one. Output is also resolution independent (it is vector).
+ * `hitTest` defaults to {@link jsHitTester}, like `sampleCells`.
  *
- * Throws if `options.shape`'s viewBox is degenerate (zero width or
- * height, making the aspect ratio non-finite) rather than emitting an
- * invalid `viewBox="0 0 Infinity …"` document.
+ * Throws if `options.shape`'s viewBox is degenerate (zero, negative or
+ * non-finite width or height) or if `options.size` resolves to a
+ * degenerate surface, naming whichever of the two is actually at fault,
+ * rather than emitting an invalid `viewBox="0 0 Infinity …"` document.
  */
 export function renderToSvg(options: RenderToSvgOptions): string {
   const { frame = 0, precision = 3, title, ...ditheredOptions } = options;
   const opts = resolveOptions(ditheredOptions);
-  const { width, height } = surfaceSize(opts);
-  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
-    const { width: vbWidth, height: vbHeight } = opts.shape.viewBox;
+
+  // Checked separately from the surface size below: a shape's own
+  // viewBox and a caller's `size` are independent ways to end up with a
+  // non-finite/non-positive width or height, and the two want different
+  // blame. A degenerate viewBox (zero or non-finite) is the shape's
+  // fault; a degenerate surface with a perfectly good viewBox is
+  // `size`'s.
+  const { width: vbWidth, height: vbHeight } = opts.shape.viewBox;
+  if (!Number.isFinite(vbWidth) || vbWidth <= 0 || !Number.isFinite(vbHeight) || vbHeight <= 0) {
     throw new Error(
       `renderToSvg: shape has a degenerate viewBox (width ${vbWidth}, height ${vbHeight}); ` +
         'both must be finite and positive.',
+    );
+  }
+  const { width, height } = surfaceSize(opts);
+  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+    throw new Error(
+      `renderToSvg: options.size (${opts.size}) produces a degenerate surface ` +
+        `(width ${width}, height ${height}); size must be finite and positive.`,
     );
   }
   const rows = resolveRows(opts);

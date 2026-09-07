@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDithered, frameAt, paintFrame, type DitheredOptions } from './renderer';
-import type { Cell } from './shape';
+import { computeGeometry, resolveOptions, resolveRows } from './core';
+import { sampleCells, type Cell } from './shape';
+import { shapes } from './shapes';
 import {
   SQUARE_SHAPE,
   make2dCtx,
@@ -475,6 +477,43 @@ describe('createDithered', () => {
     ctx.clearRect.mockClear();
     instance.renderFrame(3);
     expect(ctx.clearRect).toHaveBeenCalledTimes(1);
+  });
+
+  // ADR item 13: `blit` re-establishes the device transform (not the
+  // identity) before painting, clears in CSS units, and paints through
+  // `computeGeometry(opts, cssW, cssH)` — the identical call `renderToSvg`
+  // makes — rather than a scaled copy of device-pixel geometry. Assert the
+  // transform/clear calls directly, and that the coordinates `paintFrame`
+  // receives equal `computeGeometry(opts, cssW, cssH)`'s own math exactly,
+  // not up to a correction factor.
+  it('paints under the device transform, clears in CSS units, and matches computeGeometry(opts, cssW, cssH) exactly', () => {
+    const options = baseOptions({ shape: shapes.rozenite, size: 48, cols: 16 });
+    vi.stubGlobal('devicePixelRatio', 2.75);
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, options);
+    ctx.setTransform.mockClear();
+    ctx.clearRect.mockClear();
+    ctx.rect.mockClear();
+    instance.renderFrame(0);
+
+    const cssW = parseFloat(canvas.style.width as string);
+    const cssH = parseFloat(canvas.style.height as string);
+    const W = canvas.width;
+    const H = canvas.height;
+
+    expect(ctx.setTransform).toHaveBeenCalledWith(W / cssW, 0, 0, H / cssH, 0, 0);
+    expect(ctx.clearRect).toHaveBeenCalledWith(0, 0, cssW, cssH);
+
+    const opts = resolveOptions(options);
+    const geometry = computeGeometry(opts, cssW, cssH);
+    const cells = sampleCells(opts.shape, opts.cols, opts.hitTest, resolveRows(opts));
+    const expectedRects = cells.map((cell) => {
+      const w = geometry.cellSize - geometry.gap * 2;
+      const x = cell.i * geometry.cellSize + geometry.gap;
+      const y = cell.j * geometry.cellSize + geometry.gap;
+      return [x, y, w, w];
+    });
+    expect(ctx.rect.mock.calls).toEqual(expectedRects);
   });
 
   // Regression: `blit` used to index the sprite strip/paint phase with the
