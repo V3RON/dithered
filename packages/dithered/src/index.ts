@@ -17,6 +17,7 @@ export {
   frameForPhase,
   loopsAt,
   paintFrame,
+  phaseForFrame,
   resolveOptions,
   resolveRows,
   wrapPhase,

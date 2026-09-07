@@ -13,7 +13,13 @@ import type { Brightness, DitheredOptions } from '../core';
 import { gem } from '../presets';
 import type { Cell, Shape } from '../shape';
 import { useDitheredPictures } from './pictures';
-import { advancePhaseUI, frameForPhaseUI, loopsAtUI, wrapPhaseUI } from './playback';
+import {
+  advancePhaseUI,
+  frameForPhaseUI,
+  loopsAtUI,
+  phaseForFrameUI,
+  wrapPhaseUI,
+} from './playback';
 
 export interface DitheredProps extends Omit<
   DitheredOptions,
@@ -161,15 +167,26 @@ export function Dithered({
   const reducedMotion = useReducedMotion();
   const appActive = useAppActive();
 
-  const currentFrame = useSharedValue(wrapFrame(initialFrame, frameCount));
-  const picture = useSharedValue(pictures[wrapFrame(initialFrame, frameCount)]);
+  // The seed frame/phase pair agree exactly: `internalPhase` is derived
+  // from `seedFrame` via `phaseForFrameUI`, not a bare `initialFrame /
+  // frameCount` (finding 7 — the latter rounds down for a third of its
+  // valid inputs, same as finding 3 on the web side, and disagreed with
+  // `currentFrame`'s exact `wrapFrame` seed).
+  const seedFrame = wrapFrame(initialFrame, frameCount);
+  const currentFrame = useSharedValue(seedFrame);
+  const picture = useSharedValue(pictures[seedFrame]);
   // The internal clock's own accumulator, in loop units — only advanced
   // by the frame callback, and only while nothing external is driving.
-  const internalPhase = useSharedValue(frameCount > 0 ? initialFrame / frameCount : 0);
+  const internalPhase = useSharedValue(frameCount > 0 ? phaseForFrameUI(seedFrame, frameCount) : 0);
   // Mirrors whatever `time` currently is, from whichever source wrote it
   // last (see the two write paths below); `null` means nothing is
   // externally driving playback right now.
   const externalPhase = useSharedValue<number | null>(null);
+  // Differenced against `info.timestamp` to get `dt` for the internal
+  // clock (see the frame callback below) — deliberately not
+  // `info.timeSincePreviousFrame`, which resets to `null` every time
+  // `useFrameCallback` re-registers its worklet (finding 4).
+  const lastTimestamp = useSharedValue<number | null>(null);
 
   // Re-point at the new recordings whenever they are rebuilt, so an
   // option change is visible even while playback is halted.
@@ -190,44 +207,75 @@ export function Dithered({
   const notifyFrame = useCallback((frame: number, t: number) => onFrameRef.current?.(frame, t), []);
   const notifyLoop = useCallback((loops: number) => onLoopRef.current?.(loops), []);
 
+  // The initial paint at `initialFrame` fires `onFrame`, on both
+  // platforms (ADR 0006 §2) — already on the JS thread at mount, so no
+  // `runOnJS` hop is needed for a value that only exists once.
+  useEffect(() => {
+    onFrameRef.current?.(seedFrame, wrapPhaseUI(phaseForFrameUI(seedFrame, frameCount)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Whether a callback is even attached, captured as a plain boolean so
+  // the worklets below can skip the `runOnJS` hop entirely when nothing
+  // is listening (finding 5) — the trampolines above are stable
+  // regardless of whether a callback is passed, so the worklet has no
+  // other way to know.
+  const hasOnFrame = onFrame !== undefined;
+  const hasOnLoop = onLoop !== undefined;
+
   // The one place that decides what is painted, whether `phase` came
   // from the internal accumulator, a numeric `time`, or a `time`
-  // `SharedValue` — mirroring the web driver's `paintForPhase`. Redefined
-  // each render (a plain closure, not memoized) so it always sees the
-  // latest `pictures`/`frameCount`; the shared values it touches are
-  // stable across renders, so that's cheap.
-  const applyPhase = (phase: number) => {
-    'worklet';
-    const frame = frameForPhaseUI(phase, frameCount);
-    if (frame !== currentFrame.value) {
-      currentFrame.value = frame;
-      picture.value = pictures[frame];
-      runOnJS(notifyFrame)(frame, wrapPhaseUI(phase));
-    }
-  };
+  // `SharedValue` — mirroring the web driver's `paintForPhase`. Memoized
+  // over its real dependencies (finding 1 / finding 4): closing over a
+  // stale `pictures`/`frameCount` is exactly the bug where a
+  // `SharedValue`-driven `useAnimatedReaction` (below) keeps painting
+  // from a recording set that was already replaced.
+  const applyPhase = useCallback(
+    (phase: number) => {
+      'worklet';
+      const frame = frameForPhaseUI(phase, frameCount);
+      if (frame !== currentFrame.value) {
+        currentFrame.value = frame;
+        picture.value = pictures[frame];
+        if (hasOnFrame) runOnJS(notifyFrame)(frame, wrapPhaseUI(phase));
+      }
+    },
+    [pictures, frameCount, currentFrame, picture, hasOnFrame, notifyFrame],
+  );
 
   const driven = time !== undefined || progress !== undefined;
   const holding =
     paused || driven || !appActive || (respectReducedMotion && reducedMotion === true);
 
   // Internal clock: a phase accumulator identical in shape to the web
-  // driver's, advanced from `timeSincePreviousFrame` (`?? 0` on the
-  // first frame after every (re)activation, so a pause/resume or a
-  // background/foreground cycle can never jump the phase — the native
-  // equivalent of the web driver resetting `lastNow` on `halt()`).
-  // Deactivated below whenever something external is driving.
-  const loop = useFrameCallback((info) => {
-    'worklet';
-    const dt = info.timeSincePreviousFrame ?? 0;
-    const loopsBefore = loopsAtUI(internalPhase.value);
-    internalPhase.value = advancePhaseUI(internalPhase.value, dt, period, speed);
-    const loopsAfter = loopsAtUI(internalPhase.value);
-    if (loopsAfter !== loopsBefore) runOnJS(notifyLoop)(loopsAfter);
-    applyPhase(internalPhase.value);
-  }, false);
+  // driver's. `dt` comes from differencing `info.timestamp` against
+  // `lastTimestamp` (finding 4), reset to `null` whenever the clock is
+  // deactivated below — the native equivalent of the web driver
+  // resetting `lastNow` on `halt()` — so the first tick after every
+  // (re)activation always sees `dt = 0` rather than a jump. Memoized
+  // with `useCallback` on top of that (ADR 0006 §6): belt and braces,
+  // since an unmemoized worklet would otherwise churn the frame-callback
+  // registration on every unrelated parent render.
+  const loop = useFrameCallback(
+    useCallback(
+      (info) => {
+        'worklet';
+        const dt = lastTimestamp.value === null ? 0 : info.timestamp - lastTimestamp.value;
+        lastTimestamp.value = info.timestamp;
+        const loopsBefore = loopsAtUI(internalPhase.value);
+        internalPhase.value = advancePhaseUI(internalPhase.value, dt, period, speed);
+        const loopsAfter = loopsAtUI(internalPhase.value);
+        if (loopsAfter !== loopsBefore && hasOnLoop) runOnJS(notifyLoop)(loopsAfter);
+        applyPhase(internalPhase.value);
+      },
+      [lastTimestamp, internalPhase, period, speed, hasOnLoop, notifyLoop, applyPhase],
+    ),
+    false,
+  );
 
   useEffect(() => {
     loop.setActive(!holding);
+    if (holding) lastTimestamp.value = null;
     // `loop` is a fresh object each render; keying the effect on it would
     // cross to the UI thread on every render for no benefit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -247,8 +295,14 @@ export function Dithered({
     }
     if (drivingSharedValue) return; // handled by the reaction below
     if (typeof progress === 'number') {
+      // The frame index is computed once, explicitly, and only then
+      // turned into a phase that quantizes back to it exactly (ADR 0006
+      // §8) — a bare `(clamped * (frameCount - 1)) / frameCount` is
+      // quantized straight back by `frameForPhaseUI`, and the round trip
+      // loses a bit for most frame counts (finding 2).
       const clamped = Math.min(1, Math.max(0, progress));
-      const phase = frameCount > 0 ? (clamped * (frameCount - 1)) / frameCount : 0;
+      const frame = frameCount > 0 ? Math.floor(clamped * (frameCount - 1)) : 0;
+      const phase = frameCount > 0 ? phaseForFrameUI(frame, frameCount) : 0;
       externalPhase.value = phase;
       applyPhase(phase);
       return;
@@ -262,7 +316,7 @@ export function Dithered({
       externalPhase.value = null;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [time, drivingSharedValue, progress, frameCount]);
+  }, [time, drivingSharedValue, progress, frameCount, applyPhase]);
 
   // Write path 2: a `SharedValue` `time`, mirrored on the UI thread so a
   // gesture or scroll handler writing `time.value` reaches the picture
@@ -278,7 +332,14 @@ export function Dithered({
     // `time` itself, not just `drivingSharedValue`: swapping in a
     // *different* SharedValue must rebuild the worklets' capture of it
     // too, or the reaction would silently keep reading the old one.
-    [time, drivingSharedValue],
+    // `applyPhase` is the finding-1 fix: without it, this reaction keeps
+    // closing over whatever `pictures`/`frameCount` were current the
+    // last time `time`/`drivingSharedValue` themselves changed, so a
+    // recordings rebuild (a `shape`/`brightness`/... change) that
+    // happens while a `SharedValue` is actively driving never reaches
+    // this worklet — the next gesture-driven write silently repaints
+    // from the stale recording set.
+    [time, drivingSharedValue, applyPhase],
   );
 
   return (

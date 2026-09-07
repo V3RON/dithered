@@ -173,16 +173,55 @@ describe('Dithered', () => {
     expect(setTimeSpy).toHaveBeenCalledWith((0.5 * 47) / 48);
   });
 
-  it('progress endpoints 0 and 1 map to frame 0 and frame frames - 1', () => {
-    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} frames={10} />);
-    const instance = lastInstance();
-    const setTimeSpy = vi.spyOn(instance, 'setTime');
+  // Asserts the actual *painted* frame (via the real `onFrame` path, on
+  // the real underlying instance — `createDithered` is only wrapped in
+  // a spy here, not replaced), not the raw argument `setTime` was
+  // called with. `frames: 10` (where `0.9 * 10 === 9` exactly) can't
+  // distinguish a correct mapping from `p * (frames - 1) / frames`
+  // (finding 2's bug): both give the same argument there. `frames: 48`
+  // — the component's own default — cannot: the naive formula computes
+  // `(1 * 47) / 48 = 46.99999999999999`, which floors to frame 46, not
+  // 47, contradicting the documented "endpoints are unchanged".
+  it('progress endpoints 0 and 1 paint frame 0 and frame frames - 1, at a frame count where the naive formula is inexact', () => {
+    const reported: number[] = [];
+    const onFrame = (f: number) => reported.push(f);
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} frames={48} onFrame={onFrame} />);
 
-    rerender(<Dithered shape={SQUARE_SHAPE} frames={10} progress={0} />);
-    expect(setTimeSpy).toHaveBeenLastCalledWith(0);
+    // Move off frame 0 first — the default `initialFrame: 0` already
+    // paints frame 0 at mount, so asserting `progress={0}` lands there
+    // too would pass even if nothing actually moved.
+    rerender(<Dithered shape={SQUARE_SHAPE} frames={48} progress={0.5} onFrame={onFrame} />);
+    reported.length = 0;
 
-    rerender(<Dithered shape={SQUARE_SHAPE} frames={10} progress={1} />);
-    expect(setTimeSpy).toHaveBeenLastCalledWith(0.9);
+    rerender(<Dithered shape={SQUARE_SHAPE} frames={48} progress={0} onFrame={onFrame} />);
+    expect(reported[reported.length - 1]).toBe(0);
+
+    rerender(<Dithered shape={SQUARE_SHAPE} frames={48} progress={1} onFrame={onFrame} />);
+    expect(reported[reported.length - 1]).toBe(47);
+  });
+
+  // ADR 0006 test 39, swept across frame counts that include several
+  // where `progress * (frames - 1) / frames` is not exact.
+  it('progress endpoints paint frame 0 and frame frames - 1 across a sweep of frame counts', () => {
+    for (const frames of [48, 36, 3, 12, 19, 27, 46, 47, 54]) {
+      const reported: number[] = [];
+      const onFrame = (f: number) => reported.push(f);
+      const { rerender, unmount } = render(
+        <Dithered shape={SQUARE_SHAPE} frames={frames} onFrame={onFrame} />,
+      );
+
+      // Move off frame 0 first so `progress={0}` is an observable repaint.
+      rerender(<Dithered shape={SQUARE_SHAPE} frames={frames} progress={0.5} onFrame={onFrame} />);
+      reported.length = 0;
+
+      rerender(<Dithered shape={SQUARE_SHAPE} frames={frames} progress={0} onFrame={onFrame} />);
+      expect(reported[reported.length - 1]).toBe(0);
+
+      rerender(<Dithered shape={SQUARE_SHAPE} frames={frames} progress={1} onFrame={onFrame} />);
+      expect(reported[reported.length - 1]).toBe(frames - 1);
+
+      unmount();
+    }
   });
 
   it('time takes precedence over progress when both are set', () => {

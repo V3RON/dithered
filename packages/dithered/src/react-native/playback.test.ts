@@ -1,6 +1,14 @@
-import { describe, expect, it } from 'vitest';
-import { advancePhase, frameForPhase, loopsAt, wrapPhase } from '../core/clock';
-import { advancePhaseUI, frameForPhaseUI, loopsAtUI, wrapPhaseUI } from './playback';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { advancePhase, frameForPhase, loopsAt, phaseForFrame, wrapPhase } from '../core/clock';
+import { createDithered } from '../renderer';
+import { SQUARE_SHAPE, makeFakeCanvas, stubAnimationGlobals } from '../test-utils';
+import {
+  advancePhaseUI,
+  frameForPhaseUI,
+  loopsAtUI,
+  phaseForFrameUI,
+  wrapPhaseUI,
+} from './playback';
 
 // A deliberately awkward sweep: whole numbers, halves, values that hug a
 // frame boundary from either side, and both signs.
@@ -57,29 +65,93 @@ describe('native/playback parity with core/clock', () => {
     }
   });
 
-  // The parity criterion that actually matters: driven by the same dt
-  // timeline (including a null-as-0 first frame, matching
-  // `info.timeSincePreviousFrame ?? 0` on the very first frame callback
-  // after every (re)activation), the UI-thread accumulator and the web
-  // driver's accumulator land on the same frame at every step.
-  it('produces the same frame sequence as the web driver given the same dt timeline', () => {
-    const dtTimeline: Array<number | null> = [null, 16.6667, 16.6667, 16.6667, 500, 0, 33.3333];
-    const period = 2000;
-    const speed = -2;
-    const frames = 36;
+  it('phaseForFrameUI matches phaseForFrame across frame indices and frame counts', () => {
+    for (const frames of FRAME_COUNTS) {
+      for (let frame = 0; frame < frames; frame++) {
+        expect(phaseForFrameUI(frame, frames)).toBe(phaseForFrame(frame, frames));
+      }
+    }
+  });
 
-    let uiPhase = 0;
-    const uiFrames = dtTimeline.map((dt) => {
-      uiPhase = advancePhaseUI(uiPhase, dt ?? 0, period, speed);
-      return frameForPhaseUI(uiPhase, frames);
+  it('frameForPhaseUI(phaseForFrameUI(k, n), n) round-trips to k exactly, matching the web-side guarantee', () => {
+    for (const frames of FRAME_COUNTS) {
+      for (let frame = 0; frame < frames; frame++) {
+        expect(frameForPhaseUI(phaseForFrameUI(frame, frames), frames)).toBe(frame);
+      }
+    }
+  });
+
+  // ADR 0006 test 42. The sweep above (and the one it replaces) only
+  // proved the `*UI` helpers agree with their `core/clock.ts` twins —
+  // pairwise identical functions compared to themselves, restated. It
+  // never touched the actual web driver, which is where "two platforms
+  // agree" as a claim about the library (not about four pure functions)
+  // actually lives: if `renderer.ts`'s `tick` ever clamped `dt`,
+  // reordered the `loopsAt` comparison, or diverged from
+  // `advancePhase`/`frameForPhase` in any other way, the sweep above
+  // would keep passing while this would not.
+  describe('the real web driver (createDithered) matches the UI-thread accumulator', () => {
+    let env: ReturnType<typeof stubAnimationGlobals>;
+
+    beforeEach(() => {
+      env = stubAnimationGlobals();
     });
 
-    let webPhase = 0;
-    const webFrames = dtTimeline.map((dt) => {
-      webPhase = advancePhase(webPhase, dt ?? 0, period, speed);
-      return frameForPhase(webPhase, frames);
+    afterEach(() => {
+      env.restore();
     });
 
-    expect(uiFrames).toEqual(webFrames);
+    it('produces the same frame sequence over an identical dt timeline', () => {
+      const dtTimeline: Array<number | null> = [null, 16.6667, 16.6667, 16.6667, 500, 0, 33.3333];
+      const period = 2000;
+      const speed = -2;
+      const frames = 36;
+
+      // Convert the dt timeline into cumulative `now` timestamps the way
+      // a real requestAnimationFrame stream would deliver them, and
+      // drive the actual `createDithered`/`tick` through it — not a
+      // second evaluation of the pure helpers `tick` is built from.
+      let now = 10_000; // an arbitrary non-zero start
+      const nowTimeline = dtTimeline.map((dt) => {
+        now += dt ?? 0;
+        return now;
+      });
+
+      const webFrames: number[] = [];
+      const { canvas } = makeFakeCanvas();
+      createDithered(canvas, {
+        shape: SQUARE_SHAPE,
+        brightness: () => true,
+        cache: false,
+        frames,
+        period,
+        speed,
+        onFrame: (f) => webFrames.push(f),
+      });
+      webFrames.length = 0; // drop the mount-time initial paint
+
+      for (const t of nowTimeline) {
+        const cb = env.rafCallbacks[env.rafCallbacks.length - 1];
+        if (!cb) throw new Error('no animation frame is currently scheduled');
+        cb(t);
+      }
+
+      // Seeded identically to how `createDithered` seeds its own `phase`
+      // for `initialFrame: 0` (the default) — via `phaseForFrame`, not a
+      // bare `0` (see finding 3) — so this is a fair comparison of the
+      // *step deltas*, not an artifact of two different starting points
+      // that happen to round to the same frame.
+      let uiPhase = phaseForFrameUI(0, frames);
+      const uiFrames: number[] = [];
+      let previousUiFrame = frameForPhaseUI(uiPhase, frames);
+      for (const dt of dtTimeline) {
+        uiPhase = advancePhaseUI(uiPhase, dt ?? 0, period, speed);
+        const f = frameForPhaseUI(uiPhase, frames);
+        if (f !== previousUiFrame) uiFrames.push(f);
+        previousUiFrame = f;
+      }
+
+      expect(webFrames).toEqual(uiFrames);
+    });
   });
 });

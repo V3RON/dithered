@@ -293,13 +293,13 @@ Pass `size="fill"` to have the instance track its parent element instead of a fi
 
 ## Determinate progress
 
-For a progress indicator rather than a loop, pass `progress` (`0`–`1`) to `Dithered`. It's sugar over `time` (below) with playback paused — `progress` maps to `setTime(progress * (frames - 1) / frames)` — so the two are mutually exclusive: if both are passed, `time` wins.
+For a progress indicator rather than a loop, pass `progress` (`0`–`1`) to `Dithered`. It's sugar over `time` (below) with playback paused: the frame index `Math.floor(progress * (frames - 1))` is selected, then mapped to the exact phase that quantizes back to that frame — not the naive `setTime(progress * (frames - 1) / frames)`, which loses a bit in the round trip through the frame grid for most frame counts (`frames: 48`, the default, among them). `progress` and `time` are mutually exclusive: if both are passed, `time` wins.
 
 ```tsx
 <Dithered shape={shapes.square} brightness={presets.fill()} progress={downloadedFraction} />
 ```
 
-> `progress`'s frame mapping now floors instead of rounds (`progress={0.5}` at the default `frames: 48` selects frame 23, not 24), so it agrees with how free-running playback quantizes phase to a frame. Only interior values shift by at most one frame; the endpoints (`0` and `1`) are unchanged.
+> `progress`'s frame mapping now floors instead of rounds (`progress={0.5}` at the default `frames: 48` selects frame 23, not 24), so it agrees with how free-running playback quantizes phase to a frame. Only interior values shift by at most one frame; the endpoints (`0` and `1`) are exact — `progress={1}` always selects frame `frames - 1`, at every frame count.
 
 ## Playback controls
 

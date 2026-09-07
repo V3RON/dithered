@@ -40,3 +40,18 @@ export function frameForPhase(phase: number, frames: number): number {
 export function loopsAt(phase: number): number {
   return Math.floor(phase);
 }
+
+/**
+ * The phase that {@link frameForPhase} maps back to exactly `frame` —
+ * the centre of the frame's phase band, not its leading edge.
+ *
+ * `frame / frames` does not survive the round trip: `frameForPhase(k /
+ * n, n)` returns `k - 1` whenever `k / n` rounds down in binary, which
+ * at the default `frames = 48` is 16 of the 48 valid indices. Anything
+ * that starts from a frame *index* and needs a phase — seeding
+ * `initialFrame`, mapping `progress` — must go through this, never a
+ * bare division. See ADR 0006 §1 and §8.
+ */
+export function phaseForFrame(frame: number, frames: number): number {
+  return (frame + 0.5) / frames;
+}

@@ -2397,8 +2397,13 @@ describe('createDithered playback controls', () => {
     instance.update({ speed: 4 }); // non-structural: no repaint at all
     expect(onFrame).not.toHaveBeenCalled();
 
-    lastTick()(600); // dt=100 at the new speed: +0.2 -> phase 0.45 -> frame 21
-    expect(onFrame).toHaveBeenLastCalledWith(21, expect.any(Number));
+    // dt=100 at the new speed: +0.2. `initialFrame` (default 0) now
+    // seeds `phase` via `phaseForFrame`, not a bare division (finding
+    // 3/ADR §1), so the running phase carries a permanent +0.5-frame
+    // (1/96) offset from what a naive "starts at exactly 0" reading
+    // would suggest: 25/96 + 0.2 = 221/480 -> frame 22, not 21.
+    lastTick()(600);
+    expect(onFrame).toHaveBeenLastCalledWith(22, expect.any(Number));
   });
 
   it('negative speed walks the frame index backwards and wraps 0 -> frames - 1', () => {
@@ -2406,7 +2411,12 @@ describe('createDithered playback controls', () => {
     const { canvas } = makeFakeCanvas();
     createDithered(canvas, baseOptions({ speed: -1, onFrame }));
     lastTick()(0);
-    lastTick()(1); // dt=1ms: phase nudges just below 0
+    // dt=25ms: the seeded phase (1/96, from `phaseForFrame(0, 48)`) has
+    // to be overcome before the phase actually goes negative — a dt=1ms
+    // nudge no longer crosses 0, it just eats into that half-frame
+    // headroom. 25ms clears it (period 2000ms, speed -1: -25/2000 <
+    // -1/96) and lands just below 0.
+    lastTick()(25);
     expect(onFrame).toHaveBeenLastCalledWith(47, expect.any(Number));
   });
 
@@ -2446,13 +2456,17 @@ describe('createDithered playback controls', () => {
     const { canvas } = makeFakeCanvas();
     createDithered(canvas, baseOptions({ onFrame, speed: -1 }));
     lastTick()(0);
-    lastTick()(1); // negative speed nudges phase just below 0
+    // dt=100ms: large enough to clear the seeded phase's half-frame
+    // headroom (1/96, from `phaseForFrame(0, 48)` — see finding 3) and
+    // still wrap the phase below 0.
+    lastTick()(100);
 
     for (const t of seenPhases) {
       expect(t).toBeGreaterThanOrEqual(0);
       expect(t).toBeLessThan(1);
     }
-    expect(seenPhases[seenPhases.length - 1]).toBeCloseTo(0.9995, 5);
+    // wrapPhase(1/96 - 100/2000) = wrapPhase(-19/480) = 461/480.
+    expect(seenPhases[seenPhases.length - 1]).toBeCloseTo(461 / 480, 6);
   });
 
   it('onLoop fires once per whole-loop crossing, with the cumulative signed count', () => {
@@ -2484,27 +2498,62 @@ describe('createDithered playback controls', () => {
     const { canvas } = makeFakeCanvas();
     createDithered(canvas, baseOptions({ onLoop, period: 1000, speed: -1 }));
     lastTick()(0);
-    lastTick()(1);
+    // dt=11ms: the seeded phase (1/96, from `phaseForFrame(0, 48)`) is
+    // ~10.4ms of backward travel at this period/speed — dt=1ms no
+    // longer crosses the loop boundary, dt=11ms does.
+    lastTick()(11);
     expect(onLoop).toHaveBeenCalledTimes(1);
     expect(onLoop).toHaveBeenLastCalledWith(-1);
   });
 
-  it('onFrame fires for the initial paint at initialFrame', () => {
+  it('onFrame fires for the initial paint at initialFrame, at a frame count where initialFrame / frames is not exact', () => {
+    // frames: 20, initialFrame: 5 (5/20 = 0.25 exactly) would pass even
+    // with the bare-division bug (finding 3) — picking a value where the
+    // division isn't float-exact is what makes this test load-bearing.
     const onFrame = vi.fn();
     const { canvas } = makeFakeCanvas();
-    createDithered(canvas, baseOptions({ onFrame, initialFrame: 5, frames: 20 }));
+    createDithered(canvas, baseOptions({ onFrame, initialFrame: 1, frames: 48 }));
     expect(onFrame).toHaveBeenCalledTimes(1);
-    expect(onFrame).toHaveBeenLastCalledWith(5, expect.closeTo(5 / 20, 5));
+    expect(onFrame.mock.calls[0]![0]).toBe(1); // not 0 (the bare-division bug)
+    expect(onFrame.mock.calls[0]![1]).toBeCloseTo(1.5 / 48, 10);
   });
 
-  it('setTime halts the internal loop: no new RAF is scheduled and the frame stops advancing', () => {
-    const { canvas } = makeFakeCanvas();
-    const instance = createDithered(canvas, baseOptions());
-    const rafCountBefore = env.rafCallbacks.length;
+  // ADR 0006 test 40: initialFrame paints exactly that frame for every
+  // valid index, at frame counts that include ones where `k / frames`
+  // is not exactly representable in binary (48, 60, 36).
+  it('initialFrame paints frame k for every k in [0, frames), at frames 48, 60 and 36', () => {
+    for (const frames of [48, 60, 36]) {
+      for (let k = 0; k < frames; k++) {
+        const onFrame = vi.fn();
+        const { canvas } = makeFakeCanvas();
+        createDithered(canvas, baseOptions({ onFrame, initialFrame: k, frames }));
+        expect(onFrame).toHaveBeenCalledTimes(1);
+        expect(onFrame.mock.calls[0]![0]).toBe(k);
+      }
+    }
+  });
 
-    instance.setTime(0.5);
+  it('setTime halts the internal loop: no new RAF is ever scheduled, and the displayed frame matches what was requested', () => {
+    const onFrame = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ onFrame, frames: 10 }));
+    const rafCountBefore = env.rafCallbacks.length;
+    onFrame.mockClear();
+
+    instance.setTime(0.5); // floor(0.5 * 10) = 5
 
     expect(cancelAnimationFrame).toHaveBeenCalled();
+    // The frame actually moved (not just "nothing was scheduled" — a
+    // no-op instance would also satisfy that half of the claim).
+    expect(onFrame).toHaveBeenLastCalledWith(5, expect.any(Number));
+    // ...and nothing was scheduled to move it any further.
+    expect(env.rafCallbacks.length).toBe(rafCountBefore);
+
+    // Even an operation that would ordinarily (re)schedule playback —
+    // an explicit `setPaused(false)`, a no-op here since the instance
+    // was never paused — must not resurrect the internal clock while
+    // `time` still owns the phase.
+    instance.setPaused(false);
     expect(env.rafCallbacks.length).toBe(rafCountBefore);
   });
 
@@ -2661,6 +2710,32 @@ describe('createDithered playback controls', () => {
     expect(onFrame.mock.calls[0]![0]).toBe(10);
   });
 
+  // ADR 0006 test 41 / finding 6: `setPaused()` and `update()` disagreed
+  // about who owns `paused` — `update()` unconditionally reset it back
+  // to the resolved option, discarding whatever `setPaused()` last set
+  // whenever the patch didn't itself touch `paused`.
+  it('update({ speed }) does not resurrect a paused value overridden by setPaused()', () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ paused: true }));
+    expect(env.rafCallbacks.length).toBe(0);
+
+    instance.setPaused(false);
+    expect(env.rafCallbacks.length).toBe(1);
+
+    instance.update({ speed: 2 });
+
+    // `update()`'s own schedule()/halt() call can't tell us anything by
+    // itself here (whether paused or not, `raf` is already non-zero, so
+    // `schedule()`'s guard is a no-op either way) — the tell is whether
+    // the *next* tick reschedules itself. If `update()` silently reset
+    // `isPaused` back to the mount-time `true`, the pending tick's own
+    // `schedule()` call bails and playback stops dead; if not, it keeps
+    // rescheduling.
+    const before = env.rafCallbacks.length;
+    lastTick()(0);
+    expect(env.rafCallbacks.length).toBe(before + 1);
+  });
+
   it('pausing and resuming does not jump the phase', () => {
     // dt values deliberately avoid landing the phase exactly on a frame
     // boundary (e.g. 0.3, 0.4 of a 10-frame loop) — floating point makes
@@ -2680,7 +2755,10 @@ describe('createDithered playback controls', () => {
     lastTick()(999_999); // huge `now`, but dt must be 0 on the first resumed tick
     expect(lastFrame()).toBe(3); // unchanged: no jump
 
-    lastTick()(999_999 + 133); // dt=133 now behaves normally from the resumed phase
-    expect(lastFrame()).toBe(4);
+    // dt=133 now behaves normally from the resumed phase. The seeded
+    // phase (0.05, from `phaseForFrame(0, 10)`) carries through: 0.383 +
+    // 0.133 = 0.516 -> frame 5, not 4.
+    lastTick()(999_999 + 133);
+    expect(lastFrame()).toBe(5);
   });
 });

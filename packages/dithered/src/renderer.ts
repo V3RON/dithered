@@ -10,6 +10,7 @@ import {
   hasCurrentColor,
   loopsAt,
   paintFrame,
+  phaseForFrame,
   resolveOptions,
   resolvePalette,
   resolveRows,
@@ -226,7 +227,12 @@ export function createDithered(
   // created, just resumed from a pause, or just handed back by
   // `clearTime`) so the next tick's `dt` is 0 rather than a jump across
   // however long playback was stopped.
-  let phase = opts.frames > 0 ? opts.initialFrame / opts.frames : 0;
+  //
+  // Seeded via `phaseForFrame`, not a bare `initialFrame / opts.frames`:
+  // the latter rounds down for a third of its valid inputs (ADR 0006
+  // §1), which would both paint the wrong initial frame and report it
+  // to `onFrame` below.
+  let phase = opts.frames > 0 ? phaseForFrame(opts.initialFrame, opts.frames) : 0;
   let lastNow: number | null = null;
   // True while a `setTime` caller owns `phase`; the internal clock never
   // runs while this is set, regardless of `isPaused`.

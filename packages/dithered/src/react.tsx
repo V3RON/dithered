@@ -3,6 +3,7 @@ import type { CSSProperties, MutableRefObject, Ref } from 'react';
 import {
   DEFAULTS,
   hasCurrentColor,
+  phaseForFrame,
   renderToDataURL,
   resolveOptions,
   resolveSizePx,
@@ -416,7 +417,15 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
       instance.setPaused(true);
       const frameCount = frames ?? 48;
       const clamped = Math.min(1, Math.max(0, progress));
-      instance.setTime((clamped * (frameCount - 1)) / frameCount);
+      // The frame index is computed once, explicitly, and only then
+      // turned into a phase that quantizes back to it exactly (ADR 0006
+      // §8) — `setTime((clamped * (frameCount - 1)) / frameCount)` looks
+      // equivalent but isn't: the product is quantized straight back by
+      // `frameForPhase`, and the round trip loses a bit for most frame
+      // counts (`progress: 1` at the default `frames: 48` lands on frame
+      // 46, not 47 — see finding 2).
+      const frame = Math.floor(clamped * (frameCount - 1));
+      instance.setTime(phaseForFrame(frame, frameCount));
       return;
     }
     instance.clearTime();

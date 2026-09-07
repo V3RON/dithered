@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { advancePhase, frameForPhase, loopsAt, wrapPhase } from './clock';
+import { advancePhase, frameForPhase, loopsAt, phaseForFrame, wrapPhase } from './clock';
 
 describe('wrapPhase', () => {
   it('maps whole and half loop-unit values into [0, 1)', () => {
@@ -68,6 +68,33 @@ describe('frameForPhase', () => {
     expect(frameForPhase(0, 10)).toBe(0);
     expect(frameForPhase(0.5, 10)).toBe(5);
     expect(frameForPhase(0.99, 10)).toBe(9);
+  });
+});
+
+describe('phaseForFrame', () => {
+  // The property `phaseForFrame` exists to guarantee (ADR 0006 §1): a
+  // frame index survives the round trip through a phase exactly, for
+  // *every* valid index at *every* frame count, not just the ones where
+  // a bare `frame / frames` happens to be exact in binary. Exhaustive,
+  // not sampled — findings 2/3/7 were each a case this sweep would have
+  // caught: `k / n` is inexact for 16 of the 48 valid indices at the
+  // library's own default frame count.
+  it('round-trips through frameForPhase exactly, for every frame at every frame count from 1 to 512', () => {
+    for (let n = 1; n <= 512; n++) {
+      for (let k = 0; k < n; k++) {
+        expect(frameForPhase(phaseForFrame(k, n), n)).toBe(k);
+      }
+    }
+  });
+
+  it('is the centre of the frame band, not frame / frames', () => {
+    // At frames=48, frame 1's band is [1/48, 2/48); a bare `1/48` sits at
+    // its leading edge, and `frameForPhase(1/48, 48)` actually returns 0
+    // (finding 3) because 1/48 is not exactly representable in binary
+    // and rounds down. The centre does not have that problem.
+    expect(phaseForFrame(1, 48)).toBeCloseTo(1.5 / 48, 10);
+    expect(frameForPhase(1 / 48, 48)).toBe(0); // the bare-division bug, pinned so it can't silently "fix itself"
+    expect(frameForPhase(phaseForFrame(1, 48), 48)).toBe(1); // the correct mapping
   });
 });
 

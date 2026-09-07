@@ -43,3 +43,13 @@ export function loopsAtUI(phase: number): number {
   'worklet';
   return Math.floor(phase);
 }
+
+/**
+ * The phase that {@link frameForPhaseUI} maps back to exactly `frame` —
+ * the centre of the frame's phase band. See `core/clock.ts`'s
+ * `phaseForFrame` for why a bare `frame / frames` is wrong.
+ */
+export function phaseForFrameUI(frame: number, frames: number): number {
+  'worklet';
+  return (frame + 0.5) / frames;
+}
