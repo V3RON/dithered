@@ -760,6 +760,103 @@ describe('createDithered', () => {
       expect(ctx.fill).toHaveBeenCalled();
     });
   });
+
+  // Regression: unlike the ragged-matrix cases above (which throw inside
+  // `sampleCells`, before `configure()` touches anything), these throw
+  // from the caller's `brightness` — once the sprite-strip rebuild calls
+  // it (cache on), or once `blit()` calls it directly (cache off). Both
+  // sit after `configure()` has already written the canvas surface, `W`,
+  // `H` and `cells` to the rejected configuration, so restoring `opts`
+  // alone is not enough: the surface and the sprite cache must roll back
+  // together, and the loop must come back if it was running.
+  describe('a rejected update() that fails outside matrix validation', () => {
+    function throwingBrightness(): never {
+      throw new Error('boom');
+    }
+
+    it('cache: true — a throwing brightness during the sprite-strip rebuild leaves the surface and cache in sync', () => {
+      // The sprite strip is a real `document.createElement('canvas')`
+      // (see `configure()`), and jsdom has no built-in 2D context — stub
+      // it so the strip build actually runs `paintFrame` (and therefore
+      // calls `brightness`) instead of silently no-op'ing into `cache:
+      // false` behavior via a null context.
+      const { restore } = stubGetContext(make2dCtx());
+      try {
+        const { canvas, ctx } = makeFakeCanvas();
+        const instance = createDithered(
+          canvas,
+          baseOptions({ size: 40, cols: 4, frames: 4, cache: true, brightness: () => true }),
+        );
+        expect(env.rafCallbacks.length).toBe(1);
+        const widthBefore = canvas.width;
+        const heightBefore = canvas.height;
+
+        ctx.drawImage.mockClear();
+        instance.renderFrame(0);
+        const callBefore = ctx.drawImage.mock.calls[0];
+
+        expect(() => instance.update({ size: 120, brightness: throwingBrightness })).toThrow(
+          /boom/,
+        );
+
+        // The rejected size change must not have taken effect on the
+        // canvas surface...
+        expect(canvas.width).toBe(widthBefore);
+        expect(canvas.height).toBe(heightBefore);
+
+        // ...nor left the loop halted for good (configure() throwing
+        // never reaches `halt()`, so nothing needs re-scheduling here).
+        expect(cancelAnimationFrame).not.toHaveBeenCalled();
+        expect(env.rafCallbacks.length).toBe(1);
+
+        // A later blit still agrees with the surface: same sprite strip,
+        // same draw rectangle as before the failed update — not the old
+        // strip read with the new (larger) geometry, which is what
+        // drawing past the strip's edge looked like before the fix.
+        ctx.drawImage.mockClear();
+        instance.renderFrame(0);
+        const callAfter = ctx.drawImage.mock.calls[0];
+        expect(callAfter).toEqual(callBefore);
+
+        // A subsequent valid update() still succeeds.
+        ctx.fill.mockClear();
+        expect(() => instance.update({ cache: false, period: 3000 })).not.toThrow();
+      } finally {
+        restore();
+      }
+    });
+
+    it('cache: false — a throwing brightness during blit() leaves the surface untouched and the loop scheduled', () => {
+      const { canvas, ctx } = makeFakeCanvas();
+      const instance = createDithered(
+        canvas,
+        baseOptions({ size: 40, cache: false, brightness: () => true }),
+      );
+      expect(env.rafCallbacks.length).toBe(1);
+      const widthBefore = canvas.width;
+      const heightBefore = canvas.height;
+
+      expect(() => instance.update({ size: 80, brightness: throwingBrightness })).toThrow(/boom/);
+
+      // The rejected size change must not have taken effect...
+      expect(canvas.width).toBe(widthBefore);
+      expect(canvas.height).toBe(heightBefore);
+
+      // ...and the loop, halted by `configure()` succeeding before the
+      // repaint failed, must have been re-armed rather than left frozen.
+      expect(cancelAnimationFrame).toHaveBeenCalled();
+      expect(env.rafCallbacks.length).toBe(2);
+
+      // A later blit paints real cells again (the restored, non-throwing
+      // `brightness`), not a degenerate/blank frame.
+      ctx.fill.mockClear();
+      instance.renderFrame(0);
+      expect(ctx.fill).toHaveBeenCalled();
+
+      // A subsequent valid update() still succeeds.
+      expect(() => instance.update({ period: 3000 })).not.toThrow();
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

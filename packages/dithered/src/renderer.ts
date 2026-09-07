@@ -270,25 +270,62 @@ export function createDithered(
 
       // Try the candidate before committing to anything: an invalid
       // `matrix` (or any other bad option) must leave this instance
-      // exactly as it was — same `opts`, same rendered frame, same
-      // animation state — rather than getting bricked mid-merge. `opts`
-      // is swapped in only for the duration of `configure()` (which reads
-      // it via closure) and reverted if that throws, before the error
-      // propagates.
+      // exactly as it was — same `opts`, same canvas surface, same
+      // sprite cache, same rendered frame, same animation state —
+      // rather than getting bricked mid-merge. `configure()` writes
+      // `canvas.style.width/height`, `canvas.width/height`, `W`, `H`,
+      // `cells` and `sheet`, and both it (building the sprite strip) and
+      // the `blit()` below (when the cache is off) call the caller's
+      // `brightness`, which can throw for reasons that have nothing to
+      // do with `matrix`. So every field this sequence can touch is
+      // snapshotted up front, and the `try` covers the whole
+      // reconfigure-and-repaint sequence — not just `configure()` — so a
+      // throw from either leaves nothing half-migrated to the rejected
+      // configuration once the snapshot is restored in the `catch`.
       const previous = opts;
+      const prevStyleWidth = canvas.style.width;
+      const prevStyleHeight = canvas.style.height;
+      const prevCanvasWidth = canvas.width;
+      const prevCanvasHeight = canvas.height;
+      const prevW = W;
+      const prevH = H;
+      const prevCells = cells;
+      const prevSheet = sheet;
+      const prevCurrentFrame = currentFrame;
+      const prevReduced = reduced;
+      const prevIsPaused = isPaused;
+      const wasScheduled = raf !== 0;
+
       opts = candidate;
+      // Set only once `halt()` below has actually run, so the `catch` can
+      // tell "configure() itself threw, the loop was never touched" (no
+      // schedule() to restore) apart from "blit() threw after halt()
+      // already cancelled the frame" (schedule() must restore it).
+      let haltedForRepaint = false;
       try {
         configure();
+        reduced = prefersReducedMotion(opts);
+        isPaused = opts.paused;
+        halt();
+        haltedForRepaint = true;
+        blit(currentFrame >= 0 ? currentFrame % opts.frames : opts.initialFrame);
+        schedule();
       } catch (err) {
         opts = previous;
+        if (canvas.style.width !== prevStyleWidth) canvas.style.width = prevStyleWidth;
+        if (canvas.style.height !== prevStyleHeight) canvas.style.height = prevStyleHeight;
+        if (canvas.width !== prevCanvasWidth) canvas.width = prevCanvasWidth;
+        if (canvas.height !== prevCanvasHeight) canvas.height = prevCanvasHeight;
+        W = prevW;
+        H = prevH;
+        cells = prevCells;
+        sheet = prevSheet;
+        currentFrame = prevCurrentFrame;
+        reduced = prevReduced;
+        isPaused = prevIsPaused;
+        if (haltedForRepaint && wasScheduled) schedule();
         throw err;
       }
-
-      reduced = prefersReducedMotion(opts);
-      isPaused = opts.paused;
-      halt();
-      blit(currentFrame >= 0 ? currentFrame % opts.frames : opts.initialFrame);
-      schedule();
     },
 
     renderFrame(frame: number) {

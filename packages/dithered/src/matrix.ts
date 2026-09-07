@@ -18,6 +18,13 @@ import { BLUE_NOISE_16 } from './blue-noise.generated';
  * matrices of the matching size; `'blueNoise'` is a precomputed 16x16
  * void-and-cluster table that removes the visible tiling Bayer matrices
  * show at high `cols`. Default `'bayer4'`.
+ *
+ * A custom array (or a hand-built `ResolvedMatrix`) must be treated as
+ * **immutable** once it has been handed to the library: resolution is
+ * cached by identity, not content, so mutating it in place afterwards is
+ * invisible — stale thresholds keep being returned, and a matrix mutated
+ * into an invalid one (ragged, out of range) is never re-validated. Build
+ * a new array and pass that instead of mutating an existing one.
  */
 export type DitherMatrix =
   'bayer2' | 'bayer4' | 'bayer8' | 'blueNoise' | readonly (readonly number[])[];
@@ -124,7 +131,17 @@ function isFiniteNumber(value: unknown): value is number {
 
 /** Validates and normalizes a raw (name or array) matrix into a {@link ResolvedMatrix}. */
 function validateAndResolve(matrix: readonly (readonly number[])[]): ResolvedMatrix {
-  if (!Array.isArray(matrix) || !matrix.every((row) => Array.isArray(row))) {
+  // `matrix.length !== Object.keys(matrix).length` catches a sparse array
+  // (e.g. `new Array(3)`): `.every` below skips holes entirely, so
+  // `Array.isArray` would never even run against them and a hole-filled
+  // "matrix" would sail through as if every row were present. Comparing
+  // against the count of *actual* own-index entries closes that gap
+  // without giving up the exhaustive `.every` check for the normal case.
+  if (
+    !Array.isArray(matrix) ||
+    matrix.length !== Object.keys(matrix).length ||
+    !matrix.every((row) => Array.isArray(row))
+  ) {
     throw new Error(
       'dithered: matrix must be a 2D array of numbers or one of the built-in matrix names.',
     );

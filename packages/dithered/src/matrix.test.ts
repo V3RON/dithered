@@ -228,6 +228,10 @@ describe('resolveMatrix — validation', () => {
     ['negative float', [[0.1, -0.2]], /outside the range 0\.\.1/],
     ['non-array', 'not-an-array', /2D array of numbers/],
     ['array of non-arrays', [1, 2, 3], /2D array of numbers/],
+    // A sparse array's holes are skipped by `Array.prototype.every`, so
+    // `Array.isArray` passing on every present row must not be enough to
+    // wave a hole through as if it were a row.
+    ['sparse array (holes, not rows)', new Array(3), /2D array of numbers/],
   ];
 
   it.each(cases)('%s throws with a matching message', (_label, matrix, pattern) => {
