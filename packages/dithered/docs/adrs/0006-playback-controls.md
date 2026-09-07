@@ -89,6 +89,20 @@ can return a value close enough to 1 that `p * frames` rounds up to
 `frames` in floating point, and an out-of-range index reads `undefined`
 out of the native picture array. `loopsAt` is `Math.floor(phase)`.
 
+**`frameForPhase` is total.** A non-finite phase returns frame `0`, and
+so does a `frames` of zero or less. `Math.min(frames - 1, NaN)` is `NaN`,
+so the clamp above guards the float edge but not the input, and `NaN`
+reaches straight through to `pictures[NaN]` — `undefined` handed to
+Skia's `drawPicture` on native, a blank canvas and a permanently-poisoned
+`currentFrame` on web. This is not a hypothetical: `time={scrollY /
+contentHeight}` is `NaN` on the first render, before layout, and that is
+the PRD's flagship use case. A total function here means no consumer can
+index out of bounds no matter what a caller passes.
+
+Totality is the floor, not the whole answer — see §3 for what the
+_drivers_ do with a non-finite `t`, which is to ignore it rather than to
+paint frame 0.
+
 `phaseForFrame` is `(frame + 0.5) / frames` — **the centre of the
 frame's phase band, not its leading edge** — and it exists because
 `frame / frames` does not survive the round trip. `frameForPhase(k / n, n)`
@@ -105,10 +119,17 @@ it.
 **`frameAt(nowMs, period, frames)` is kept, unchanged and still
 exported.** It is public API on both entry points and is covered by
 existing tests; removing it is a breaking change that buys nothing. It
-is re-expressed as `frameForPhase(nowMs / period, frames)`, gains a doc
-note that it is a wall-clock convenience and no longer the playback
-path, and keeps its current behaviour exactly (verified by the existing
-tests, which are not modified).
+gains a doc note that it is a wall-clock convenience and no longer the
+playback path, and **keeps its original arithmetic verbatim** rather
+than delegating to `frameForPhase`. The two are not the same function in
+floating point: `(nowMs % period) / period` and `(nowMs / period) % 1`
+diverge at `Date.now()` magnitudes (`frameAt(1352750077665.375, 333, 48)`
+is `26` under the original and `25` under the delegation), and the top
+edge wraps to `0` under the original `% frames` but clamps to
+`frames - 1` under `frameForPhase`. Since the promise here is "behaviour
+unchanged", the body stays as it was; the existing tests use timestamps
+of at most a few thousand ms and cannot see the difference, so a
+`Date.now()`-magnitude regression test is added instead.
 
 ### 2. `speed`, `onFrame`, `onLoop` on the core options
 
@@ -185,6 +206,17 @@ interface DitheredInstance {
 differs from what is displayed, and halts the RAF loop / frame callback.
 It is idempotent and cheap: repeated calls with values inside the same
 frame do nothing but store the phase.
+
+**A non-finite `t` is ignored**, on every path that carries external
+time: `setTime`, the `time` prop on both wrappers, and native's
+`applyPhase`. The phase is left where it was, nothing repaints, and
+`onFrame` does not fire. Clamping to frame 0 instead would be _total_
+but wrong — a scroll-driven indicator would visibly snap to its first
+frame for one render, before layout produces a real ratio, and would
+report an `onFrame(0, 0)` that never corresponded to anything the caller
+asked for. Holding the previous frame is invisible, which is what a
+transient `NaN` deserves. `frameForPhase`'s totality (§1) is the
+backstop for anything that slips past this.
 
 `clearTime()` is an addition beyond the PRD. Without it, a `time` prop
 that goes from a number back to `undefined` (a scrub that ends, a
@@ -277,6 +309,22 @@ The component keeps one internal `useSharedValue<number | null>(null)`,
   round trip;
 - `time === undefined` sets `externalPhase.value = null`.
 
+When the recordings are rebuilt, the component re-points at them from
+the **current phase**, not from the old frame index: `wrapFrame(
+currentFrame.value, frameCount)` is exactly the `currentFrame %
+opts.frames` mapping §4 replaced on the web, and it disagrees with the
+web driver whenever `frames` changes. Native must read whichever of
+`externalPhase` / `internalPhase` is driving and run it back through
+`frameForPhase`, so both platforms answer "what does this phase mean at
+the new frame count?" the same way.
+
+`initialFrame` is also wrapped into `[0, frames)` _before_ being
+converted by `phaseForFrame`, on both platforms. Web seeding it
+unwrapped makes `loopsAt` start at `-1` for `initialFrame: -1` (so the
+first forward wrap reports `onLoop(0)`), while native's wrap starts it at
+`0` — the same props reporting different loop counts on the two
+platforms. Wrapping first means the loop counter always starts at 0.
+
 Both paths end in the same workletized `applyPhase(phase)`, which
 computes the frame, and — only if it differs from `currentFrame.value` —
 assigns `currentFrame.value` and `picture.value` and emits `onFrame`.
@@ -361,8 +409,9 @@ than an aspiration — and flooring is what free-running playback does, so
 the two agree instead of being off by half a frame. The `frames = 1`
 degenerate case maps every `progress` to frame 0, as before.
 
-`initialFrame` is seeded the same way (`phase = phaseForFrame(initialFrame,
-frames)`) on both platforms, for the same reason: a bare
+`initialFrame` is seeded the same way (`phase = phaseForFrame(w, frames)`,
+where `w` is `initialFrame` wrapped into `[0, frames)` per §6) on both
+platforms, for the same reason: a bare
 `initialFrame / frames` paints frame `initialFrame - 1` for a third of
 its valid values, and on native it also disagrees with the exact
 `currentFrame` seed, making the indicator step backwards one frame on
@@ -487,9 +536,9 @@ zero, not a release of control).
 | File                                                                         | Change                                                                                                                                                                                                                                                                                                                                                                                        |
 | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `src/core/options.ts`                                                        | Add `speed` (default `1`), `onFrame`, `onLoop` to `DitheredOptions`; narrow `ResolvedOptions` to keep the callbacks optional; add `speed: 1` to `DEFAULTS`.                                                                                                                                                                                                                                   |
-| `src/core/paint.ts`                                                          | Re-express `frameAt` via `frameForPhase`; document it as a wall-clock convenience, not the playback path. Behaviour unchanged.                                                                                                                                                                                                                                                                |
+| `src/core/paint.ts`                                                          | Document `frameAt` as a wall-clock convenience, not the playback path; keep its original arithmetic verbatim (it is _not_ re-expressed via `frameForPhase` — the two diverge at `Date.now()` magnitudes). Behaviour unchanged.                                                                                                                                                                |
 | `src/core/index.ts`                                                          | Export the clock helpers and any new types.                                                                                                                                                                                                                                                                                                                                                   |
-| `src/renderer.ts`                                                            | Accumulator loop (`phase`, `lastNow`, reset `lastNow` on every halt/resume); `setTime`/`clearTime` on `DitheredInstance`; `onFrame`/`onLoop` dispatch from the single paint decision point; structural-vs-runtime split in `update()`; `initialFrame` seeds `phase = initialFrame / frames`.                                                                                                  |
+| `src/renderer.ts`                                                            | Accumulator loop (`phase`, `lastNow`, reset `lastNow` on every halt/resume); `setTime`/`clearTime` on `DitheredInstance`; `onFrame`/`onLoop` dispatch from the single paint decision point; structural-vs-runtime split in `update()`; `initialFrame` seeds `phase = phaseForFrame(wrapped initialFrame, frames)`.                                                                            |
 | `src/react.tsx`                                                              | `time`, `speed`, `onFrame`, `onLoop` props; latest-ref trampolines; `time` effect separate from the reconfigure effect; `progress` re-expressed via `setTime`; `time` beats `progress`.                                                                                                                                                                                                       |
 | `src/native/Dithered.tsx`                                                    | `externalPhase` shared value + the two write paths (effect for numbers, `useAnimatedReaction` for shared values); one workletized `applyPhase`; accumulator in the frame callback, differencing `info.timestamp` against an owned `lastTimestamp` shared value; `speed`; `runOnJS` trampolines for `onFrame`/`onLoop`; deactivate the callback while externally driven; `progress` via phase. |
 | `src/index.ts`                                                               | Export clock helpers and the new option/callback types.                                                                                                                                                                                                                                                                                                                                       |
@@ -572,6 +621,41 @@ the arithmetic happens to be exact):
     native UI helpers over that same timeline. Test #30 as written
     compares the UI helpers to the core helpers they were already proven
     equal to, which is the same expression twice.
+
+**Added after the second adversarial review:**
+
+43. `frameForPhase` returns `0` for `NaN`, `Infinity`, `-Infinity` and
+    for `frames <= 0`, and never returns a non-integer or out-of-range
+    index for any of them. Same for the `*UI` twin.
+44. `setTime(NaN)` / `setTime(Infinity)` leave the displayed frame
+    untouched and fire neither `onFrame` nor `onLoop`; the instance is
+    still driveable by a subsequent finite `setTime`. Same through the
+    `time` prop on the React wrapper.
+45. `update({ fg })` that lands on the **same** frame index does not fire
+    `onFrame` — the actual "forced repaint at the same index is silent"
+    case. Test 14 as written drives `update({ period })`, which is
+    non-structural and repaints nothing, so it passes even with the
+    guard deleted. Verify by deleting the guard and watching this test
+    fail.
+46. `frameAt` agrees with its pre-change implementation over
+    `Date.now()`-magnitude timestamps — a fixed table of at least a few
+    hundred sampled `(nowMs, period, frames)` triples spanning periods
+    where the two formulations diverge (e.g. `period: 333`).
+47. Recordings rebuilt at a new `frames` re-point from the current
+    phase: the frame native paints after `frames` changes equals the one
+    web paints for the same props, including while `paused`.
+48. `initialFrame` out of range (`-1`, `frames`, `frames + 1`) produces
+    the same painted frame _and_ the same first `onLoop` count on both
+    platforms.
+49. `progress` with `frames: 0` does not produce a non-finite phase, and
+    the web `progress` mapping reads `DEFAULTS.frames` rather than a
+    hard-coded `48` (change the default in a test and assert the mapping
+    follows).
+50. `time={null}` behaves as "not externally driven" on both platforms —
+    playback keeps running — rather than freezing native forever.
+51. An `update()` that newly forbids playback (`respectReducedMotion`
+    turned back on while reduced motion matches) cancels the in-flight
+    RAF: no further frame is painted after it returns.
 
 ### Checks
 
