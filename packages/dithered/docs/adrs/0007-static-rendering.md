@@ -240,21 +240,55 @@ establishes the invariant the no-drift guarantee actually needs:
 > **Geometry computed at scale `s` equals geometry computed at scale 1, multiplied by
 > `s`** — cell size, gap, radius and every cell's x/y/width alike.
 
-Two consequences fall out. `createDithered` must derive geometry from the _unrounded_
-`surfaceSize(opts, dpr)` rather than from the rounded integer backing-store dimensions
-(`Math.round` there is for the `canvas.width`/`height` attributes, which must be
-integers; the drawing coordinates need not be, and rounding them is what makes
-`rozenite` at `size: 48` land on `cellSize` 2.125 instead of 2.1001). And the floor is
-now denominated in CSS pixels everywhere, so a 0.6px minimum gap means the same thing
-on every display.
+**The scale that matters is the backing store's, not `devicePixelRatio`.** A first
+attempt at this drew from the _unrounded_ `surfaceSize(opts, dpr)` while still setting
+`canvas.width = Math.round(...)`. That is wrong, and wrong in a way that is invisible
+if you compare backing-store coordinates: the browser stretches a backing store of
+`W` device px into a CSS box of `cssW` px, so a drawn coordinate is _displayed_
+multiplied by `cssW / W`. Drawing at the unrounded size and rounding the store means
+that factor is not `1 / dpr`, and the mount swap still shifts the right-hand cells
+(0.25 CSS px for `rozenite` at `size: 48`, dpr 1) — the bug merely moves from the y
+axis to the x axis.
+
+So `createDithered` rounds the backing store **first**, then derives geometry from the
+rounded integers, with the scale set to what the store actually is:
+
+```ts
+const W = Math.round(cssW * dpr); // the backing store, necessarily an integer
+const H = Math.round(cssH * dpr);
+computeGeometry(opts, W, H, ox, W / cssW); // not dpr
+```
+
+Then every displayed quantity matches the SVG's exactly. Cell size and radius cancel
+on their own — displayed cell size is `(W / cols) · (cssW / W) = cssW / cols` either
+way — and passing `W / cssW` rather than `dpr` is what makes the one term that does
+_not_ cancel, the absolute gap floor, cancel too: `0.6 · (W / cssW) · (cssW / W) = 0.6`
+displayed px, the same 0.6 the SVG floors at. Nothing is drawn outside the store
+either.
+
+This is exact whenever `cssH` (i.e. `size`) is an integer and `dpr` is an integer,
+which covers essentially every real render; otherwise the residual is the aspect error
+introduced by rounding `W` and `H` independently, bounded by half a device pixel over
+the whole surface. That residual is inherent — `canvas.width` is an integer and the
+CSS box is not — and the honest claim is therefore "identical displayed geometry, up
+to the half-pixel the backing store must round to", not "byte-identical".
+
+Because the mismatch lives in the mapping from backing store to CSS box, **the
+no-drift test must compare displayed coordinates** — canvas rects multiplied by
+`cssW / W` — against the SVG's. Comparing backing-store rects divided by `dpr`, as an
+earlier version of that test did, is a unit system in which this whole class of bug
+cannot appear.
 
 `renderToDataURL` returns `data:image/svg+xml;utf8,<encoded>`, percent-encoding `%`
-first, then `#`, `<`, `>`, `"`, `'`, `(`, `)`, and whitespace. Full
+first, then `#`, `<`, `>`, `"`, `'`, `(`, `)`, `&`, and whitespace. Full
 `encodeURIComponent` would also work but triples the length of a favicon; leaving `#`
 unencoded breaks every call, since `fg` defaults to a hex colour and `#` starts a URL
 fragment. The parentheses are not optional either: an unquoted CSS `url()` token ends
 at the first `)`, so a `fg` of `rgb(130, 50, 255)` would truncate the declaration and
-blank the very SSR fallback this exists to provide.
+blank the very SSR fallback this exists to provide. `&` matters for the other
+advertised use: pasted into an HTML `href`/`src`, an unescaped `&amp;` in the payload is
+decoded by the HTML parser before the data URL is, leaving malformed XML and a
+favicon that does not render.
 
 ### 6. React SSR: a `background-image` fallback, dropped on mount
 
@@ -270,6 +304,10 @@ state flip removes it.
   hydration.
 - The SVG is computed in a `useMemo` that is only entered while the fallback is live,
   so a mounted component never pays for it.
+- The fallback renders the frame the component will actually paint on mount. When
+  `progress` is set that is `Math.round(clamp(progress) * (frames - 1))`, not
+  `initialFrame` — otherwise a determinate `<Dithered progress={0.9} />` server-renders
+  an empty bar and snaps to 90% on hydration, which is worse than rendering nothing.
 - Opt out with `ssrFallback={false}`.
 
 ## Alternatives considered
@@ -351,7 +389,7 @@ palette PRD's per-tone grouping harder. `<rect rx>` is what the PRD asks for.
 | `src/core/index.ts`                                                                                                   | Re-export the new path, hit-test, svg-paint and static surfaces.                                                                                                                                                                                              |
 | `src/shape.ts`                                                                                                        | `sampleCells`'s `hitTest` parameter becomes optional, defaulting to `jsHitTester(shape)`. Doc comment updated.                                                                                                                                                |
 | `src/core/paint.ts`                                                                                                   | `computeGeometry` gains a `scale` parameter (default 1) applied to the gap floor: `Math.max(0.6 * scale, cellSize * opts.gap)`.                                                                                                                               |
-| `src/renderer.ts`                                                                                                     | Drop the `domHitTester` import; pass `opts.hitTest` through to `sampleCells` (falling back to the default). Derive geometry from the unrounded `surfaceSize(opts, dpr)` and pass `dpr` as `computeGeometry`'s `scale`; keep rounding only the backing store.  |
+| `src/renderer.ts`                                                                                                     | Drop the `domHitTester` import; pass `opts.hitTest` through to `sampleCells` (falling back to the default). Round the backing store first, then derive geometry from the rounded `W`/`H` with `computeGeometry`'s `scale` set to `W / cssW` — not `dpr`.      |
 | `src/native/pictures.ts`, `src/native/Dithered.tsx`                                                                   | Same: stop defaulting to `skiaHitTester`, honour `hitTest` when given.                                                                                                                                                                                        |
 | `src/index.ts`                                                                                                        | Export `jsHitTester`, `renderToSvg`, `renderToDataURL`, `svgPaintContext`, `parsePath`, `flattenPath`, `pathToPolygons`, and the `PathCommand` / `Point` / `FillRule` / `RenderToSvgOptions` / `SvgPaintContext` types.                                       |
 | `src/native.ts`                                                                                                       | Export the same additions (all DOM-free).                                                                                                                                                                                                                     |
@@ -422,14 +460,33 @@ palette PRD's per-tone grouping harder. `<rect rx>` is what the PRD asks for.
     options, by comparing the recording context's rect calls against the SVG's rects.
     This test must use the library's own defaults (`shapes.rozenite`, `size: 48`,
     `cols: 16` — a non-integer surface width and an aspect ratio that is not 1) and
-    must run at `devicePixelRatio` 1, 2 and 3, asserting the canvas's rects equal the
-    SVG's rects scaled by `dpr`. A fixture chosen so the gap floor and the
-    backing-store rounding both happen to cancel (e.g. `shapes.square` at
-    `size: 40, cols: 4, dpr: 1`) asserts a tautology and does not count.
+    must run at `devicePixelRatio` 1, 2 and 3. It must compare **displayed**
+    coordinates — canvas rects multiplied by `canvas.style.width / canvas.width` —
+    against the SVG's, never backing-store rects divided by `dpr`, which is the one
+    unit system in which backing-store rounding cannot show up. A fixture chosen so
+    the gap floor and the rounding both happen to cancel (e.g. `shapes.square` at
+    `size: 40, cols: 4, dpr: 1`) asserts a tautology and does not count. It must also
+    use a frame-varying `brightness` and compare at more than one frame: with
+    `brightness: () => true` every cell is drawn at every phase, so a uniform phase
+    offset between `renderToSvg` and `createDithered` passes unnoticed. And it must
+    cover the sprite-strip path (`cache: true`, with `stubGetContext`), not only the
+    direct-paint path — `cache` defaults to `'auto'`, which is on at `size: 48`, so
+    the strip is what a default web render actually uses.
 13. **Geometry scale invariant** — `computeGeometry(opts, w * s, h * s, 0, s)` equals
     `computeGeometry(opts, w, h)` with `cellSize`, `gap` and `radius` each multiplied
     by `s`, for `s` in 1, 2, 3 and for a `cellSize` both above and below the 0.6px
     floor's crossover point.
+14. **Degenerate input** — a `Shape` whose viewBox has zero width or height (making
+    `aspectOf` non-finite) makes `renderToSvg` throw a named error rather than emit
+    `viewBox="0 0 Infinity 40"`. `formatNumber` never emits `NaN` or `Infinity` into
+    an attribute.
+15. **Data-URL escaping** — a `fg` containing parentheses (`rgb(130, 50, 255)`) and a
+    `title` containing `&` each round-trip: the payload contains no raw `(`, `)`, `&`,
+    `#`, quote or whitespace, and decoding it reproduces `renderToSvg`'s output. The
+    negative character class in this test must include `(`, `)` and `&` — a fixture
+    whose only colour is a hex literal cannot fail on any of them.
+16. **SSR fallback honours `progress`** — `renderToString(<Dithered progress={0.9} …/>)`
+    emits the same frame the mount effect paints, not frame `initialFrame`.
 
 ### Checks
 
