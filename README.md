@@ -182,7 +182,7 @@ import { compose, presets } from 'dithered';
 
 **Compose order matters around `mask`**: a rejected cell from `mask` returns the boolean `false`, not the number `0` (see the table above) — and `invert`/`clamp` treat _any_ boolean, including that `false`, as a crisp value to coerce, not as "this cell was masked out". So `compose.invert(mask(source, predicate))` turns every masked-out cell into `true` (drawn solid), and `compose.clamp(mask(source, predicate), min, max)` turns every masked-out cell into `min` — likely not what you want if `min > 0`. Put `mask` _last_ in the chain (`mask(invert(source), predicate)`, `mask(clamp(source, min, max), predicate)`) so the masked-out cells stay `false` all the way out.
 
-**`timeScale` and periodicity**: an **integer** `factor` keeps the loop seamless. A non-integer factor (e.g. `1.5`) breaks the `f(cell, 0) === f(cell, 1)` contract — the loop will visibly jump at the seam — so `compose.ts` warns once per distinct factor in development (stripped from production builds).
+**`timeScale` and periodicity**: an **integer** `factor` keeps the loop seamless. A non-integer factor (e.g. `1.5`) breaks the `f(cell, 0) === f(cell, 1)` contract — the loop will visibly jump at the seam — so `compose.ts` warns once per distinct factor in development. The check does not fire in a production build (a bundler's `production` define makes it evaluate to `false` at runtime), but the code for it is not removed from the bundle — see ADR 0009's amendments for the measured trade-off.
 
 **Example 1 — `sweep`, but slower and only on the left half:**
 
@@ -210,7 +210,7 @@ import { compose, presets } from 'dithered';
 const brightness = compose.blend(
   presets.pulse(),
   presets.wave(),
-  (_cell, t) => 0.5 + 0.5 * Math.sin(t * Math.PI * 2),
+  (_cell, t) => 0.5 - 0.5 * Math.cos(t * Math.PI * 2),
 );
 ```
 

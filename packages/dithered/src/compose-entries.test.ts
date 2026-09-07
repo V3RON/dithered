@@ -49,21 +49,47 @@ describe('compose is re-exported from the native entry (./native)', () => {
   // vitest runs with cwd at the package root (packages/dithered), so this
   // is stable regardless of how the test file itself was resolved.
   const nativeSource = readFileSync(join(process.cwd(), 'src', 'native.ts'), 'utf8');
-  const composeExportLine = nativeSource
-    .split('\n')
-    .find((line) => line.includes("from './compose'") && line.startsWith('export {'));
 
-  // Match only the text *inside* the braces, not the whole line: the line
-  // also ends in `from './compose';`, and `\bcompose\b` matches that module
-  // specifier regardless of whether `compose` itself is actually re-exported
-  // — the exact gap this test exists to close. Verified by removing
-  // `compose` from native.ts's re-export list: against the whole-line match
-  // this test still passed (168 tests green); against the braces-only match
-  // below it fails, as it should.
-  const exportedNames = composeExportLine?.match(/\{([^}]*)\}/)?.[1] ?? '';
+  // Matched against the whole file, not line-by-line: prettier wraps an
+  // `export { ... } from '...'` across multiple lines once it exceeds
+  // `printWidth` (100 here), and this statement is already 91 characters on
+  // one line — one more helper (the PRD names `compose.transform` as the
+  // next one) pushes it over and prettier reformats it to
+  //   export {
+  //     compose,
+  //     blend,
+  //     ...
+  //   } from './compose';
+  // A line-based `line.startsWith('export {') && line.includes("from
+  // './compose'")` search would then find no single line satisfying both
+  // halves and silently produce `undefined` (loudly failing both tests
+  // below, but for the wrong reason — a spurious failure, not a real
+  // regression). Matching the whole source, with the capture allowed to span
+  // newlines, keeps this working whether the statement is on one line or
+  // wrapped across many.
+  //
+  // `export\s*\{` (not `export\s+type\s*\{`) is what excludes the type-only
+  // `export type { MixAmount, CellPredicate } from './compose';` line right
+  // above it — only the runtime re-export is under test here. The capture
+  // excludes `;` so a lazy match starting at some *other*, earlier
+  // `export { ... } from '...';` statement can't skip past its own
+  // terminating semicolon and accidentally swallow everything up to the
+  // eventual `'./compose'` (including the type-only line's closing brace) —
+  // every export statement in this file ends in `;` and none of the
+  // identifier lists contain one, so `;` is a safe statement boundary.
+  const composeExportMatch = nativeSource.match(/export\s*\{([^;]*?)\}\s*from\s*'\.\/compose';/);
 
-  it("has a `export { ... } from './compose'` line", () => {
-    expect(composeExportLine).toBeDefined();
+  // Match only the text *inside* the braces, not the whole statement: the
+  // statement also ends in `from './compose';`, and `\bcompose\b` matches
+  // that module specifier regardless of whether `compose` itself is
+  // actually re-exported — the exact gap this test exists to close.
+  // Verified by removing `compose` from native.ts's re-export list: against
+  // a whole-statement match this test still passed (168 tests green);
+  // against the braces-only match below it fails, as it should.
+  const exportedNames = composeExportMatch?.[1] ?? '';
+
+  it("has a `export { ... } from './compose'` statement", () => {
+    expect(composeExportMatch).not.toBeNull();
   });
 
   it('that line names all eight compose runtime exports', () => {

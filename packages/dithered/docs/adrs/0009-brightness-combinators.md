@@ -399,3 +399,71 @@ predicate)`, `mask(clamp(source, min, max), predicate)` — behaves as expected,
 `mask` is then the last thing to see the boolean and its own rule (reject to `false`) is the
 one that applies. No code changed; this is a documentation gap, now closed in the README's
 boolean-rules paragraph: put `mask` last in a composition chain.
+
+**Correction: the `vite.config.ts` `define` was never doing anything, and the reasoning
+above for adding it was wrong.** The Decision and Consequences sections above assert that
+"Vite's library build otherwise substitutes the literal `\"production\"`" into the built
+output, and that the `define: { 'process.env.NODE_ENV': 'process.env.NODE_ENV' }` entry
+was needed to prevent that. A third-round review disproved this empirically, and it was
+re-verified independently while fixing this: delete the `define` line, `rm -rf
+packages/dithered/dist`, run `pnpm build`, and diff the emitted `dist/shared-*.js` chunk
+against one built with the `define` present — they are byte-for-byte identical, including
+the content hash in the filename, and both contain `process.env.NODE_ENV !== "production"`
+verbatim. Vite 5's library build (`build.lib`) skips its own `define` plugin entirely in
+that mode (`if (!isBuildLib) { ...'process.env.NODE_ENV'... }` — the substitution is
+unconditionally not applied when building a library), so the config entry had no effect in
+either direction: removing it changes nothing, and it was never the reason the token
+survived into `dist/`. The token survives simply because nothing in a library build ever
+touches it. The `define` entry and its comment have been removed from `vite.config.ts`.
+This also means the ADR's toolchain list a few paragraphs up ("webpack, Vite, Rollup +
+`@rollup/plugin-replace`, and Metro (React Native) all replace it statically") overstates
+Vite's role: that holds for a Vite **application** build, not `build.lib`, which is what
+this package uses. It is left uncorrected in place, per this ADR's convention of recording
+corrections here rather than editing the original decision text — read that sentence with
+this amendment in mind. The same sentence also overstates Metro: Metro only inlines the
+literal in a **production** build (`!opts.dev` in `metro-transform-plugins`); in a Metro
+dev build the check is a genuine runtime read of the `process` global that React Native's
+own polyfill (`setUpGlobals.js`) sets to `'development'`. Neither correction changes any
+runtime behavior — the `try`/`catch`-guarded boolean from the previous amendment already
+handles a real `process` global (Node, Metro) and a substituted-then-absent one (bundled
+web) identically correctly — only the prose justifying the now-removed `define` and
+describing the toolchain list was wrong.
+
+**Added: regression coverage for the dev-warning guard's actual runtime behavior, not just
+its shape.** Every check this ADR's "Checks" section names — `pnpm typecheck`, `pnpm
+build`, the `dist/` grep, and the full `pnpm test` suite — stayed green when the guard was
+patched back to either of the two previously-rejected forms (the bare `typeof process`
+guard from the first amendment, and a bare unguarded read with no `try`/`catch` at all).
+Nothing in the existing suite constructs the module in the one environment where those
+forms actually misbehave: a bundler has substituted the `process.env.NODE_ENV` token
+_and_ no `process` global exists at runtime — the state a bundled browser app is in after
+the substitution has already happened. `packages/dithered/src/compose-dev-warning.test.ts`
+now builds a throwaway CJS chunk from `compose.ts`'s own source with `vite`'s bundled
+esbuild (optionally pre-substituting the token the way a consumer bundler's `define`
+would, or not at all, to simulate an unbundled `<script type="module">` consumer) and runs
+it in a `node:vm` context with no `process` global. This does not depend on `pnpm build`
+having been run — it transforms source directly, so it works from a clean checkout. Both
+rejected forms were reintroduced and rerun against this new file to confirm it actually
+catches them: the `typeof process` form loads without throwing but never warns even when
+the token is substituted with `\"development\"` (it is dead in exactly the environment the
+warning exists for); the bare unguarded read throws a `ReferenceError` while the module is
+still loading when no substitution has happened at all and no `process` global exists. The
+real implementation passes all three of this file's cases.
+
+**Fixed: the dev-warning tests were only accidentally passing, dependent on an ambient
+`NODE_ENV` the test suite never pinned.** `compose.test.ts`'s "timeScale non-integer
+warning" tests construct a fresh module instance per test and rely on
+`process.env.NODE_ENV` being something other than `\"production\"` at that moment, but
+nothing in the suite ever set it — it relied entirely on vitest's own default. Running
+`NODE_ENV=production pnpm --filter dithered test` (a plausible CI or base-image setting)
+turned 5 of those tests red, for a reason that has nothing to do with the change under
+test. The same ambient variable also switches React itself to its production build, which
+does not support `act(...)` and broke every test in `react.test.tsx` that renders.
+`packages/dithered/vitest.config.ts` now pins `NODE_ENV` to `'test'` at the top of the
+config module (before Vite's own mode resolution runs — this also matters for how Vite
+resolves Node builtins like `node:fs`/`node:path` for the jsdom test environment, which an
+ambient `NODE_ENV=production` was separately observed to break for
+`compose-entries.test.ts`) and again via `test.env` for the worker processes. Verified:
+`NODE_ENV=production pnpm --filter dithered test` now passes all 173 tests (170 plus the 3
+added by the dev-warning sandbox test above), and the unpinned ambient variable no longer
+reaches any part of the test run.

@@ -1,11 +1,18 @@
 import type { Brightness } from './core';
 import type { Cell } from './shape';
 
-// `process.env.NODE_ENV` below is a build-time convention every bundler
-// (webpack, Vite, Rollup, Metro) statically replaces with a string literal —
-// not an actual Node global this platform-free library depends on. This
-// ambient declaration exists only so the expression typechecks without
-// pulling in `@types/node`.
+// `process.env.NODE_ENV` below is a build-time convention several bundlers
+// substitute with a string literal, at least in production: webpack and
+// Rollup + `@rollup/plugin-replace` do it for both dev and prod builds;
+// Metro (React Native) only inlines it for a **production** build (see
+// `isProcessEnvNodeEnv` in `metro-transform-plugins/src/inline-plugin.js`) —
+// in Metro dev, `process.env.NODE_ENV` is a real read of the `process` global
+// that `react-native/Libraries/Core/setUpGlobals.js` polyfills to `'development'`.
+// Vite's library build (`build.lib` in `vite.config.ts`, which is how this
+// package builds) does not substitute the token at all, in either mode — see
+// the ADR 0009 amendments for how that was verified. This ambient
+// declaration exists only so the expression typechecks without pulling in
+// `@types/node`, on every one of those platforms.
 declare const process: { env: { NODE_ENV?: string } };
 
 // Resolved once, at module load, into a plain boolean — not read as
