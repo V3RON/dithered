@@ -166,6 +166,8 @@ const brightness: Brightness = (cell, t) => 0.5 + 0.5 * Math.sin((cell.u + t) * 
 import { compose, presets } from 'dithered';
 ```
 
+`compose` is equally available from `dithered/native` — it's a plain, platform-free module with no DOM or React Native imports of its own, so the two entries expose the identical set of helpers.
+
 | Helper                      | Does                                                                         |
 | --------------------------- | ---------------------------------------------------------------------------- |
 | `blend(a, b, mix)`          | Linear mix of two brightnesses. `mix` is a number, or `(cell, t) => number`. |
@@ -178,6 +180,8 @@ import { compose, presets } from 'dithered';
 
 **Booleans**: a `Brightness` can return a boolean for a crisp, undithered edge (see `presets.fill`), and each helper has an explicit rule for what it does with one. `mask` and `invert` preserve booleans (a masked-in `true` stays `true`; an inverted `true` becomes `false`). `blend` and `clamp` always return a number — coercing `true`/`false` to `1`/`0` first — because a linear mix or a clamped bound isn't itself a crisp value. `timeScale`, `reverse` and `offset` only touch `t`, so whatever `source` returns (number or boolean) passes straight through.
 
+**Compose order matters around `mask`**: a rejected cell from `mask` returns the boolean `false`, not the number `0` (see the table above) — and `invert`/`clamp` treat _any_ boolean, including that `false`, as a crisp value to coerce, not as "this cell was masked out". So `compose.invert(mask(source, predicate))` turns every masked-out cell into `true` (drawn solid), and `compose.clamp(mask(source, predicate), min, max)` turns every masked-out cell into `min` — likely not what you want if `min > 0`. Put `mask` _last_ in the chain (`mask(invert(source), predicate)`, `mask(clamp(source, min, max), predicate)`) so the masked-out cells stay `false` all the way out.
+
 **`timeScale` and periodicity**: an **integer** `factor` keeps the loop seamless. A non-integer factor (e.g. `1.5`) breaks the `f(cell, 0) === f(cell, 1)` contract — the loop will visibly jump at the seam — so `compose.ts` warns once per distinct factor in development (stripped from production builds).
 
 **Example 1 — `sweep`, but slower and only on the left half:**
@@ -185,13 +189,14 @@ import { compose, presets } from 'dithered';
 ```ts
 import { compose, presets } from 'dithered';
 
-const brightness = compose.mask(
-  compose.timeScale(presets.sweep(), 0.5), // half speed
-  (cell) => cell.u <= 0,
-);
+const brightness = compose.mask(presets.sweep(), (cell) => cell.u <= 0);
 ```
 
-`0.5` is a non-integer factor, so per the caveat above it will log a one-time dev warning and the loop technically jumps at the seam — for a half-speed sweep the jump is small enough to be unnoticeable in practice, but for a visibly seamless slowdown, raise `period` on the `Dithered` component instead (it stretches the whole loop, `compose` included).
+```tsx
+<Dithered shape={shapes.heart} brightness={brightness} period={4000} />
+```
+
+For "slower", raise `period` on `Dithered` (or the core's frame timing) instead of reaching for `compose.timeScale` — `period` stretches the whole loop seamlessly, `compose` output included. `timeScale(source, factor)` scales a `Brightness`'s own loop instead, but a slowdown needs `factor < 1`, and the only integer in that range is the degenerate `0`, so slowing down through `timeScale` always means a non-integer factor and the seam described above. Concretely, `compose.timeScale(presets.sweep(), 0.5)` doesn't have a small, easy-to-miss seam — at `t → 1` the loop is at the exact centre of the sweep and snaps back to the sweep's start, the largest jump the shape can produce. `timeScale` is the right tool for _speeding up_ with an integer factor (`compose.timeScale(presets.sweep(), 2)` doubles the speed with no seam); for a seamless slowdown, use `period`.
 
 **Example 2 — blending two presets with a time-varying mix:**
 

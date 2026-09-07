@@ -5,7 +5,10 @@ import type { Cell } from './shape';
 // (webpack, Vite, Rollup, Metro) statically replaces — not an actual Node
 // global this platform-free library depends on. This ambient declaration
 // exists only so the expression typechecks without pulling in `@types/node`.
-declare const process: { env: { NODE_ENV?: string } };
+// The `typeof process !== 'undefined'` guard at the call site (not here)
+// keeps a plain, unbundled browser ESM import (no `process` global at all)
+// from throwing a `ReferenceError` on a bare read.
+declare const process: { env: { NODE_ENV?: string } } | undefined;
 
 /**
  * `blend`'s mix weight: a constant, or `(cell, t) => number` for a
@@ -74,7 +77,17 @@ export function mask(source: Brightness, predicate: CellPredicate): Brightness {
 // a re-render loop doesn't spam the console but two different bad factors
 // are both reported. Lazily created so a production bundle keeps only an
 // unused `let` once this whole block is stripped (see below).
+//
+// Capped at MAX_WARNED_FACTORS distinct values: an animated or slider-bound
+// factor (e.g. `compose.timeScale(sweep(), speed)` behind a range input)
+// would otherwise warn — and retain a `Set` entry — once per distinct
+// floating-point value it ever takes, which is unbounded. Past the cap,
+// further non-integer factors are silently not warned about; the point of
+// per-factor dedupe (surfacing a second, different mistake) is preserved for
+// the common case of a handful of hand-written bad factors, without the
+// unbounded growth. See ADR 0009 amendments.
 let warnedTimeScaleFactors: Set<number> | undefined;
+const MAX_WARNED_FACTORS = 8;
 
 /**
  * Scales how fast `source` moves through its loop: `source(cell, t * factor)`,
@@ -86,13 +99,16 @@ let warnedTimeScaleFactors: Set<number> | undefined;
  * up with the wrapped start) and is a visible jump at the loop boundary;
  * this is deliberately *not* hidden by pre-wrapping `t`, so the discontinuity
  * shows up in a periodicity test instead of being papered over. In
- * development, a non-integer factor is logged once per distinct factor value.
+ * development, a non-integer factor is logged once per distinct factor
+ * value, up to a small cap of distinct values (further ones are silently
+ * not warned about — this bounds the memory an animated or slider-bound
+ * factor would otherwise retain).
  */
 export function timeScale(source: Brightness, factor: number): Brightness {
-  if (process.env.NODE_ENV !== 'production') {
+  if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
     if (!Number.isInteger(factor)) {
       warnedTimeScaleFactors ??= new Set();
-      if (!warnedTimeScaleFactors.has(factor)) {
+      if (!warnedTimeScaleFactors.has(factor) && warnedTimeScaleFactors.size < MAX_WARNED_FACTORS) {
         warnedTimeScaleFactors.add(factor);
         console.warn(
           `compose.timeScale: factor ${factor} is not an integer, so the loop will visibly ` +

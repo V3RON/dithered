@@ -71,8 +71,11 @@ describe('periodicity: every helper preserves it on a periodic source', () => {
   // `sweep()` itself is periodic only up to floating-point rounding (see
   // presets.test.ts, which checks it with `toBeCloseTo`, not `toBe`).
   // reverse's genuine, structural exactness is covered separately below
-  // ("reverse(s) at t=0.25 equals s at t=0.75" and the non-periodic `fill()`
-  // case), where both sides reduce to one identical call into the source.
+  // ("reverse(s) at t=0 equals s at t=1 exactly, not the wrapped s at t=0",
+  // "reverse(s) at t=0.25 equals s at t=0.75", and the non-periodic `fill()`
+  // case), where each assertion reduces to one identical call into the
+  // source rather than a self-comparison that both the real and the
+  // rejected (wrapped) implementation would pass.
   const EXACT = new Set(['timeScale(2)', 'offset(0.3)']);
 
   describe.each(Object.entries(helpers))('%s', (name, factory) => {
@@ -111,7 +114,9 @@ describe('timeScale', () => {
     const source = sweep();
     const s = timeScale(source, 2);
     for (const cell of SAMPLE_CELLS) {
-      expect(s(cell, 0.25)).toBeCloseTo(source(cell, 0.5) as number, 10);
+      // wrap01(0.25 * 2) === wrap01(0.5) === 0.5 exactly, so this reduces to
+      // one identical call into `source` — tighten to `toBe` (finding 11).
+      expect(s(cell, 0.25)).toBe(source(cell, 0.5));
     }
   });
 
@@ -168,6 +173,22 @@ describe('blend', () => {
     const cell = makeCell(0, 0);
     expect(blend(a, b, 0)(cell, 0)).toBe(0.2);
     expect(blend(a, b, 1)(cell, 0)).toBe(0.8);
+  });
+
+  it('mix=0/1 exactness holds for operands that would trip up the rejected a + (b - a) * m form', () => {
+    // With a = 0.2, b = 0.8 (above), the ADR formula `(1 - m) * a + m * b`
+    // and the rejected `a + (b - a) * m` are bit-identical at m=0, m=1 and
+    // m=0.5, so that test alone doesn't discriminate between them. These
+    // operands do: `a + (b - a) * 1` rounds to a different double than `b`
+    // itself, while `(1 - 1) * a + 1 * b` reduces to `0 * a + b`, which is
+    // exact for any a, b.
+    const av = 0.003009027081243731;
+    const bv = 0.0010090817356205853;
+    const src1: Brightness = () => av;
+    const src2: Brightness = () => bv;
+    const cell = makeCell(0, 0);
+    expect(blend(src1, src2, 0)(cell, 0)).toBe(av);
+    expect(blend(src1, src2, 1)(cell, 0)).toBe(bv);
   });
 
   it('mix=0.5 is the midpoint', () => {
@@ -310,8 +331,28 @@ describe('offset', () => {
     const source = sweep();
     const s = offset(source, -0.25);
     for (const cell of SAMPLE_CELLS) {
-      expect(s(cell, 0)).toBeCloseTo(source(cell, 0.75) as number, 10);
+      // wrap01(-0.25) === 0.75 exactly, and wrap01(0 + 0.75) === 0.75, so
+      // this reduces to one identical call into `source` — `toBe` (finding 11).
+      expect(s(cell, 0)).toBe(source(cell, 0.75));
     }
+  });
+
+  it('is exactly periodic even where naive wrapping would show float error (identity source)', () => {
+    // The ADR's central claim for `offset` is that wrapping `t` *before*
+    // adding `dt` is what makes periodicity exact: the naive
+    // `wrap01(t + dt)` isn't exactly periodic in floating point. Comparing
+    // sweep()'s outputs (as the periodicity table above does) doesn't
+    // exercise this — sweep happens to map 0.3 and 0.30000000000000004 to
+    // bitwise-identical doubles for every SAMPLE_CELLS entry, so that test
+    // passes even against the naive implementation. An identity source
+    // makes the float difference visible instead of absorbing it.
+    const id: Brightness = (_cell, t) => t;
+    const s = offset(id, 0.3);
+    const cell = makeCell(0, 0);
+    // Naive `wrap01(t + dt)` gives 0.3 at t=0 but 1.3 - 1 ===
+    // 0.30000000000000004 at t=1 — these two lines would disagree.
+    expect(s(cell, 0)).toBe(0.3);
+    expect(s(cell, 1)).toBe(s(cell, 0));
   });
 
   it('a boolean source stays boolean', () => {
@@ -326,6 +367,25 @@ describe('reverse', () => {
     const r = reverse(source);
     for (const cell of SAMPLE_CELLS) {
       expect(r(cell, 0.25)).toBe(source(cell, 0.75));
+    }
+  });
+
+  it('reverse(s) at t=0 equals s at t=1 exactly, not the wrapped s at t=0', () => {
+    // The generic periodicity table above can't discriminate reverse's real
+    // (unwrapped) implementation from the rejected `source(cell, wrap01(1 - t))`
+    // form: at the t=0/t=1 boundary both forms only ever call `source` at
+    // t=0 or t=1, and for the periodic sources that table uses, those two
+    // calls are equal anyway, so the comparison holds either way (see the
+    // note above the EXACT set). This test is load-bearing instead: `sweep()`
+    // is only periodic up to floating-point rounding (source(cell, 0) is a
+    // different double than source(cell, 1), see presets.test.ts), so the
+    // real, unwrapped `source(cell, 1 - t)` at t=0 — which reads `source`
+    // at t=1 — is distinguishable from the wrapped form, which would read
+    // `source` at wrap01(1) === 0 instead.
+    const source = sweep();
+    const r = reverse(source);
+    for (const cell of SAMPLE_CELLS) {
+      expect(r(cell, 0)).toBe(source(cell, 1));
     }
   });
 

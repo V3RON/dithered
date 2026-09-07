@@ -339,7 +339,12 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
     ? (customShape ?? shapes.rozenite)
     : shapes[shapeKey as keyof typeof shapes];
 
-  const brightness = useMemo(() => {
+  // `mix` only parameterizes the closure `compose.blend` returns — it plays
+  // no part in constructing `primary`/`secondary` — so it's kept out of this
+  // memo's deps. Otherwise every slider step would rebuild both presets
+  // (e.g. re-running 48 generations of `gameOfLife`'s board) and force a
+  // full sprite-strip repaint, for a change that only needs a new closure.
+  const presetsForBlend = useMemo(() => {
     const factory = presets[presetKey as keyof typeof presets];
     const primary =
       presetKey === 'gem'
@@ -347,11 +352,16 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
         : presetKey === 'gameOfLife'
           ? factory({ seed: golSeed })
           : factory();
-    if (blendKey === 'none') return primary;
+    if (blendKey === 'none') return { primary, secondary: null };
     const secondary = presets[blendKey as keyof typeof presets]();
+    return { primary, secondary };
+  }, [presetKey, noiseAmt, golSeed, blendKey]);
+
+  const brightness = useMemo(() => {
+    const { primary, secondary } = presetsForBlend;
+    if (!secondary) return primary;
     return compose.blend(primary, secondary, mix);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [presetKey, noiseAmt, golSeed, blendKey, mix]);
+  }, [presetsForBlend, mix]);
 
   const snippet = useMemo(
     () =>

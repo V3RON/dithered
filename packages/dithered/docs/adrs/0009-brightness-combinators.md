@@ -297,3 +297,47 @@ guess.
 
 `pnpm install`, `pnpm format`, `pnpm build`, `pnpm typecheck`, `pnpm test` from the
 workspace root, all green, plus the `dist/` grep described above.
+
+## Amendments after review
+
+An adversarial review of the implementation found no critical issues, but surfaced three
+points worth recording here because they change or sharpen something this ADR asserted.
+
+**The `timeScale` warning's dedupe `Set` is now capped.** The original design deduped
+warnings per distinct `factor` value with no bound on how many distinct values it would
+remember. That's fine for hand-written factors, but a `factor` driven by a slider or an
+animated value (e.g. `compose.timeScale(sweep(), speed)` behind `<input type="range"
+step="0.01">`) passes through dozens of distinct floating-point values in normal use, each
+one both warning and permanently retaining a `Set` entry — the console spam and unbounded
+growth this dedupe strategy exists to prevent, reappearing for a different kind of caller.
+`compose.ts` now stops adding to the `Set` (and stops warning) once it holds 8 distinct
+factors. Below the cap, the original property holds exactly as designed: two different bad
+factors are both reported. Above it, further non-integer factors are silently not warned
+about, which is the right trade for a diagnostic feature — it must not be the reason a
+slider-bound animation retains memory or floods the console.
+
+**The `process` reference is now guarded with `typeof`.** The original code read
+`process.env.NODE_ENV` directly, relying on every bundler in the toolchain list statically
+replacing it. That holds for the toolchains named, but this is a zero-dependency library
+with a documented plain-`<script type="module">` (Vanilla) entry point, and an unbundled
+ESM import in a browser has no `process` global at all — the bare read throws a
+`ReferenceError` from `timeScale`, including for an integer factor that was never going to
+warn. The guard is now `typeof process !== 'undefined' && process.env.NODE_ENV !==
+'production'`. This still folds away under every bundler this ADR names — `typeof x !==
+'undefined'` is exactly as statically replaceable as the bare read once `process.env.NODE_ENV`
+is substituted with a literal — and was re-verified against `dist/` and an esbuild
+production-define consumer bundle after the change, per the ADR's own "must be verified by
+grepping the built output, not assumed" instruction.
+
+**`mask`'s `false` sentinel does not survive `invert` or `clamp` placed after it.** This was
+always true given the semantics decided above — `invert` and `clamp` each have an explicit,
+documented rule for _any_ boolean input, and neither rule distinguishes "this is `false`
+because the source said so" from "this is `false` because `mask` rejected the cell" — but it
+was not called out as a consequence, and it is easy to hit by composing in the less useful
+order. `compose.invert(mask(source, predicate))` draws every masked-out cell solid (`!false
+=== true`); `compose.clamp(mask(source, predicate), min, max)` lights up every masked-out
+cell to `min` whenever `min > 0`. Composing the other way — `mask(invert(source),
+predicate)`, `mask(clamp(source, min, max), predicate)` — behaves as expected, because
+`mask` is then the last thing to see the boolean and its own rule (reject to `false`) is the
+one that applies. No code changed; this is a documentation gap, now closed in the README's
+boolean-rules paragraph: put `mask` last in a composition chain.
