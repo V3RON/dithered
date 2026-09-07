@@ -2,10 +2,12 @@ import { useMemo } from 'react';
 import { Skia, createPicture, type SkPicture } from '@shopify/react-native-skia';
 import {
   computeGeometry,
+  hasCurrentColor,
   paintFrame,
   resolveOptions,
   resolveRows,
   surfaceSize,
+  toPalette,
   type DitheredOptions,
 } from '../core';
 import { sampleCells, type Cell } from '../shape';
@@ -29,6 +31,11 @@ export interface DitheredPictures {
   height: number;
 }
 
+/** A palette joined by value, for identity-insensitive memo dependencies. */
+function paletteKey(fg: string | string[] | undefined): string | undefined {
+  return fg === undefined ? undefined : typeof fg === 'string' ? fg : fg.join(' ');
+}
+
 /**
  * Samples the shape and records every frame of the loop as an
  * `SkPicture`, the React Native counterpart to the web renderer's
@@ -43,6 +50,11 @@ export interface DitheredPictures {
  * Recordings are in dp — Skia scales to the device's pixel ratio itself,
  * and the output is vector, so there is nothing to re-record when the
  * ratio differs.
+ *
+ * `fg`'s `'currentColor'` token is web-only (there is no cascade to
+ * resolve it against on native) and throws here, during render, at the
+ * point the bad prop is passed — rather than reaching `Skia.Color`
+ * (`'currentcolor'` is not a Skia color) and failing far from the cause.
  */
 export function useDitheredPictures(options: DitheredPicturesOptions): DitheredPictures {
   const {
@@ -59,7 +71,19 @@ export function useDitheredPictures(options: DitheredPicturesOptions): DitheredP
     radius,
   } = options;
 
+  // Joined by value rather than depended on by identity: an inline
+  // palette literal (`fg={['#a', '#b']}`) is a fresh array every render
+  // for an unmemoized caller, and keying the memo on `fg` directly would
+  // re-record every picture on every render.
+  const fgKey = paletteKey(fg);
+
   return useMemo(() => {
+    if (fg !== undefined && hasCurrentColor(toPalette(fg))) {
+      throw new Error(
+        "dithered: 'currentColor' is not supported on native — pass an explicit color.",
+      );
+    }
+
     const opts = resolveOptions({
       shape,
       brightness,
@@ -89,6 +113,8 @@ export function useDitheredPictures(options: DitheredPicturesOptions): DitheredP
 
     return { pictures, width, height };
     // `period`, `paused`, `progress` and friends deliberately absent:
-    // none of them change what is drawn, only when.
-  }, [shape, brightness, providedCells, size, cols, rows, frames, fg, bg, gap, radius]);
+    // none of them change what is drawn, only when. `fg` is also absent —
+    // `fgKey` (its value, not its identity) is the real dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shape, brightness, providedCells, size, cols, rows, frames, fgKey, bg, gap, radius]);
 }

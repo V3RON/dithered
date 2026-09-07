@@ -22,8 +22,15 @@ export interface DitheredOptions {
   frames?: number;
   /** Loop duration in ms. Default 2000. */
   period?: number;
-  /** Fill color for drawn cells. Default '#000'. */
-  fg?: string;
+  /**
+   * A single fill color, or an ordered palette of tones from darkest to
+   * brightest — a brightness value then dithers between adjacent tones
+   * instead of just on/off. See `toneLevel` for the quantization rule.
+   * `'currentColor'`, anywhere in a palette, resolves to the canvas's
+   * computed text color; web only (`dithered/react` and `createDithered`),
+   * rejected on `dithered/native`. Default '#000'.
+   */
+  fg?: string | string[];
   /** Background fill, or 'transparent'. Default 'transparent'. */
   bg?: string;
   /**
@@ -46,7 +53,11 @@ export interface DitheredOptions {
 
 export type ResolvedOptions = Required<DitheredOptions>;
 
-export const DEFAULTS: Omit<ResolvedOptions, 'shape' | 'brightness'> = {
+// `fg` is narrowed back to `string` here (`ResolvedOptions.fg` is `string |
+// string[]`, to allow a palette) since the default is always a single
+// color — `toPalette`/`resolvePalette` in `./palette` lean on `DEFAULTS.fg`
+// being a plain `string` fallback, not a union.
+export const DEFAULTS: Omit<ResolvedOptions, 'shape' | 'brightness'> & { fg: string } = {
   size: 48,
   cols: 16,
   rows: 0, // 0 means "derive from aspect ratio" (see resolveRows)

@@ -124,4 +124,59 @@ describe('Dithered', () => {
     // Default cols (16) is a real number, so cells are sampled and drawn.
     expect(ctx.fill).toHaveBeenCalled();
   });
+
+  it('resolves fg="currentColor" against the canvas\'s own computed color', () => {
+    render(
+      <Dithered
+        shape={SQUARE_SHAPE}
+        brightness={() => true}
+        fg="currentColor"
+        style={{ color: 'rgb(1, 2, 3)' }}
+      />,
+    );
+    const canvas = document.querySelector('canvas')!;
+
+    expect(ctx.fillStyle).toBe(getComputedStyle(canvas).color);
+    expect(ctx.fillStyle).not.toBe('currentColor');
+  });
+
+  it('re-resolves currentColor when style changes (className/style-keyed effect)', () => {
+    const { rerender } = render(
+      <Dithered
+        shape={SQUARE_SHAPE}
+        brightness={() => true}
+        fg="currentColor"
+        style={{ color: 'rgb(1, 2, 3)' }}
+      />,
+    );
+    const canvas = document.querySelector('canvas')!;
+    const firstColor = getComputedStyle(canvas).color;
+    expect(ctx.fillStyle).toBe(firstColor);
+
+    const refreshSpy = vi.spyOn(lastInstance(), 'refreshColors');
+    rerender(
+      <Dithered
+        shape={SQUARE_SHAPE}
+        brightness={() => true}
+        fg="currentColor"
+        style={{ color: 'rgb(4, 5, 6)' }}
+      />,
+    );
+
+    expect(refreshSpy).toHaveBeenCalled();
+    const secondColor = getComputedStyle(canvas).color;
+    expect(secondColor).not.toBe(firstColor);
+    expect(ctx.fillStyle).toBe(secondColor);
+  });
+
+  it('does not call refreshColors when fg has no currentColor token', () => {
+    const { rerender } = render(
+      <Dithered shape={SQUARE_SHAPE} brightness={() => true} fg="#111111" />,
+    );
+    const refreshSpy = vi.spyOn(lastInstance(), 'refreshColors');
+
+    rerender(<Dithered shape={SQUARE_SHAPE} brightness={() => true} fg="#111111" className="x" />);
+
+    expect(refreshSpy).not.toHaveBeenCalled();
+  });
 });

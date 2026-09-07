@@ -166,7 +166,7 @@ const brightness: Brightness = (cell, t) => 0.5 + 0.5 * Math.sin((cell.u + t) * 
 import { compose, presets } from 'dithered';
 ```
 
-`compose` is equally available from `dithered/native` — it's a plain, platform-free module with no DOM or React Native imports of its own, so the two entries expose the identical set of helpers.
+`compose` is equally available from `dithered/react-native` — it's a plain, platform-free module with no DOM or React Native imports of its own, so the two entries expose the identical set of helpers.
 
 | Helper                      | Does                                                                         |
 | --------------------------- | ---------------------------------------------------------------------------- |
@@ -214,6 +214,35 @@ const brightness = compose.blend(
 );
 ```
 
+## Palettes
+
+`fg` accepts an ordered palette of colors, darkest first, instead of a single color. A `Brightness` value then dithers between adjacent tones instead of just on/off, which is what makes larger, denser grids read as a "retro screen" rather than flat black-on-background:
+
+```tsx
+<Dithered
+  shape={shapes.rozenite}
+  brightness={presets.gem()}
+  fg={['#2a1a4a', '#8232ff', '#d9c2ff']}
+  size={120}
+/>
+```
+
+**Quantization.** With a palette of `n` colors, a numeric brightness `b` dithers between two neighboring tones the same way single-color output dithers against `cell.threshold`, just spread across `n` bands instead of one: `b <= 0` (or `NaN`) skips the cell, `b >= 1` paints the brightest tone, and anything in between lands on the darker or brighter of its two neighboring tones depending on where it falls within its band relative to `cell.threshold`. A single color (a plain string, or a one-entry array) is exactly this rule at `n = 1`, so existing single-color output is unaffected — a string `fg` is not a special case of the palette code, it _is_ the palette code with `n = 1` (see `toneLevel` in `dithered`'s exports for the exact formula, and [ADR 0005](packages/dithered/docs/adrs/0005-multi-tone-palettes.md) for the proof). Boolean brightness keeps its usual meaning regardless of palette size: `true` paints the brightest tone, `false` skips the cell. The result depends on `brightness` actually spanning its full `0..1` range — a preset whose output is effectively binary will show fewer tones than the palette has, however many colors you give it.
+
+An empty palette (`fg: []`) has no sensible rendering and falls back to the default `'#000'` rather than throwing from inside the paint loop.
+
+**`currentColor`**, anywhere in a palette, resolves to the canvas's own computed text color — handy for a spinner that should just match the surrounding text:
+
+```tsx
+<Dithered shape={shapes.circle} brightness={presets.pulse()} fg="currentColor" />
+```
+
+This is **web only** (`dithered/react` and plain `createDithered`; there is no computed style to resolve on native). It re-resolves whenever `createDithered`'s `update()` runs, and `dithered/react`'s `<Dithered>` also re-resolves it whenever `className`/`style`/`fg` change — so a `style={{ color: ... }}` swap that re-themes the canvas picks up the new color automatically. For a plain `createDithered` instance, or an ambient theme change with no other prop update, call `instance.refreshColors()` yourself; it only repaints when the resolved color actually changed. Passing `'currentColor'` to `dithered/react-native` throws:
+
+```
+dithered: 'currentColor' is not supported on native — pass an explicit color.
+```
+
 ## Determinate progress
 
 For a progress indicator rather than a loop, pass `progress` (`0`–`1`) to `Dithered`, or call `instance.setPaused(true)` + `instance.renderFrame(frame)` directly with the core API — both pause the animation and render exactly one frame:
@@ -243,32 +272,33 @@ For a progress indicator rather than a loop, pass `progress` (`0`–`1`) to `Dit
 
 ### `DitheredOptions`
 
-| Option                 | Type                | Default                   | Description                                                                         |
-| ---------------------- | ------------------- | ------------------------- | ----------------------------------------------------------------------------------- |
-| `shape`                | `Shape`             | —                         | Required. Silhouette to sample cells inside.                                        |
-| `brightness`           | `Brightness`        | —                         | Required. Per-cell, per-frame brightness function.                                  |
-| `size`                 | `number`            | `48`                      | Height in CSS px (web) or dp (native); width follows the shape's aspect ratio.      |
-| `cols`                 | `number`            | `16`                      | Grid columns.                                                                       |
-| `rows`                 | `number`            | derived from aspect ratio | Grid rows.                                                                          |
-| `frames`               | `number`            | `48`                      | Frames per loop.                                                                    |
-| `period`               | `number`            | `2000`                    | Loop duration, ms.                                                                  |
-| `fg`                   | `string`            | `'#000'`                  | Fill color for drawn cells.                                                         |
-| `bg`                   | `string`            | `'transparent'`           | Background fill, or `'transparent'`.                                                |
-| `cache`                | `boolean \| 'auto'` | `'auto'`                  | Web only. Pre-render the loop into a sprite strip. `'auto'` = on for `size <= 120`. |
-| `paused`               | `boolean`           | `false`                   | Freeze the animation.                                                               |
-| `gap`                  | `number`            | `0.09`                    | Gap between cells, as a fraction of cell size (min 0.6px).                          |
-| `radius`               | `number`            | `0.14`                    | Corner radius, as a fraction of cell size.                                          |
-| `respectReducedMotion` | `boolean`           | `true`                    | Render a single static frame under `prefers-reduced-motion`.                        |
-| `initialFrame`         | `number`            | `0`                       | Frame drawn synchronously on create, so there is no blank flash.                    |
+| Option                 | Type                 | Default                   | Description                                                                              |
+| ---------------------- | -------------------- | ------------------------- | ---------------------------------------------------------------------------------------- |
+| `shape`                | `Shape`              | —                         | Required. Silhouette to sample cells inside.                                             |
+| `brightness`           | `Brightness`         | —                         | Required. Per-cell, per-frame brightness function.                                       |
+| `size`                 | `number`             | `48`                      | Height in CSS px (web) or dp (native); width follows the shape's aspect ratio.           |
+| `cols`                 | `number`             | `16`                      | Grid columns.                                                                            |
+| `rows`                 | `number`             | derived from aspect ratio | Grid rows.                                                                               |
+| `frames`               | `number`             | `48`                      | Frames per loop.                                                                         |
+| `period`               | `number`             | `2000`                    | Loop duration, ms.                                                                       |
+| `fg`                   | `string \| string[]` | `'#000'`                  | Fill color, or an ordered palette from darkest to brightest — see [Palettes](#palettes). |
+| `bg`                   | `string`             | `'transparent'`           | Background fill, or `'transparent'`.                                                     |
+| `cache`                | `boolean \| 'auto'`  | `'auto'`                  | Web only. Pre-render the loop into a sprite strip. `'auto'` = on for `size <= 120`.      |
+| `paused`               | `boolean`            | `false`                   | Freeze the animation.                                                                    |
+| `gap`                  | `number`             | `0.09`                    | Gap between cells, as a fraction of cell size (min 0.6px).                               |
+| `radius`               | `number`             | `0.14`                    | Corner radius, as a fraction of cell size.                                               |
+| `respectReducedMotion` | `boolean`            | `true`                    | Render a single static frame under `prefers-reduced-motion`.                             |
+| `initialFrame`         | `number`             | `0`                       | Frame drawn synchronously on create, so there is no blank flash.                         |
 
 ### `DitheredInstance`
 
-| Method                                      | Description                                                                             |
-| ------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `setPaused(paused: boolean)`                | Pause or resume the animation loop.                                                     |
-| `update(options: Partial<DitheredOptions>)` | Re-configure the instance in place; may resample cells and/or rebuild the sprite cache. |
-| `renderFrame(frame: number)`                | Draw a specific frame directly, bypassing the animation loop.                           |
-| `destroy()`                                 | Stop the loop and release all listeners/observers.                                      |
+| Method                                      | Description                                                                                          |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `setPaused(paused: boolean)`                | Pause or resume the animation loop.                                                                  |
+| `update(options: Partial<DitheredOptions>)` | Re-configure the instance in place; may resample cells and/or rebuild the sprite cache.              |
+| `renderFrame(frame: number)`                | Draw a specific frame directly, bypassing the animation loop.                                        |
+| `refreshColors()`                           | Re-resolve `'currentColor'` in `fg` and repaint if it changed. Web only — see [Palettes](#palettes). |
+| `destroy()`                                 | Stop the loop and release all listeners/observers.                                                   |
 
 `dithered/react`'s `Dithered` component accepts the same options as props (`shape`/`brightness` still required), plus `label` (accessible label, default `'Loading'`, `''` hides it from assistive tech), `className`, `style`, and `progress` — see [Determinate progress](#determinate-progress) and [React](#quick-start) above. `dithered/react-native`'s takes the same props with `style: StyleProp<ViewStyle>` in place of `className`/`style`, no `cache`, and an extra `cells` — see [React Native](#react-native) above.
 

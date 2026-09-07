@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDithered, frameAt, paintFrame, type DitheredOptions } from './renderer';
 import type { Cell } from './shape';
-import { SQUARE_SHAPE, makeFakeCanvas, stubAnimationGlobals } from './test-utils';
+import {
+  SQUARE_SHAPE,
+  make2dCtx,
+  makeFakeCanvas,
+  stubAnimationGlobals,
+  stubGetContext,
+} from './test-utils';
 
 describe('frameAt', () => {
   it('quantizes time into [0, frames)', () => {
@@ -43,6 +49,60 @@ function makeRecordingCtx() {
     fill: vi.fn(() => calls.push('fill')),
   };
   return { ctx, calls };
+}
+
+/**
+ * Like `makeRecordingCtx`, but also logs `fillStyle` assignments into the
+ * same sequence — needed to pin the exact interleaving of color switches
+ * and draws that a multi-tone palette produces.
+ */
+function makeSequenceCtx() {
+  const calls: string[] = [];
+  let fillStyleValue: string | object = '';
+  const ctx = {
+    get fillStyle() {
+      return fillStyleValue;
+    },
+    set fillStyle(value: string | object) {
+      fillStyleValue = value;
+      calls.push(`fillStyle=${String(value)}`);
+    },
+    fillRect: vi.fn((...args: number[]) => calls.push(`fillRect(${args.join(',')})`)),
+    beginPath: vi.fn(() => calls.push('beginPath')),
+    rect: vi.fn((...args: number[]) => calls.push(`rect(${args.join(',')})`)),
+    fill: vi.fn(() => calls.push('fill')),
+  };
+  return { ctx, calls };
+}
+
+/**
+ * Records, in draw order, the `fillStyle` in effect at the moment each
+ * cell is committed (`fill()` following a `rect()`) — separately from
+ * `bg`'s own fill (via `fillRect`). Used to compare the colors a palette
+ * actually painted, independent of the exact call sequence.
+ */
+function makeColorRecordingCtx() {
+  const cellColors: (string | object)[] = [];
+  const bgColors: (string | object)[] = [];
+  let pendingRect = false;
+  const ctx = {
+    fillStyle: '' as string | object,
+    fillRect: vi.fn(() => bgColors.push(ctx.fillStyle)),
+    beginPath: vi.fn(() => {
+      pendingRect = false;
+    }),
+    rect: vi.fn(() => {
+      pendingRect = true;
+    }),
+    fill: vi.fn(() => {
+      if (pendingRect) cellColors.push(ctx.fillStyle);
+    }),
+    clearRect: vi.fn(),
+    setTransform: vi.fn(),
+    drawImage: vi.fn(),
+    isPointInPath: vi.fn(() => true),
+  };
+  return { ctx, cellColors, bgColors };
 }
 
 describe('paintFrame', () => {
@@ -108,6 +168,147 @@ describe('paintFrame', () => {
     paintFrame(ctx, makeCells(1), () => true, 0, geometry);
     expect(roundRect).toHaveBeenCalledTimes(1);
     expect(ctx.rect).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// paintFrame: single-color output is byte-identical (ADR 0005 §2)
+//
+// A committed expected-call-log fixture for `fg: '#8232ff'`: the exact
+// sequence of PaintContext calls this produces today, with and without any
+// cells drawn. If multi-tone palettes ever changed a single-color call
+// sequence, this is what would catch it.
+// ---------------------------------------------------------------------------
+
+describe('paintFrame: single-color call-sequence snapshot', () => {
+  const geometry = {
+    cellSize: 10,
+    gap: 1,
+    radius: 2,
+    fg: '#8232ff',
+    bg: 'transparent',
+    width: 100,
+    height: 10,
+  };
+
+  it('draws every other cell in a fixed, unconditional-fillStyle sequence', () => {
+    const { ctx, calls } = makeSequenceCtx();
+    const cells = makeCells(4);
+    paintFrame(ctx, cells, (cell) => cell.i % 2 === 0, 0, geometry);
+
+    expect(calls).toEqual([
+      'fillStyle=#8232ff',
+      'beginPath',
+      'rect(1,1,8,8)',
+      'fill',
+      'beginPath',
+      'rect(21,1,8,8)',
+      'fill',
+    ]);
+  });
+
+  it('still assigns fillStyle once even when no cell is drawn', () => {
+    const { ctx, calls } = makeSequenceCtx();
+    paintFrame(ctx, makeCells(2), () => false, 0, geometry);
+
+    expect(calls).toEqual(['fillStyle=#8232ff']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// paintFrame: multi-tone palettes
+// ---------------------------------------------------------------------------
+
+describe('paintFrame: multi-tone palettes', () => {
+  const geometry = {
+    cellSize: 10,
+    gap: 1,
+    radius: 2,
+    fg: ['#a00', '#0a0', '#00a'],
+    bg: 'transparent',
+    width: 100,
+    height: 10,
+  };
+
+  it('paints each cell in the tone its quantized level selects', () => {
+    // threshold is 0.5 on every cell (see makeCells): b=0 skips; b=0.4
+    // (level 1.2 -> base 1, frac .2 <= .5) paints tone 1; b=0.6 (level 1.8
+    // -> base 1, frac .8 > .5) paints tone 2; b=0.95 (>= 1 after rounding
+    // is not needed here, level 2.85 -> base 2, frac .85 > .5) paints tone 3.
+    const cells = makeCells(4);
+    const brightnessByCell = [0, 0.4, 0.6, 0.95];
+    const brightness = vi.fn((cell: Cell) => brightnessByCell[cell.i]);
+
+    const { ctx, cellColors } = makeColorRecordingCtx();
+    paintFrame(ctx, cells, brightness, 0, geometry);
+
+    expect(cellColors).toEqual(['#a00', '#0a0', '#00a']);
+    expect(brightness).toHaveBeenCalledTimes(4); // exactly once per cell
+  });
+
+  it('assigns fillStyle at most once per non-empty tone, plus once for bg', () => {
+    const cells = makeCells(4);
+    const brightnessByCell = [0, 0.4, 0.6, 0.95];
+    const { ctx, calls } = makeSequenceCtx();
+
+    paintFrame(ctx, cells, (cell) => brightnessByCell[cell.i], 0, { ...geometry, bg: '#fff' });
+
+    const fillStyleAssignments = calls.filter((c) => c.startsWith('fillStyle='));
+    // one for bg, plus one per tone (3 tones, each with exactly one cell)
+    expect(fillStyleAssignments).toEqual([
+      'fillStyle=#fff',
+      'fillStyle=#a00',
+      'fillStyle=#0a0',
+      'fillStyle=#00a',
+    ]);
+  });
+
+  it('keeps cells in their original relative order within a tone', () => {
+    // Two cells (i=1 and i=3) share tone 3 (brightness >= 1); they must
+    // still be drawn in ascending index order, not reversed.
+    const cells = makeCells(4);
+    const { ctx, calls } = makeSequenceCtx();
+    paintFrame(ctx, cells, (cell) => (cell.i === 1 || cell.i === 3 ? 1 : 0), 0, geometry);
+
+    expect(calls).toEqual([
+      'fillStyle=#00a',
+      'beginPath',
+      'rect(11,1,8,8)', // i=1, drawn first
+      'fill',
+      'beginPath',
+      'rect(31,1,8,8)', // i=3, drawn second
+      'fill',
+    ]);
+  });
+
+  it('boolean brightness bypasses the dither: true paints the last tone, false skips', () => {
+    const cells = makeCells(2);
+    const { ctx, cellColors } = makeColorRecordingCtx();
+    paintFrame(ctx, cells, (cell) => cell.i === 0, 0, geometry);
+
+    expect(cellColors).toEqual(['#00a']);
+  });
+
+  it('an empty palette falls back to the default fg color', () => {
+    const { ctx, cellColors } = makeColorRecordingCtx();
+    paintFrame(ctx, makeCells(1), () => true, 0, { ...geometry, fg: [] });
+
+    expect(cellColors).toEqual(['#000']);
+  });
+
+  it('a one-entry palette takes the same fast path as a plain string fg', () => {
+    const { ctx, calls } = makeSequenceCtx();
+    paintFrame(ctx, makeCells(2), () => true, 0, { ...geometry, fg: ['#8232ff'] });
+
+    expect(calls).toEqual([
+      'fillStyle=#8232ff',
+      'beginPath',
+      'rect(1,1,8,8)',
+      'fill',
+      'beginPath',
+      'rect(11,1,8,8)',
+      'fill',
+    ]);
   });
 });
 
@@ -247,5 +448,150 @@ describe('createDithered', () => {
 
     expect(ctx.fillStyle).toBe('#ff00ff');
     expect(ctx.fill).toHaveBeenCalled();
+  });
+
+  // Sprite-strip cache with a palette: the strip is built through the same
+  // `computeGeometry` + `paintFrame` path as uncached rendering, so it
+  // needs no palette-specific handling — this pins that down by comparing
+  // the colors an actual cached build produces against an uncached
+  // instance configured identically. `frames: 1` makes the whole strip
+  // exactly one frame's worth of draws, directly comparable to a single
+  // uncached paint.
+  it('cache: true builds a sprite strip whose colors match an uncached instance', () => {
+    const palette = ['#a00', '#0a0', '#00a'];
+    // Deterministic and phase-independent (ignores `t`), so a one-frame
+    // loop is representative and cached/uncached output must agree.
+    const brightness = (cell: Cell) => (cell.i % 3 === 0 ? 0 : cell.i % 3 === 1 ? 0.95 : 0.4);
+    const options = (overrides: Partial<DitheredOptions>) =>
+      baseOptions({ fg: palette, frames: 1, brightness, ...overrides });
+
+    const strip = makeColorRecordingCtx();
+    const getContextStub = stubGetContext(strip.ctx);
+    const { canvas: cachedCanvas, ctx: cachedMainCtx } = makeFakeCanvas();
+    createDithered(cachedCanvas, options({ cache: true }));
+    getContextStub.restore();
+
+    const uncached = makeColorRecordingCtx();
+    const uncachedCanvas = {
+      width: 0,
+      height: 0,
+      style: {} as Record<string, string>,
+      getContext: vi.fn(() => uncached.ctx),
+    } as unknown as HTMLCanvasElement;
+    createDithered(uncachedCanvas, options({ cache: false }));
+
+    // Strip built and blitted.
+    expect(strip.cellColors.length).toBeGreaterThan(0);
+    expect(cachedMainCtx.drawImage).toHaveBeenCalled();
+
+    // Cached and uncached agree on which colors were painted, in order.
+    expect(strip.cellColors).toEqual(uncached.cellColors);
+    expect(strip.cellColors.every((c) => palette.includes(c as string))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createDithered: currentColor (web-only; see ADR 0005 §5)
+// ---------------------------------------------------------------------------
+
+describe('createDithered: currentColor', () => {
+  let env: ReturnType<typeof stubAnimationGlobals>;
+  let ctx: ReturnType<typeof make2dCtx>;
+  let getContextStub: ReturnType<typeof stubGetContext>;
+  let canvas: HTMLCanvasElement;
+
+  beforeEach(() => {
+    env = stubAnimationGlobals();
+    ctx = make2dCtx();
+    getContextStub = stubGetContext(ctx);
+    canvas = document.createElement('canvas');
+    document.body.appendChild(canvas);
+  });
+
+  afterEach(() => {
+    env.restore();
+    getContextStub.restore();
+    canvas.remove();
+  });
+
+  function baseOptions(overrides: Partial<DitheredOptions> = {}): DitheredOptions {
+    return {
+      shape: SQUARE_SHAPE,
+      brightness: () => true,
+      size: 40,
+      cols: 4,
+      cache: false,
+      ...overrides,
+    };
+  }
+
+  it('resolves a currentColor fg against the canvas computed color', () => {
+    canvas.style.color = 'rgb(10, 20, 30)';
+    const expected = getComputedStyle(canvas).color;
+
+    createDithered(canvas, baseOptions({ fg: 'currentColor' }));
+
+    expect(ctx.fillStyle).toBe(expected);
+  });
+
+  it('update() re-resolves currentColor against the new computed color', () => {
+    canvas.style.color = 'rgb(10, 20, 30)';
+    const instance = createDithered(canvas, baseOptions({ fg: 'currentColor' }));
+
+    canvas.style.color = 'rgb(40, 50, 60)';
+    const expected = getComputedStyle(canvas).color;
+    instance.update({});
+
+    expect(ctx.fillStyle).toBe(expected);
+  });
+
+  it('refreshColors() picks up a changed color and no-ops when unchanged', () => {
+    canvas.style.color = 'rgb(10, 20, 30)';
+    const instance = createDithered(canvas, baseOptions({ fg: 'currentColor' }));
+    ctx.fill.mockClear();
+
+    // No color change: a no-op, so nothing is repainted.
+    instance.refreshColors();
+    expect(ctx.fill).not.toHaveBeenCalled();
+
+    canvas.style.color = 'rgb(70, 80, 90)';
+    const expected = getComputedStyle(canvas).color;
+    instance.refreshColors();
+
+    expect(ctx.fillStyle).toBe(expected);
+    expect(ctx.fill).toHaveBeenCalled();
+  });
+
+  it('resolves only the currentColor entry in a mixed palette', () => {
+    const rec = makeColorRecordingCtx();
+    const stub = stubGetContext(rec.ctx);
+    const mixedCanvas = document.createElement('canvas');
+    document.body.appendChild(mixedCanvas);
+    mixedCanvas.style.color = 'rgb(9, 9, 9)';
+    const expectedResolved = getComputedStyle(mixedCanvas).color;
+
+    // threshold is Bayer-derived per cell; pick brightness values that
+    // deterministically land cell (0,0) on tone 1 (the resolved token) and
+    // cell (1,0) on tone 2 (the untouched literal), regardless of the
+    // exact threshold, by using values far from any possible boundary.
+    const brightness = (cell: Cell) => {
+      if (cell.i === 0 && cell.j === 0) return 0.4;
+      if (cell.i === 1 && cell.j === 0) return 1;
+      return 0;
+    };
+
+    createDithered(mixedCanvas, {
+      shape: SQUARE_SHAPE,
+      brightness,
+      size: 40,
+      cols: 4,
+      cache: false,
+      fg: ['currentColor', '#ff00ff'],
+    });
+
+    expect(rec.cellColors).toEqual([expectedResolved, '#ff00ff']);
+
+    stub.restore();
+    mixedCanvas.remove();
   });
 });

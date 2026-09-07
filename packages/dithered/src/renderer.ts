@@ -2,13 +2,17 @@ import {
   assignDefined,
   computeGeometry,
   frameAt,
+  hasCurrentColor,
   paintFrame,
   resolveOptions,
+  resolvePalette,
   resolveRows,
   surfaceSize,
+  toPalette,
   type DitheredOptions,
   type PaintContext,
   type PaintGeometry,
+  type Palette,
   type ResolvedOptions,
 } from './core';
 import { domHitTester } from './hit-test';
@@ -25,6 +29,17 @@ export interface DitheredInstance {
   update(options: Partial<DitheredOptions>): void;
   /** Draws a specific frame directly, bypassing the animation loop. */
   renderFrame(frame: number): void;
+  /**
+   * Re-resolves any `'currentColor'` entries in `fg` against the canvas's
+   * current computed text color, and — only if the resolved palette
+   * actually changed — rebuilds the sprite cache and repaints the current
+   * frame. A no-op otherwise, so calling this on every render (e.g. from a
+   * `style`-keyed effect) is cheap. `configure()` already does this on
+   * create and on every `update()`; call this directly for the case ADR
+   * 0005 §5 leaves out of scope — an ambient theme change with no other
+   * option change to trigger `update()`.
+   */
+  refreshColors(): void;
   /** Stops the loop and releases all listeners/observers. */
   destroy(): void;
 }
@@ -60,6 +75,12 @@ export function createDithered(
   const ctx: CanvasRenderingContext2D & PaintContext = rawCtx;
 
   let opts = resolveOptions(options);
+  // `opts.fg` may hold the unresolved `'currentColor'` token; `paintOpts`
+  // is what geometry is actually built from, with that token replaced by
+  // `applyResolvedFg()`. Keeping them separate means a later re-resolve
+  // (`refreshColors`) always starts from the token, never from a stale
+  // resolved value baked into `opts`.
+  let paintOpts: ResolvedOptions = opts;
   let reduced = prefersReducedMotion(opts);
 
   let W = 0;
@@ -73,17 +94,49 @@ export function createDithered(
   let visible = true;
   let destroyed = false;
 
-  function configure(): void {
-    const dpr = Math.min((typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1, 3);
-    const css = surfaceSize(opts);
-    canvas.style.width = css.width + 'px';
-    canvas.style.height = css.height + 'px';
-    const device = surfaceSize(opts, dpr);
-    W = canvas.width = Math.round(device.width);
-    H = canvas.height = Math.round(device.height);
+  function computedColor(): string {
+    if (typeof getComputedStyle === 'undefined') return '';
+    try {
+      return getComputedStyle(canvas).color;
+    } catch {
+      // A canvas that isn't attached to a real document (a test double, or
+      // detached-node edge cases) can't be resolved; fall through to the
+      // DEFAULTS.fg fallback in `resolvePalette` instead of throwing.
+      return '';
+    }
+  }
 
-    cells = sampleCells(opts.shape, opts.cols, domHitTester(opts.shape, ctx), resolveRows(opts));
+  function palettesEqual(a: string | Palette, b: string | Palette): boolean {
+    if (a === b) return true;
+    const pa = typeof a === 'string' ? [a] : a;
+    const pb = typeof b === 'string' ? [b] : b;
+    return pa.length === pb.length && pa.every((color, i) => color === pb[i]);
+  }
 
+  /**
+   * Re-resolves any `'currentColor'` entries in `opts.fg` against the
+   * canvas's current computed color and updates `paintOpts` to match.
+   * A palette with no `'currentColor'` entry is passed through as-is (by
+   * reference, when it's the same array), which is what lets the `fg:
+   * string` fast path in `paintFrame` fire for the common case. Returns
+   * whether the resolved palette actually changed.
+   */
+  function applyResolvedFg(): boolean {
+    const palette = toPalette(opts.fg);
+    // Spread into a fresh mutable array: `ResolvedOptions.fg` (like the
+    // public `DitheredOptions.fg` it's `Required<>` of) is `string |
+    // string[]`, not `string | Palette` — `resolvePalette` returns the
+    // latter (readonly), which a plain `string[]`-typed field can't hold.
+    const next: string | string[] = hasCurrentColor(palette)
+      ? [...resolvePalette(palette, computedColor())]
+      : opts.fg;
+    const changed = !palettesEqual(next, paintOpts.fg);
+    paintOpts = next === opts.fg ? opts : { ...opts, fg: next };
+    return changed;
+  }
+
+  /** Rebuilds the sprite-strip cache (or clears it) from the current `cells`/`paintOpts`. */
+  function buildCache(): void {
     const useCache = opts.cache === 'auto' ? opts.size <= 120 : opts.cache;
     if (useCache) {
       const strip = document.createElement('canvas');
@@ -97,7 +150,7 @@ export function createDithered(
             cells,
             opts.brightness,
             f / opts.frames,
-            computeGeometry(opts, W, H, f * W),
+            computeGeometry(paintOpts, W, H, f * W),
           );
         }
         sheet = strip;
@@ -107,6 +160,22 @@ export function createDithered(
     } else {
       sheet = null;
     }
+  }
+
+  function configure(): void {
+    applyResolvedFg();
+
+    const dpr = Math.min((typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1, 3);
+    const css = surfaceSize(opts);
+    canvas.style.width = css.width + 'px';
+    canvas.style.height = css.height + 'px';
+    const device = surfaceSize(opts, dpr);
+    W = canvas.width = Math.round(device.width);
+    H = canvas.height = Math.round(device.height);
+
+    cells = sampleCells(opts.shape, opts.cols, domHitTester(opts.shape, ctx), resolveRows(opts));
+
+    buildCache();
 
     currentFrame = -1;
   }
@@ -117,7 +186,7 @@ export function createDithered(
     if (sheet) {
       ctx.drawImage(sheet, f * W, 0, W, H, 0, 0, W, H);
     } else {
-      paintFrame(ctx, cells, opts.brightness, f / opts.frames, computeGeometry(opts, W, H));
+      paintFrame(ctx, cells, opts.brightness, f / opts.frames, computeGeometry(paintOpts, W, H));
     }
     currentFrame = f;
   }
@@ -187,6 +256,12 @@ export function createDithered(
 
     renderFrame(frame: number) {
       blit(frame);
+    },
+
+    refreshColors() {
+      if (!applyResolvedFg()) return;
+      buildCache();
+      blit(currentFrame >= 0 ? currentFrame : opts.initialFrame);
     },
 
     destroy() {
