@@ -12,6 +12,8 @@ export { hash, valueNoise, fbm } from './noise';
 export type { Brightness, DitheredOptions, PaintContext, PaintGeometry } from './core';
 export { computeGeometry, frameAt, paintFrame, resolveOptions, resolveRows } from './core';
 export { presets, gem, sweep, pulse, rain, wave, fill, gameOfLife } from './presets';
+export type { MixAmount, CellPredicate } from './compose';
+export { compose, blend, mask, timeScale, reverse, offset, invert, clamp } from './compose';
 export { shapes, rozenite, circle, square, diamond, heart } from './shapes';
 export { shapeFromSvgLite } from './svg-lite';
 

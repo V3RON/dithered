@@ -7,6 +7,8 @@ export { computeGeometry, frameAt, paintFrame, resolveOptions, resolveRows } fro
 export type { DitheredInstance } from './renderer';
 export { createDithered } from './renderer';
 export { presets, gem, sweep, pulse, rain, wave, fill, gameOfLife } from './presets';
+export type { MixAmount, CellPredicate } from './compose';
+export { compose, blend, mask, timeScale, reverse, offset, invert, clamp } from './compose';
 export { shapes, rozenite, circle, square, diamond, heart } from './shapes';
 export { shapeFromSvg } from './svg';
 export { shapeFromSvgLite } from './svg-lite';

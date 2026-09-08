@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Dithered, presets, shapeFromSvg, shapes } from 'dithered/react';
+import { Dithered, compose, presets, shapeFromSvg, shapes } from 'dithered/react';
 import type { Brightness, Shape } from 'dithered/react';
 
 const REPO_URL = 'https://github.com/V3RON/dithered';
@@ -268,6 +268,10 @@ export interface PlaygroundState {
   setShapeKey: (key: string) => void;
   presetKey: string;
   setPresetKey: (key: string) => void;
+  blendKey: string;
+  setBlendKey: (key: string) => void;
+  mix: number;
+  setMix: (mix: number) => void;
   fg: string;
   setFg: (fg: string) => void;
   cols: number;
@@ -289,6 +293,10 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
     setShapeKey,
     presetKey,
     setPresetKey,
+    blendKey,
+    setBlendKey,
+    mix,
+    setMix,
     fg,
     setFg,
     cols,
@@ -331,13 +339,35 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
     ? (customShape ?? shapes.rozenite)
     : shapes[shapeKey as keyof typeof shapes];
 
-  const brightness = useMemo(() => {
+  // `mix` only parameterizes the closure `compose.blend` returns — it plays
+  // no part in constructing `primary`/`secondary` — so it's kept out of this
+  // memo's deps. Otherwise every slider step would rebuild both presets
+  // (e.g. re-running 48 generations of `gameOfLife`'s board), which this
+  // split avoids. It does *not* avoid a repaint: the `brightness` memo below
+  // still returns a new `compose.blend(...)` closure on every `mix` step,
+  // `Dithered`'s reconfigure effect depends on `brightness` by identity, and
+  // `renderer.ts`'s `update()` unconditionally calls `configure()` — which
+  // re-samples cells and repaints every frame regardless. The slider still
+  // works correctly; this split just keeps a mix drag from *also* re-running
+  // the (possibly expensive) preset factories on top of that.
+  const presetsForBlend = useMemo(() => {
     const factory = presets[presetKey as keyof typeof presets];
-    if (presetKey === 'gem') return factory({ noise: noiseAmt });
-    if (presetKey === 'gameOfLife') return factory({ seed: golSeed });
-    return factory();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [presetKey, noiseAmt, golSeed]);
+    const primary =
+      presetKey === 'gem'
+        ? factory({ noise: noiseAmt })
+        : presetKey === 'gameOfLife'
+          ? factory({ seed: golSeed })
+          : factory();
+    if (blendKey === 'none') return { primary, secondary: null };
+    const secondary = presets[blendKey as keyof typeof presets]();
+    return { primary, secondary };
+  }, [presetKey, noiseAmt, golSeed, blendKey]);
+
+  const brightness = useMemo(() => {
+    const { primary, secondary } = presetsForBlend;
+    if (!secondary) return primary;
+    return compose.blend(primary, secondary, mix);
+  }, [presetsForBlend, mix]);
 
   const snippet = useMemo(
     () =>
@@ -348,11 +378,25 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
         presetKey,
         noiseAmt,
         golSeed,
+        blendKey,
+        mix,
         fg,
         cols,
         period,
       }),
-    [isCustomShape, shapeKey, svgText, presetKey, noiseAmt, golSeed, fg, cols, period],
+    [
+      isCustomShape,
+      shapeKey,
+      svgText,
+      presetKey,
+      noiseAmt,
+      golSeed,
+      blendKey,
+      mix,
+      fg,
+      cols,
+      period,
+    ],
   );
 
   return (
@@ -416,10 +460,40 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
             </label>
 
             <label style={row}>
+              <span style={label}>Blend with</span>
+              <select
+                style={fieldStyle}
+                value={blendKey}
+                onChange={(e) => setBlendKey(e.target.value)}
+              >
+                <option value="none">None</option>
+                {PRESET_ENTRIES.map(([name]) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label style={row}>
               <span style={label}>Color</span>
               <input type="color" value={fg} onChange={(e) => setFg(e.target.value)} />
             </label>
           </div>
+
+          {blendKey !== 'none' && (
+            <label style={row}>
+              <span style={label}>Mix: {mix.toFixed(2)}</span>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={mix}
+                onChange={(e) => setMix(Number(e.target.value))}
+              />
+            </label>
+          )}
 
           {isCustomShape && (
             <div style={subCard}>
@@ -526,17 +600,34 @@ function buildSnippet(opts: {
   presetKey: string;
   noiseAmt: number;
   golSeed: number;
+  blendKey: string;
+  mix: number;
   fg: string;
   cols: number;
   period: number;
 }): string {
-  const { isCustomShape, shapeKey, svgText, presetKey, noiseAmt, golSeed, fg, cols, period } = opts;
+  const {
+    isCustomShape,
+    shapeKey,
+    svgText,
+    presetKey,
+    noiseAmt,
+    golSeed,
+    blendKey,
+    mix,
+    fg,
+    cols,
+    period,
+  } = opts;
 
   const presetArgParts: string[] = [];
   if (presetKey === 'gem' && noiseAmt !== 0.8) presetArgParts.push(`noise: ${noiseAmt}`);
   if (presetKey === 'gameOfLife' && golSeed !== 1) presetArgParts.push(`seed: ${golSeed}`);
   const presetArgs = presetArgParts.length ? `{ ${presetArgParts.join(', ')} }` : '';
-  const brightnessExpr = `presets.${presetKey}(${presetArgs})`;
+  const isBlending = blendKey !== 'none';
+  const brightnessExpr = isBlending
+    ? `compose.blend(presets.${presetKey}(${presetArgs}), presets.${blendKey}(), ${mix})`
+    : `presets.${presetKey}(${presetArgs})`;
 
   const propParts = [
     `shape={${isCustomShape ? 'shape' : `shapes.${shapeKey}`}}`,
@@ -548,15 +639,20 @@ function buildSnippet(opts: {
 
   const jsx = `<Dithered\n  ${propParts.join('\n  ')}\n/>`;
 
+  const namedImports = (names: (string | false)[]) => names.filter(Boolean).join(', ');
+
   if (isCustomShape) {
     return (
-      `import { Dithered, presets, shapeFromSvg } from 'dithered/react';\n\n` +
+      `import { ${namedImports(['Dithered', 'presets', isBlending && 'compose', 'shapeFromSvg'])} } from 'dithered/react';\n\n` +
       `const shape = shapeFromSvg(\`${svgText}\`);\n\n` +
       jsx
     );
   }
 
-  return `import { Dithered, shapes, presets } from 'dithered/react';\n\n` + jsx;
+  return (
+    `import { ${namedImports(['Dithered', 'shapes', 'presets', isBlending && 'compose'])} } from 'dithered/react';\n\n` +
+    jsx
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -586,6 +682,8 @@ function Footer() {
 const DEFAULTS = {
   shapeKey: 'rozenite',
   presetKey: 'gem',
+  blendKey: 'none',
+  mix: 0.5,
   fg: ACCENT,
   cols: 16,
   period: 2000,
@@ -596,6 +694,8 @@ const DEFAULTS = {
 function App() {
   const [shapeKey, setShapeKey] = useState(DEFAULTS.shapeKey);
   const [presetKey, setPresetKey] = useState(DEFAULTS.presetKey);
+  const [blendKey, setBlendKey] = useState(DEFAULTS.blendKey);
+  const [mix, setMix] = useState(DEFAULTS.mix);
   const [fg, setFg] = useState(DEFAULTS.fg);
   const [cols, setCols] = useState(DEFAULTS.cols);
   const [period, setPeriod] = useState(DEFAULTS.period);
@@ -610,6 +710,8 @@ function App() {
   const applyExample = (nextShapeKey: string, nextPresetKey: string) => {
     setShapeKey(nextShapeKey);
     setPresetKey(nextPresetKey);
+    setBlendKey(DEFAULTS.blendKey);
+    setMix(DEFAULTS.mix);
     setFg(DEFAULTS.fg);
     setCols(DEFAULTS.cols);
     setPeriod(DEFAULTS.period);
@@ -642,6 +744,10 @@ function App() {
         setShapeKey={setShapeKey}
         presetKey={presetKey}
         setPresetKey={setPresetKey}
+        blendKey={blendKey}
+        setBlendKey={setBlendKey}
+        mix={mix}
+        setMix={setMix}
         fg={fg}
         setFg={setFg}
         cols={cols}
