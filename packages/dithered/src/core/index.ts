@@ -1,7 +1,7 @@
 /**
  * The platform-free half of the library: option resolution, grid
  * geometry, frame quantization and painting. Nothing here touches the
- * DOM, so both `dithered` (canvas) and `dithered/native` (Skia) build on
+ * DOM, so both `dithered` (canvas) and `dithered/react-native` (Skia) build on
  * it without dragging one platform's globals into the other's bundle.
  */
 export type { Brightness, DitheredOptions, ResolvedOptions } from './options';

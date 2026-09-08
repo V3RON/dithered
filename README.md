@@ -6,11 +6,13 @@
 
 The library is a platform-free core plus thin per-platform renderers, in three entry points:
 
-| Entry             | Renders with                 | Needs                                                                            |
-| ----------------- | ---------------------------- | -------------------------------------------------------------------------------- |
-| `dithered`        | canvas 2D                    | nothing                                                                          |
-| `dithered/react`  | canvas 2D, in a `<canvas>`   | `react`, `react-dom`                                                             |
-| `dithered/native` | `@shopify/react-native-skia` | `react`, `react-native`, `@shopify/react-native-skia`, `react-native-reanimated` |
+| Entry                    | Renders with                 | Needs                                                                            |
+| ------------------------ | ----------------------------- | --------------------------------------------------------------------------------- |
+| `dithered`               | canvas 2D                    | nothing                                                                          |
+| `dithered/react`         | canvas 2D, in a `<canvas>`   | `react`, `react-dom`                                                             |
+| `dithered/react-native`  | `@shopify/react-native-skia` | `react`, `react-native`, `@shopify/react-native-skia`, `react-native-reanimated` |
+
+`dithered/react` and `dithered/react-native` each re-export the entire `dithered` core (shapes, presets, `sampleCells`, etc.) alongside their `Dithered` component, so a React or React Native app never needs a second import from plain `dithered`.
 
 ## Install
 
@@ -26,15 +28,14 @@ For React Native:
 pnpm add dithered @shopify/react-native-skia react-native-reanimated
 ```
 
-Reanimated needs its babel plugin in your `babel.config.js` (`plugins: ['react-native-reanimated/plugin']`) — that is what turns the playback worklet in `dithered/native` into a UI-thread function.
+Reanimated needs its babel plugin in your `babel.config.js` (`plugins: ['react-native-reanimated/plugin']`) — that is what turns the playback worklet in `dithered/react-native` into a UI-thread function.
 
 ## Quick start
 
 ### React
 
 ```tsx
-import { Dithered } from 'dithered/react';
-import { shapes, presets } from 'dithered';
+import { Dithered, shapes, presets } from 'dithered/react';
 
 function LoadingIndicator() {
   return <Dithered shape={shapes.rozenite} brightness={presets.gem()} fg="#8232ff" size={48} />;
@@ -44,7 +45,7 @@ function LoadingIndicator() {
 ### React Native
 
 ```tsx
-import { Dithered, shapes, presets } from 'dithered/native';
+import { Dithered, shapes, presets } from 'dithered/react-native';
 
 // Module scope: `<Dithered>` re-records every frame when `shape` or
 // `brightness` changes identity, so keep those references stable.
@@ -57,7 +58,7 @@ function LoadingIndicator() {
 
 The props are the web component's, minus the DOM-only ones: `className` and `style: CSSProperties` become `style: StyleProp<ViewStyle>`, `label` maps to `accessibilityLabel` rather than `role="status"`, `cache` is gone (see [Performance notes](#performance-notes)), and `cells` is new. Everything else — `shape`, `brightness`, `size`, `cols`, `rows`, `frames`, `period`, `fg`, `bg`, `gap`, `radius`, `paused`, `progress`, `initialFrame`, `respectReducedMotion` — behaves identically, so a shared component can spread the same props object at both.
 
-To draw into a Skia canvas you already own, `dithered/native` also exports the pieces: `useDitheredPictures(options)` returns one `SkPicture` per frame plus the canvas size, and `skiaPaintContext(canvas)` adapts an `SkCanvas` to the `PaintContext` that `paintFrame` draws through.
+To draw into a Skia canvas you already own, `dithered/react-native` also exports the pieces: `useDitheredPictures(options)` returns one `SkPicture` per frame plus the canvas size, and `skiaPaintContext(canvas)` adapts an `SkCanvas` to the `PaintContext` that `paintFrame` draws through.
 
 ### Vanilla
 
@@ -119,10 +120,10 @@ const shape = shapeFromSvg(`
 `);
 ```
 
-`shapeFromSvg` uses `DOMParser`, so it is web-only. `shapeFromSvgLite` is the same contract implemented by scanning the source text, and is exported from both `dithered` and `dithered/native`:
+`shapeFromSvg` uses `DOMParser`, so it is web-only. `shapeFromSvgLite` is the same contract implemented by scanning the source text, and is exported from both `dithered` and `dithered/react-native`:
 
 ```ts
-import { shapeFromSvgLite } from 'dithered/native';
+import { shapeFromSvgLite } from 'dithered/react-native';
 ```
 
 It handles well-formed SVG as design tools emit it — comments and CDATA are skipped, attributes may be single- or double-quoted — but it is not an XML parser: entity references are not expanded, and a `>` inside an attribute value will confuse it. On the web, prefer `shapeFromSvg`.
@@ -213,11 +214,11 @@ For a progress indicator rather than a loop, pass `progress` (`0`–`1`) to `Dit
 | `renderFrame(frame: number)`                | Draw a specific frame directly, bypassing the animation loop.                           |
 | `destroy()`                                 | Stop the loop and release all listeners/observers.                                      |
 
-`dithered/react`'s `Dithered` component accepts the same options as props (`shape`/`brightness` still required), plus `label` (accessible label, default `'Loading'`, `''` hides it from assistive tech), `className`, `style`, and `progress` — see [Determinate progress](#determinate-progress) and [React](#quick-start) above. `dithered/native`'s takes the same props with `style: StyleProp<ViewStyle>` in place of `className`/`style`, no `cache`, and an extra `cells` — see [React Native](#react-native) above.
+`dithered/react`'s `Dithered` component accepts the same options as props (`shape`/`brightness` still required), plus `label` (accessible label, default `'Loading'`, `''` hides it from assistive tech), `className`, `style`, and `progress` — see [Determinate progress](#determinate-progress) and [React](#quick-start) above. `dithered/react-native`'s takes the same props with `style: StyleProp<ViewStyle>` in place of `className`/`style`, no `cache`, and an extra `cells` — see [React Native](#react-native) above.
 
 ### Sampling
 
-`sampleCells(shape, cols, hitTest, rows?)` returns the cells inside a shape. The point-in-path test is injected because no platform provides one portably: use `domHitTester(shape, ctx?)` from `dithered` (backed by `Path2D`) or `skiaHitTester(shape)` from `dithered/native` (backed by `SkPath.contains`).
+`sampleCells(shape, cols, hitTest, rows?)` returns the cells inside a shape. The point-in-path test is injected because no platform provides one portably: use `domHitTester(shape, ctx?)` from `dithered` (backed by `Path2D`) or `skiaHitTester(shape)` from `dithered/react-native` (backed by `SkPath.contains`).
 
 ```ts
 import { sampleCells, domHitTester, shapes } from 'dithered';
@@ -233,7 +234,7 @@ This repo is a pnpm workspace:
 | -------------------------- | ----------------------------------------------------------------------- |
 | `packages/dithered`        | the published library                                                   |
 | `packages/playground-web`  | the Vite demo behind the [live demo](https://v3ron.github.io/dithered/) |
-| `packages/playground-expo` | an Expo app exercising `dithered/native` on device                      |
+| `packages/playground-expo` | an Expo app exercising `dithered/react-native` on device                |
 
 ```sh
 pnpm install

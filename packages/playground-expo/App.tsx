@@ -16,7 +16,7 @@ import {
   wave,
   type Brightness,
   type Shape,
-} from 'dithered/native';
+} from 'dithered/react-native';
 
 // Built once at module scope: `<Dithered>` re-records every frame when
 // `brightness` or `shape` changes identity, so these must be stable.
@@ -68,7 +68,7 @@ export default function App() {
       <SafeAreaView style={styles.screen}>
         <StatusBar style="dark" />
         <ScrollView contentContainerStyle={styles.content}>
-          <Text style={styles.title}>dithered/native</Text>
+          <Text style={styles.title}>dithered/react-native</Text>
           <Text style={styles.subtitle}>
             The same core as the web renderer, drawn through react-native-skia.
           </Text>

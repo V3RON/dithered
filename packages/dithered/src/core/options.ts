@@ -29,7 +29,7 @@ export interface DitheredOptions {
   /**
    * Pre-render the loop into a sprite strip. 'auto' = on for size <= 120.
    * Default 'auto'. Web only — the native renderer always pre-records, see
-   * `dithered/native`.
+   * `dithered/react-native`.
    */
   cache?: boolean | 'auto';
   /** Freeze the animation. Default false. */

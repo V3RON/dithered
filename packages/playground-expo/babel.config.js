@@ -3,7 +3,7 @@ module.exports = function (api) {
   return {
     presets: ['babel-preset-expo'],
     // Worklets' plugin turns the `'worklet'` callbacks in
-    // `dithered/native` into UI-thread functions. It must stay last.
+    // `dithered/react-native` into UI-thread functions. It must stay last.
     plugins: ['react-native-worklets/plugin'],
   };
 };

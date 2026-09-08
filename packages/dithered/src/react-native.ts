@@ -15,9 +15,9 @@ export { presets, gem, sweep, pulse, rain, wave, fill, gameOfLife } from './pres
 export { shapes, rozenite, circle, square, diamond, heart } from './shapes';
 export { shapeFromSvgLite } from './svg-lite';
 
-export { Dithered } from './native/Dithered';
-export type { DitheredProps } from './native/Dithered';
-export { useDitheredPictures } from './native/pictures';
-export type { DitheredPictures, DitheredPicturesOptions } from './native/pictures';
-export { skiaPaintContext } from './native/paint-context';
-export { skiaHitTester } from './native/hit-test';
+export { Dithered } from './react-native/Dithered';
+export type { DitheredProps } from './react-native/Dithered';
+export { useDitheredPictures } from './react-native/pictures';
+export type { DitheredPictures, DitheredPicturesOptions } from './react-native/pictures';
+export { skiaPaintContext } from './react-native/paint-context';
+export { skiaHitTester } from './react-native/hit-test';

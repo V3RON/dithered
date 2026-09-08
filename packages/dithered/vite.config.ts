@@ -6,7 +6,7 @@ export default defineConfig({
       entry: {
         index: 'src/index.ts',
         react: 'src/react.tsx',
-        native: 'src/native.ts',
+        'react-native': 'src/react-native.ts',
       },
       formats: ['es'],
       fileName: (_format, entryName) => `${entryName}.js`,
@@ -27,7 +27,7 @@ export default defineConfig({
       output: {
         // A shared chunk (core/shape/noise/presets/shapes) is emitted once
         // and imported by the entries that need it, so dithered/react and
-        // dithered/native do not inline second copies of the core.
+        // dithered/react-native do not inline second copies of the core.
         chunkFileNames: 'shared-[hash].js',
       },
     },

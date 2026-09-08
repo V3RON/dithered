@@ -1,9 +1,8 @@
 import { forwardRef, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { Brightness, Shape } from 'dithered';
-import { presets, shapeFromSvg, shapes } from 'dithered';
-import { Dithered } from 'dithered/react';
+import { Dithered, presets, shapeFromSvg, shapes } from 'dithered/react';
+import type { Brightness, Shape } from 'dithered/react';
 
 const REPO_URL = 'https://github.com/V3RON/dithered';
 const ACCENT = '#8232ff';
@@ -511,7 +510,7 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
         <p style={{ ...sectionHint, margin: '12px 0 0' }}>
           On React Native / Expo? Swap the import for{' '}
           <code style={{ ...codeBlockStyle, display: 'inline', padding: '2px 6px' }}>
-            dithered/native
+            dithered/react-native
           </code>{' '}
           — same API, rendered through react-native-skia.
         </p>
@@ -551,18 +550,13 @@ function buildSnippet(opts: {
 
   if (isCustomShape) {
     return (
-      `import { Dithered } from 'dithered/react';\n` +
-      `import { presets, shapeFromSvg } from 'dithered';\n\n` +
+      `import { Dithered, presets, shapeFromSvg } from 'dithered/react';\n\n` +
       `const shape = shapeFromSvg(\`${svgText}\`);\n\n` +
       jsx
     );
   }
 
-  return (
-    `import { Dithered } from 'dithered/react';\n` +
-    `import { shapes, presets } from 'dithered';\n\n` +
-    jsx
-  );
+  return `import { Dithered, shapes, presets } from 'dithered/react';\n\n` + jsx;
 }
 
 // ---------------------------------------------------------------------------

@@ -29,7 +29,7 @@ export interface Cell {
  * React Native has Skia's `SkPath.contains` — so it is injected rather
  * than assumed.
  *
- * @see `domHitTester` in `dithered` and `skiaHitTester` in `dithered/native`.
+ * @see `domHitTester` in `dithered` and `skiaHitTester` in `dithered/react-native`.
  */
 export type HitTester = (x: number, y: number) => boolean;
 
