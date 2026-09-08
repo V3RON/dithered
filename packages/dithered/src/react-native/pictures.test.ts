@@ -21,8 +21,7 @@ interface FakePaint {
   setColor(color: string): void;
 }
 type Draw =
-  | { op: 'rect'; rect: FakeRect; color: string }
-  | { op: 'rrect'; rrect: FakeRRect; color: string };
+  { op: 'rect'; rect: FakeRect; color: string } | { op: 'rrect'; rrect: FakeRRect; color: string };
 
 interface FakePicture {
   draw: (canvas: unknown) => void;

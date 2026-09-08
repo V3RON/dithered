@@ -160,8 +160,6 @@ export function createDithered(
   }
 
   function configure(): void {
-    applyResolvedFg();
-
     const dpr = Math.min((typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1, 3);
     const css = surfaceSize(opts);
     const device = surfaceSize(opts, dpr);
@@ -171,6 +169,12 @@ export function createDithered(
     // Sample first, before touching the canvas or any module state: an
     // invalid `matrix` (or any other bad option) throws here, and
     // `update()` relies on nothing having changed yet when that happens.
+    // `applyResolvedFg()` is deliberately below this line, not above it —
+    // it writes `paintOpts` from `opts`, and `opts` may still be a
+    // rejected `update()` candidate at this point (see `update()` below);
+    // running it before the throw would poison `paintOpts` with that
+    // candidate and leave it poisoned even after `update()` rolls `opts`
+    // back, since only `opts` is restored on catch.
     const newCells = sampleCells(
       opts.shape,
       opts.cols,
@@ -178,6 +182,7 @@ export function createDithered(
       resolveRows(opts),
       opts.matrix,
     );
+    applyResolvedFg();
 
     canvas.style.width = css.width + 'px';
     canvas.style.height = css.height + 'px';

@@ -290,7 +290,7 @@ For a progress indicator rather than a loop, pass `progress` (`0`–`1`) to `Dit
 ### `DitheredOptions`
 
 | Option                 | Type                          | Default                   | Description                                                                              |
-| ---------------------- | ----------------------------- | ------------------------- | ----------------------------------------------------------------------------------------- |
+| ---------------------- | ----------------------------- | ------------------------- | ---------------------------------------------------------------------------------------- |
 | `shape`                | `Shape`                       | —                         | Required. Silhouette to sample cells inside.                                             |
 | `brightness`           | `Brightness`                  | —                         | Required. Per-cell, per-frame brightness function.                                       |
 | `size`                 | `number`                      | `48`                      | Height in CSS px (web) or dp (native); width follows the shape's aspect ratio.           |
