@@ -16,6 +16,7 @@ import {
   sweep,
   wave,
   type Brightness,
+  type DitherMatrix,
   type Shape,
 } from 'dithered/react-native';
 
@@ -66,6 +67,9 @@ const TONE_PALETTES: Readonly<Record<1 | 2 | 3, readonly string[]>> = {
   3: ['#2a1a4a', ACCENT, '#d9c2ff'],
 };
 
+// The named matrices, in the order the "Matrix" chips offer them.
+const MATRIX_NAMES: Extract<DitherMatrix, string>[] = ['bayer2', 'bayer4', 'bayer8', 'blueNoise'];
+
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <View style={styles.section}>
@@ -98,6 +102,7 @@ export default function App() {
   const [blendName, setBlendName] = useState('none');
   const [mix, setMix] = useState(0.5);
   const [toneCount, setToneCount] = useState<1 | 2 | 3>(1);
+  const [matrix, setMatrix] = useState<Extract<DitherMatrix, string>>('bayer4');
 
   const blendTarget = BLEND_TARGETS.find((t) => t.name === blendName);
   const blended = blendTarget
@@ -221,6 +226,32 @@ export default function App() {
                     label={`${count}`}
                     active={count === toneCount}
                     onPress={() => setToneCount(count)}
+                  />
+                ))}
+              </View>
+            </View>
+          </Section>
+
+          <Section title="Dither matrix">
+            <View style={{ gap: 12 }}>
+              <Tile label={matrix}>
+                <Dithered
+                  shape={rozenite}
+                  brightness={FILL_UP}
+                  size={72}
+                  fg={INK}
+                  matrix={matrix}
+                  paused={paused}
+                  label={`rozenite, ${matrix}`}
+                />
+              </Tile>
+              <View style={styles.chipRow}>
+                {MATRIX_NAMES.map((name) => (
+                  <Chip
+                    key={name}
+                    label={name}
+                    active={name === matrix}
+                    onPress={() => setMatrix(name)}
                   />
                 ))}
               </View>
