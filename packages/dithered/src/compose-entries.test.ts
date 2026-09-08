@@ -31,24 +31,25 @@ describe('compose is re-exported from the root entry (./index)', () => {
   });
 });
 
-// `./native` re-exports `compose.ts`'s runtime names verbatim (it has no
-// runtime imports of its own from `compose.ts`), but it also imports
+// `./react-native` re-exports `compose.ts`'s runtime names verbatim (it has
+// no runtime imports of its own from `compose.ts`), but it also imports
 // `react-native` and friends for its renderer pieces, and those don't
-// resolve under vitest's jsdom environment: `import('./native')` here throws
-// `Failed to resolve import "./Libraries/Image/Image" from ".../react-native/index.js"`
-// (confirmed by actually attempting the dynamic import while writing this
-// test) — a genuine tooling limit, not something to route around by mocking
-// `react-native` and hoping the mock stays representative. So this asserts
-// on `native.ts`'s source text instead of importing it, per the source's own
-// note that it re-exports the "seven helpers plus the compose namespace" —
-// still a real check: it fails if any of the eight names is dropped or
-// misspelled in the re-export line, which is the regression this exists to
-// catch, and it fails loudly (not silently skips) if that line's shape ever
-// changes enough that this string match stops being meaningful.
-describe('compose is re-exported from the native entry (./native)', () => {
+// resolve under vitest's jsdom environment: `import('./react-native')` here
+// throws `Failed to resolve import "./Libraries/Image/Image" from
+// ".../react-native/index.js"` (confirmed by actually attempting the dynamic
+// import while writing this test) — a genuine tooling limit, not something
+// to route around by mocking `react-native` and hoping the mock stays
+// representative. So this asserts on `react-native.ts`'s source text instead
+// of importing it, per the source's own note that it re-exports the "seven
+// helpers plus the compose namespace" — still a real check: it fails if any
+// of the eight names is dropped or misspelled in the re-export line, which
+// is the regression this exists to catch, and it fails loudly (not silently
+// skips) if that line's shape ever changes enough that this string match
+// stops being meaningful.
+describe('compose is re-exported from the react-native entry (./react-native)', () => {
   // vitest runs with cwd at the package root (packages/dithered), so this
   // is stable regardless of how the test file itself was resolved.
-  const nativeSource = readFileSync(join(process.cwd(), 'src', 'native.ts'), 'utf8');
+  const nativeSource = readFileSync(join(process.cwd(), 'src', 'react-native.ts'), 'utf8');
 
   // Matched against the whole file, not line-by-line: prettier wraps an
   // `export { ... } from '...'` across multiple lines once it exceeds

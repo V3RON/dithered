@@ -70,15 +70,7 @@ function Tile({ label, children }: { label: string; children: React.ReactNode })
   );
 }
 
-function Chip({
-  label,
-  active,
-  onPress,
-}: {
-  label: string;
-  active: boolean;
-  onPress: () => void;
-}) {
+function Chip({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
   return (
     <Pressable style={[styles.chip, active && styles.chipActive]} onPress={onPress}>
       <Text style={[styles.chipText, active && styles.chipTextActive]}>{label}</Text>
@@ -93,7 +85,9 @@ export default function App() {
   const [mix, setMix] = useState(0.5);
 
   const blendTarget = BLEND_TARGETS.find((t) => t.name === blendName);
-  const blended = blendTarget ? compose.blend(BLEND_PRIMARY, blendTarget.brightness, mix) : BLEND_PRIMARY;
+  const blended = blendTarget
+    ? compose.blend(BLEND_PRIMARY, blendTarget.brightness, mix)
+    : BLEND_PRIMARY;
 
   return (
     <SafeAreaProvider>
