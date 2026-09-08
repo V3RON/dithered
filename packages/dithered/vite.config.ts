@@ -33,5 +33,19 @@ export default defineConfig({
     },
     sourcemap: true,
     emptyOutDir: false,
+    // The default esbuild minifier restructures statements (e.g. joining
+    // adjacent expressions with the comma operator) inside `'worklet'`
+    // functions in `react-native/{Dithered,playback}.ts`. The Worklets
+    // Babel plugin runs later, in a *consuming* app's own Metro/babel
+    // pipeline, and its static analysis of a worklet's body (to find and
+    // capture closed-over variables — here, one worklet calling another,
+    // e.g. the frame callback invoking `applyPhase`) does not tolerate
+    // that reshaping: a captured worklet reference is silently left
+    // unprocessed and reaches the UI thread as a plain "remote" JS
+    // function, throwing "Tried to synchronously call a Remote Function"
+    // the first time it's invoked. Minification must stay off so the
+    // shipped code keeps one statement per line, matching what the
+    // plugin expects to see.
+    minify: false,
   },
 });
