@@ -9,6 +9,7 @@ import type { Shape } from './shape';
 // Re-exported so `dithered/react` consumers never need a second import
 // from plain `dithered` for shapes, presets, or the core renderer.
 export type { Shape, Cell, HitTester } from './shape';
+export type { DitherMatrix, ResolvedMatrix } from './matrix';
 export { BAYER_4, aspectOf, defaultRowsFor, sampleCells } from './shape';
 export { domHitTester } from './hit-test';
 export { hash, valueNoise, fbm } from './noise';
@@ -115,6 +116,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     size,
     cols,
     rows,
+    matrix,
     frames,
     period,
     fg: fgProp,
@@ -153,6 +155,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
       size,
       cols,
       rows,
+      matrix,
       frames,
       period,
       fg,
@@ -193,6 +196,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
       size,
       cols,
       rows,
+      matrix,
       frames,
       period,
       fg,
@@ -210,6 +214,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     size,
     cols,
     rows,
+    matrix,
     frames,
     period,
     fg,

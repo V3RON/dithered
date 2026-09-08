@@ -60,7 +60,8 @@
     "build": "tsc --project tsconfig.build.json --emitDeclarationOnly && vite build",
     "prepublishOnly": "pnpm build",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "generate:blue-noise": "node scripts/blue-noise.mjs"
   },
   "peerDependencies": {
     "@shopify/react-native-skia": ">=1.5",

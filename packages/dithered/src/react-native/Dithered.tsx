@@ -23,7 +23,10 @@ export interface DitheredProps extends Omit<
   progress?: number;
   /**
    * Pre-sampled cells, skipping the shape hit-test on mount. Must match
-   * `cols` and `rows` — see `sampleCells`.
+   * `cols`, `rows` and `matrix` — see `sampleCells`. When set, `matrix`
+   * is ignored: the thresholds are already baked into those cells. A
+   * `matrix` change still re-records every frame in this case (for
+   * byte-identical output) — see `useDitheredPictures`'s `cells` doc.
    */
   cells?: readonly Cell[];
   /** Accessible label. Set to '' to hide from assistive tech entirely. Default 'Loading'. */
@@ -71,6 +74,7 @@ export function Dithered({
   size,
   cols,
   rows,
+  matrix,
   frames,
   period = 2000,
   fg,
@@ -91,6 +95,7 @@ export function Dithered({
     size,
     cols,
     rows,
+    matrix,
     frames,
     fg,
     bg,

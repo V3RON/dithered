@@ -17,3 +17,13 @@ export type { PaintContext, PaintGeometry } from './paint';
 export { computeGeometry, frameAt, paintFrame } from './paint';
 export type { Palette } from './palette';
 export { CURRENT_COLOR, hasCurrentColor, resolvePalette, toPalette, toneLevel } from './palette';
+export type { DitherMatrix, ResolvedMatrix } from '../matrix';
+export {
+  BAYER_2,
+  BAYER_4,
+  BAYER_8,
+  BLUE_NOISE_16,
+  bayerMatrix,
+  resolveMatrix,
+  thresholdFor,
+} from '../matrix';

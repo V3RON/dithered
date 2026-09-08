@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Dithered, compose, presets, shapeFromSvg, shapes } from 'dithered/react';
-import type { Brightness, Shape } from 'dithered/react';
+import type { Brightness, DitherMatrix, Shape } from 'dithered/react';
 
 const REPO_URL = 'https://github.com/V3RON/dithered';
 const ACCENT = '#8232ff';
@@ -249,6 +249,9 @@ function Gallery({ onSelect }: GalleryProps) {
 // a code snippet that always matches whatever's currently configured
 // ---------------------------------------------------------------------------
 
+// The named matrices, in the order the "Matrix" select offers them.
+const MATRIX_NAMES: Extract<DitherMatrix, string>[] = ['bayer2', 'bayer4', 'bayer8', 'blueNoise'];
+
 // A five-pointed star — deliberately not one of the built-in shapes, so
 // switching to "Custom SVG" always starts from something new to look at.
 const DEFAULT_CUSTOM_SVG = `<svg viewBox="0 0 100 100">
@@ -325,6 +328,8 @@ export interface PlaygroundState {
   setPalette: (palette: string[]) => void;
   cols: number;
   setCols: (cols: number) => void;
+  matrix: Extract<DitherMatrix, string>;
+  setMatrix: (matrix: Extract<DitherMatrix, string>) => void;
   period: number;
   setPeriod: (period: number) => void;
   noiseAmt: number;
@@ -350,6 +355,8 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
     setPalette,
     cols,
     setCols,
+    matrix,
+    setMatrix,
     period,
     setPeriod,
     noiseAmt,
@@ -440,6 +447,7 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
         mix,
         palette,
         cols,
+        matrix,
         period,
       }),
     [
@@ -453,6 +461,7 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
       mix,
       palette,
       cols,
+      matrix,
       period,
     ],
   );
@@ -479,6 +488,7 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
             size={140}
             fg={fg}
             cols={cols}
+            matrix={matrix}
             period={period}
             label="Preview"
           />
@@ -613,6 +623,20 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
                 />
               </label>
               <label style={row}>
+                <span style={label}>Matrix</span>
+                <select
+                  style={fieldStyle}
+                  value={matrix}
+                  onChange={(e) => setMatrix(e.target.value as Extract<DitherMatrix, string>)}
+                >
+                  {MATRIX_NAMES.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label style={row}>
                 <span style={label}>Speed: {period}ms per loop</span>
                 <input
                   type="range"
@@ -687,6 +711,7 @@ function buildSnippet(opts: {
   mix: number;
   palette: string[];
   cols: number;
+  matrix: Extract<DitherMatrix, string>;
   period: number;
 }): string {
   const {
@@ -700,6 +725,7 @@ function buildSnippet(opts: {
     mix,
     palette,
     cols,
+    matrix,
     period,
   } = opts;
 
@@ -725,6 +751,7 @@ function buildSnippet(opts: {
     fgProp,
   ];
   if (cols !== 16) propParts.push(`cols={${cols}}`);
+  if (matrix !== 'bayer4') propParts.push(`matrix="${matrix}"`);
   if (period !== 2000) propParts.push(`period={${period}}`);
 
   const jsx = `<Dithered\n  ${propParts.join('\n  ')}\n/>`;
@@ -776,6 +803,7 @@ const DEFAULTS = {
   mix: 0.5,
   palette: [...DEFAULT_PALETTES[1]],
   cols: 16,
+  matrix: 'bayer4' as Extract<DitherMatrix, string>,
   period: 2000,
   noiseAmt: 0.8,
   golSeed: 1,
@@ -788,6 +816,7 @@ function App() {
   const [mix, setMix] = useState(DEFAULTS.mix);
   const [palette, setPalette] = useState<string[]>(DEFAULTS.palette);
   const [cols, setCols] = useState(DEFAULTS.cols);
+  const [matrix, setMatrix] = useState(DEFAULTS.matrix);
   const [period, setPeriod] = useState(DEFAULTS.period);
   const [noiseAmt, setNoiseAmt] = useState(DEFAULTS.noiseAmt);
   const [golSeed, setGolSeed] = useState(DEFAULTS.golSeed);
@@ -804,6 +833,7 @@ function App() {
     setMix(DEFAULTS.mix);
     setPalette(DEFAULTS.palette);
     setCols(DEFAULTS.cols);
+    setMatrix(DEFAULTS.matrix);
     setPeriod(DEFAULTS.period);
     setNoiseAmt(DEFAULTS.noiseAmt);
     setGolSeed(DEFAULTS.golSeed);
@@ -842,6 +872,8 @@ function App() {
         setPalette={setPalette}
         cols={cols}
         setCols={setCols}
+        matrix={matrix}
+        setMatrix={setMatrix}
         period={period}
         setPeriod={setPeriod}
         noiseAmt={noiseAmt}

@@ -617,6 +617,246 @@ describe('createDithered', () => {
 
     stub.restore();
   });
+
+  // Regression for the missing-dependency failure mode: `update({ matrix })`
+  // must actually resample, not just carry the new option through untouched.
+  it('update({ matrix: "bayer8" }) resamples: the same fixed brightness draws a different cell count', () => {
+    // cols=8 on a square shape makes rows=8 too, so the grid is 8x8 in
+    // both cases: bayer4 tiles 2x2, bayer8 matches it exactly. 0.53 sits
+    // between two bayer4 quantization levels and two different bayer8
+    // ones, so the two matrices draw a different number of cells.
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ cols: 8, brightness: () => 0.53 }));
+
+    ctx.fill.mockClear();
+    instance.renderFrame(0);
+    const bayer4Draws = ctx.fill.mock.calls.length;
+
+    instance.update({ matrix: 'bayer8' });
+    ctx.fill.mockClear();
+    instance.renderFrame(0);
+    const bayer8Draws = ctx.fill.mock.calls.length;
+
+    expect(bayer4Draws).toBeGreaterThan(0);
+    expect(bayer8Draws).not.toBe(bayer4Draws);
+  });
+
+  it('createDithered with an invalid matrix throws at create time, not at first frame', () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    expect(() =>
+      createDithered(
+        canvas,
+        baseOptions({
+          matrix: [
+            [0, 1, 2],
+            [1, 2],
+          ],
+        }),
+      ),
+    ).toThrow(/ragged/);
+    // Nothing should have been drawn — the throw happens before the first blit.
+    expect(ctx.fill).not.toHaveBeenCalled();
+  });
+
+  // Regression: a throwing `configure()` used to run after the
+  // visibilitychange listener and IntersectionObserver were already
+  // registered, so a failed create left both pinned to the canvas with no
+  // `destroy()` to release them (a real leak under React 18 StrictMode,
+  // which mounts twice).
+  it('leaves no visibilitychange listener or observed IntersectionObserver behind when create fails', () => {
+    const addSpy = vi.spyOn(document, 'addEventListener');
+    const { canvas } = makeFakeCanvas();
+
+    expect(() =>
+      createDithered(
+        canvas,
+        baseOptions({
+          matrix: [
+            [0, 1, 2],
+            [1, 2],
+          ],
+        }),
+      ),
+    ).toThrow(/ragged/);
+
+    expect(addSpy).not.toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+    expect(env.ioInstances).toHaveLength(0);
+    addSpy.mockRestore();
+  });
+
+  // Regression: a rejected `update()` used to merge the invalid patch into
+  // `opts` before validating it, so the throw left the instance poisoned —
+  // `cols`/`matrix` committed despite the error, the animation halted with
+  // no `schedule()` to restart it, and even a subsequent *valid* `update()`
+  // would re-throw against the same bad `opts.matrix` forever.
+  describe('a rejected update()', () => {
+    function raggedMatrix() {
+      return [
+        [0, 1, 2],
+        [1, 2],
+      ];
+    }
+
+    it('propagates the error', () => {
+      const { canvas } = makeFakeCanvas();
+      const instance = createDithered(canvas, baseOptions());
+      expect(() => instance.update({ matrix: raggedMatrix() })).toThrow(/ragged/);
+    });
+
+    it('leaves opts unchanged: a rejected cols change alongside it never took effect', () => {
+      const { canvas, ctx } = makeFakeCanvas();
+      const instance = createDithered(canvas, baseOptions({ cols: 4 }));
+
+      // Cell width is derived from `opts.cols` fresh on every paint (see
+      // `computeGeometry`), so it exposes a poisoned `opts.cols` even
+      // though the sampled `cells` array itself was never reassigned
+      // (the assignment that would do so never runs, since it sits after
+      // the throwing `sampleCells` call either way).
+      ctx.rect.mockClear();
+      instance.renderFrame(0);
+      const [, , widthBefore] = ctx.rect.mock.calls[0] as number[];
+
+      expect(() => instance.update({ cols: 8, matrix: raggedMatrix() })).toThrow(/ragged/);
+
+      ctx.rect.mockClear();
+      instance.renderFrame(0);
+      const [, , widthAfter] = ctx.rect.mock.calls[0] as number[];
+
+      expect(widthAfter).toBe(widthBefore);
+    });
+
+    it('leaves the canvas surface untouched', () => {
+      const { canvas } = makeFakeCanvas();
+      const instance = createDithered(canvas, baseOptions({ size: 40 }));
+      const widthBefore = canvas.width;
+      const heightBefore = canvas.height;
+
+      expect(() => instance.update({ size: 80, matrix: raggedMatrix() })).toThrow(/ragged/);
+
+      expect(canvas.width).toBe(widthBefore);
+      expect(canvas.height).toBe(heightBefore);
+    });
+
+    it('leaves the animation scheduled, since it was already running', () => {
+      const { canvas } = makeFakeCanvas();
+      const instance = createDithered(canvas, baseOptions());
+      expect(env.rafCallbacks.length).toBe(1);
+
+      expect(() => instance.update({ matrix: raggedMatrix() })).toThrow(/ragged/);
+
+      // halt()/schedule() were never reached: no new cancel, no new frame.
+      expect(cancelAnimationFrame).not.toHaveBeenCalled();
+      expect(env.rafCallbacks.length).toBe(1);
+    });
+
+    it('does not poison a later, valid update()', () => {
+      const { canvas, ctx } = makeFakeCanvas();
+      const instance = createDithered(canvas, baseOptions());
+
+      expect(() => instance.update({ matrix: raggedMatrix() })).toThrow(/ragged/);
+
+      ctx.fill.mockClear();
+      expect(() => instance.update({ period: 3000 })).not.toThrow();
+      expect(ctx.fill).toHaveBeenCalled();
+    });
+  });
+
+  // Regression: unlike the ragged-matrix cases above (which throw inside
+  // `sampleCells`, before `configure()` touches anything), these throw
+  // from the caller's `brightness` — once the sprite-strip rebuild calls
+  // it (cache on), or once `blit()` calls it directly (cache off). Both
+  // sit after `configure()` has already written the canvas surface, `W`,
+  // `H` and `cells` to the rejected configuration, so restoring `opts`
+  // alone is not enough: the surface and the sprite cache must roll back
+  // together, and the loop must come back if it was running.
+  describe('a rejected update() that fails outside matrix validation', () => {
+    function throwingBrightness(): never {
+      throw new Error('boom');
+    }
+
+    it('cache: true — a throwing brightness during the sprite-strip rebuild leaves the surface and cache in sync', () => {
+      // The sprite strip is a real `document.createElement('canvas')`
+      // (see `configure()`), and jsdom has no built-in 2D context — stub
+      // it so the strip build actually runs `paintFrame` (and therefore
+      // calls `brightness`) instead of silently no-op'ing into `cache:
+      // false` behavior via a null context.
+      const { restore } = stubGetContext(make2dCtx());
+      try {
+        const { canvas, ctx } = makeFakeCanvas();
+        const instance = createDithered(
+          canvas,
+          baseOptions({ size: 40, cols: 4, frames: 4, cache: true, brightness: () => true }),
+        );
+        expect(env.rafCallbacks.length).toBe(1);
+        const widthBefore = canvas.width;
+        const heightBefore = canvas.height;
+
+        ctx.drawImage.mockClear();
+        instance.renderFrame(0);
+        const callBefore = ctx.drawImage.mock.calls[0];
+
+        expect(() => instance.update({ size: 120, brightness: throwingBrightness })).toThrow(
+          /boom/,
+        );
+
+        // The rejected size change must not have taken effect on the
+        // canvas surface...
+        expect(canvas.width).toBe(widthBefore);
+        expect(canvas.height).toBe(heightBefore);
+
+        // ...nor left the loop halted for good (configure() throwing
+        // never reaches `halt()`, so nothing needs re-scheduling here).
+        expect(cancelAnimationFrame).not.toHaveBeenCalled();
+        expect(env.rafCallbacks.length).toBe(1);
+
+        // A later blit still agrees with the surface: same sprite strip,
+        // same draw rectangle as before the failed update — not the old
+        // strip read with the new (larger) geometry, which is what
+        // drawing past the strip's edge looked like before the fix.
+        ctx.drawImage.mockClear();
+        instance.renderFrame(0);
+        const callAfter = ctx.drawImage.mock.calls[0];
+        expect(callAfter).toEqual(callBefore);
+
+        // A subsequent valid update() still succeeds.
+        ctx.fill.mockClear();
+        expect(() => instance.update({ cache: false, period: 3000 })).not.toThrow();
+      } finally {
+        restore();
+      }
+    });
+
+    it('cache: false — a throwing brightness during blit() leaves the surface untouched and the loop scheduled', () => {
+      const { canvas, ctx } = makeFakeCanvas();
+      const instance = createDithered(
+        canvas,
+        baseOptions({ size: 40, cache: false, brightness: () => true }),
+      );
+      expect(env.rafCallbacks.length).toBe(1);
+      const widthBefore = canvas.width;
+      const heightBefore = canvas.height;
+
+      expect(() => instance.update({ size: 80, brightness: throwingBrightness })).toThrow(/boom/);
+
+      // The rejected size change must not have taken effect...
+      expect(canvas.width).toBe(widthBefore);
+      expect(canvas.height).toBe(heightBefore);
+
+      // ...and the loop, halted by `configure()` succeeding before the
+      // repaint failed, must have been re-armed rather than left frozen.
+      expect(cancelAnimationFrame).toHaveBeenCalled();
+      expect(env.rafCallbacks.length).toBe(2);
+
+      // A later blit paints real cells again (the restored, non-throwing
+      // `brightness`), not a degenerate/blank frame.
+      ctx.fill.mockClear();
+      instance.renderFrame(0);
+      expect(ctx.fill).toHaveBeenCalled();
+
+      // A subsequent valid update() still succeeds.
+      expect(() => instance.update({ period: 3000 })).not.toThrow();
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
