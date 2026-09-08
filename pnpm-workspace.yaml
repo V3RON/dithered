@@ -2,4 +2,16 @@ packages:
   - 'packages/*'
 
 onlyBuiltDependencies:
+  - '@shopify/react-native-skia'
   - esbuild
+
+# @shopify/react-native-skia doesn't declare @types/react itself, so
+# TypeScript falls back to pnpm's shared virtual-store hoist for it. With
+# both a React 18 skia@1.x (dithered, playground-web) and a React 19
+# skia@2.x (playground-expo) in the workspace, that hoist is ambiguous and
+# can resolve to the wrong major version. Pin it explicitly for the 1.x line
+# so it always matches its own React 18 peer.
+packageExtensions:
+  '@shopify/react-native-skia@1.12.4':
+    dependencies:
+      '@types/react': '18.3.31'

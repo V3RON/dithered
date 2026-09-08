@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import {
   Dithered,
@@ -63,66 +64,68 @@ export default function App() {
   const [progress, setProgress] = useState(0.35);
 
   return (
-    <SafeAreaView style={styles.screen}>
-      <StatusBar style="dark" />
-      <ScrollView contentContainerStyle={styles.content}>
-        <Text style={styles.title}>dithered/native</Text>
-        <Text style={styles.subtitle}>
-          The same core as the web renderer, drawn through react-native-skia.
-        </Text>
+    <SafeAreaProvider>
+      <SafeAreaView style={styles.screen}>
+        <StatusBar style="dark" />
+        <ScrollView contentContainerStyle={styles.content}>
+          <Text style={styles.title}>dithered/native</Text>
+          <Text style={styles.subtitle}>
+            The same core as the web renderer, drawn through react-native-skia.
+          </Text>
 
-        <Section title="Presets">
-          {PRESETS.map(({ name, brightness }) => (
-            <Tile key={name} label={name}>
+          <Section title="Presets">
+            {PRESETS.map(({ name, brightness }) => (
+              <Tile key={name} label={name}>
+                <Dithered
+                  shape={rozenite}
+                  brightness={brightness}
+                  size={56}
+                  fg={INK}
+                  paused={paused}
+                  label={`${name} loader`}
+                />
+              </Tile>
+            ))}
+          </Section>
+
+          <Section title="Shapes">
+            {SHAPES.map(({ name, shape }) => (
+              <Tile key={name} label={name}>
+                <Dithered shape={shape} size={56} fg={INK} paused={paused} label={`${name} loader`} />
+              </Tile>
+            ))}
+          </Section>
+
+          <Section title="Determinate">
+            <Tile label={`progress ${progress.toFixed(2)}`}>
               <Dithered
                 shape={rozenite}
-                brightness={brightness}
-                size={56}
+                brightness={FILL_UP}
+                size={72}
                 fg={INK}
-                paused={paused}
-                label={`${name} loader`}
+                progress={progress}
+                label="Uploading"
               />
             </Tile>
-          ))}
-        </Section>
-
-        <Section title="Shapes">
-          {SHAPES.map(({ name, shape }) => (
-            <Tile key={name} label={name}>
-              <Dithered shape={shape} size={56} fg={INK} paused={paused} label={`${name} loader`} />
+            <Tile label="grid 28 cols">
+              <Dithered shape={circle} size={72} cols={28} fg={INK} paused={paused} label="" />
             </Tile>
-          ))}
-        </Section>
+          </Section>
 
-        <Section title="Determinate">
-          <Tile label={`progress ${progress.toFixed(2)}`}>
-            <Dithered
-              shape={rozenite}
-              brightness={FILL_UP}
-              size={72}
-              fg={INK}
-              progress={progress}
-              label="Uploading"
-            />
-          </Tile>
-          <Tile label="grid 28 cols">
-            <Dithered shape={circle} size={72} cols={28} fg={INK} paused={paused} label="" />
-          </Tile>
-        </Section>
-
-        <View style={styles.controls}>
-          <Pressable style={styles.button} onPress={() => setPaused((p) => !p)}>
-            <Text style={styles.buttonText}>{paused ? 'Resume' : 'Pause'}</Text>
-          </Pressable>
-          <Pressable
-            style={styles.button}
-            onPress={() => setProgress((p) => (p >= 1 ? 0 : Math.min(1, p + 0.25)))}
-          >
-            <Text style={styles.buttonText}>Step progress</Text>
-          </Pressable>
-        </View>
-      </ScrollView>
-    </SafeAreaView>
+          <View style={styles.controls}>
+            <Pressable style={styles.button} onPress={() => setPaused((p) => !p)}>
+              <Text style={styles.buttonText}>{paused ? 'Resume' : 'Pause'}</Text>
+            </Pressable>
+            <Pressable
+              style={styles.button}
+              onPress={() => setProgress((p) => (p >= 1 ? 0 : Math.min(1, p + 0.25)))}
+            >
+              <Text style={styles.buttonText}>Step progress</Text>
+            </Pressable>
+          </View>
+        </ScrollView>
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 }
 

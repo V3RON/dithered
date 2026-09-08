@@ -3,3 +3,7 @@ dist
 *.log
 .DS_Store
 .expo
+
+# Expo CNG-managed native projects: regenerate with `expo prebuild`.
+packages/playground-expo/ios
+packages/playground-expo/android
