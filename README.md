@@ -56,7 +56,7 @@ function LoadingIndicator() {
 }
 ```
 
-The props are the web component's, minus the DOM-only ones: `className` and `style: CSSProperties` become `style: StyleProp<ViewStyle>`, `label` maps to `accessibilityLabel` rather than `role="status"`, `cache` is gone (see [Performance notes](#performance-notes)), and `cells` is new. Everything else — `shape`, `brightness`, `size`, `cols`, `rows`, `matrix`, `frames`, `period`, `fg`, `bg`, `gap`, `radius`, `paused`, `progress`, `initialFrame`, `respectReducedMotion` — behaves identically, so a shared component can spread the same props object at both. (`matrix` is ignored when you also pass pre-sampled `cells` — see [Performance notes](#performance-notes).)
+The props are the web component's, minus the DOM-only ones: `className` and `style: CSSProperties` become `style: StyleProp<ViewStyle>`, `label` maps to `accessibilityLabel` rather than `role="status"`, `cache` is gone (see [Performance notes](#performance-notes)), and `cells` is new. Everything else — `shape`, `brightness`, `size`, `cols`, `rows`, `matrix`, `frames`, `period`, `speed`, `fg`, `bg`, `gap`, `radius`, `paused`, `progress`, `time`, `onFrame`, `onLoop`, `initialFrame`, `respectReducedMotion` — behaves identically, so a shared component can spread the same props object at both. (`matrix` is ignored when you also pass pre-sampled `cells` — see [Performance notes](#performance-notes).) One difference: `time` also accepts a Reanimated `SharedValue<number>` on native — see [Playback controls](#playback-controls).
 
 To draw into a Skia canvas you already own, `dithered/react-native` also exports the pieces: `useDitheredPictures(options)` returns one `SkPicture` per frame plus the canvas size, and `skiaPaintContext(canvas)` adapts an `SkCanvas` to the `PaintContext` that `paintFrame` draws through.
 
@@ -76,6 +76,8 @@ const instance = createDithered(canvas, {
 // Later:
 instance.setPaused(true);
 instance.update({ fg: '#22cc88' });
+instance.setTime(0.42); // drive playback externally — see Playback controls
+instance.clearTime(); // ...and hand it back to the internal clock
 instance.destroy();
 ```
 
@@ -291,11 +293,35 @@ Pass `size="fill"` to have the instance track its parent element instead of a fi
 
 ## Determinate progress
 
-For a progress indicator rather than a loop, pass `progress` (`0`–`1`) to `Dithered`, or call `instance.setPaused(true)` + `instance.renderFrame(frame)` directly with the core API — both pause the animation and render exactly one frame:
+For a progress indicator rather than a loop, pass `progress` (`0`–`1`) to `Dithered`. It's sugar over `time` (below) with playback paused: the frame index `Math.floor(progress * (frames - 1))` is selected, then mapped to the exact phase that quantizes back to that frame — not the naive `setTime(progress * (frames - 1) / frames)`, which loses a bit in the round trip through the frame grid for most frame counts (`frames: 48`, the default, among them). `progress` and `time` are mutually exclusive: if both are passed, `time` wins.
 
 ```tsx
 <Dithered shape={shapes.square} brightness={presets.fill()} progress={downloadedFraction} />
 ```
+
+> `progress`'s frame mapping now floors instead of rounds (`progress={0.5}` at the default `frames: 48` selects frame 23, not 24), so it agrees with how free-running playback quantizes phase to a frame. Only interior values shift by at most one frame; the endpoints (`0` and `1`) are exact — `progress={1}` always selects frame `frames - 1`, at every frame count.
+
+## Playback controls
+
+Time is an input, not just an internal detail. By default an instance drives itself off a self-contained clock (a phase accumulator in loop units — `phase += (dt / period) * speed`, see `packages/dithered/docs/adrs/0006-playback-controls.md`), but every part of that clock can be taken over from outside:
+
+- **`speed`** (default `1`) scales the playback rate. Negative values play the loop backwards. Changing `speed` mid-loop is continuous — it scales the _increment_, not the accumulated phase, so there's never a jump.
+- **`onFrame(frame, t)`** fires after a frame is painted, with the frame index and the loop phase `t` in `[0, 1)`. It fires at most once per painted frame — never for a redraw that lands back on the same index — including the very first paint at `initialFrame`. On native it crosses to the JS thread via `runOnJS`; it's not meant for per-frame work.
+- **`onLoop(loops)`** fires each time the internal clock's loop wraps, with the signed cumulative loop count (negative once a backwards-playing loop wraps past 0). It's coalesced: a single stall that crosses several loop boundaries at once still fires only one call, with the final count. It does **not** fire for `time`/`progress` — a jump isn't a wrap.
+- **`time`** drives playback externally, in loop units (`1` = one full loop — fractional values scrub within a loop, values past `1` or below `0` are just more loops). Setting it pauses the internal clock; clearing it back to `undefined` (or `null`, which behaves exactly like an absent prop — handy for `time={someOptionalTime ?? null}`) hands playback back, continuing from wherever `time` left the phase rather than snapping back to where the clock was interrupted. A non-finite value (`NaN`, `Infinity`) — e.g. `time={scrollY / contentHeight}` before layout has produced a real ratio — is ignored: passing `time` at all still hands the clock over, so the displayed frame literally holds until a finite value arrives, rather than flashing to frame `0` or running on underneath. Two instances driven by the same `time` always render the same frame, since the frame is a pure function of `(phase, frames)` with no hidden origin — useful for keeping independent indicators in lockstep. On `dithered/native`, `time` also accepts a Reanimated `SharedValue<number>`; a gesture or scroll handler writing straight into it reaches the picture swap without a JS round trip.
+
+```tsx
+// React: scrub-driven, two instances in lockstep
+<Dithered shape={shapes.rozenite} brightness={presets.gem()} time={scrollProgress} />
+<Dithered shape={shapes.heart} brightness={presets.pulse()} time={scrollProgress} />
+
+// React Native: driven by a shared value, no JS round trip
+<Dithered shape={shapes.rozenite} brightness={presets.gem()} time={sharedProgress} />
+```
+
+On the core API, the equivalent is `instance.setTime(t)` / `instance.clearTime()` (see [Vanilla](#vanilla) above), plus `speed`, `onFrame` and `onLoop` in the options object passed to `createDithered`.
+
+The playground's [live demo](https://v3ron.github.io/dithered/) has a "Scrub playback" example built on `time`, next to a free-running instance for comparison.
 
 ## Static rendering
 
@@ -370,26 +396,29 @@ Sampling which cells fall inside a shape needs a point-in-path test, and `Path2D
 
 ### `DitheredOptions`
 
-| Option                 | Type                          | Default                   | Description                                                                                                                                                                      |
-| ---------------------- | ----------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `shape`                | `Shape`                       | —                         | Required. Silhouette to sample cells inside.                                                                                                                                     |
-| `brightness`           | `Brightness`                  | —                         | Required. Per-cell, per-frame brightness function.                                                                                                                               |
-| `size`                 | `number \| 'fill'`            | `48`                      | Height in CSS px (web) or dp (native); width follows the shape's aspect ratio. `'fill'` tracks the parent's content box — web only, see [Responsive sizing](#responsive-sizing). |
-| `maxDpr`               | `number`                      | `3`                       | Web only. Upper bound on the backing-store device pixel ratio.                                                                                                                   |
-| `cols`                 | `number`                      | `16`                      | Grid columns.                                                                                                                                                                    |
-| `rows`                 | `number`                      | derived from aspect ratio | Grid rows.                                                                                                                                                                       |
-| `matrix`               | `DitherMatrix`                | `'bayer4'`                | Ordered-dither threshold pattern — see [Dither matrices](#dither-matrices).                                                                                                      |
-| `frames`               | `number`                      | `48`                      | Frames per loop.                                                                                                                                                                 |
-| `period`               | `number`                      | `2000`                    | Loop duration, ms.                                                                                                                                                               |
-| `fg`                   | `string \| readonly string[]` | `'#000'`                  | Fill color, or an ordered palette from darkest to brightest — see [Palettes](#palettes).                                                                                         |
-| `bg`                   | `string`                      | `'transparent'`           | Background fill, or `'transparent'`.                                                                                                                                             |
-| `cache`                | `boolean \| 'auto'`           | `'auto'`                  | Web only. Pre-render the loop into a sprite strip. `'auto'` = on for `size <= 120`.                                                                                              |
-| `paused`               | `boolean`                     | `false`                   | Freeze the animation.                                                                                                                                                            |
-| `gap`                  | `number`                      | `0.09`                    | Gap between cells, as a fraction of cell size (min 0.6px).                                                                                                                       |
-| `radius`               | `number`                      | `0.14`                    | Corner radius, as a fraction of cell size.                                                                                                                                       |
-| `respectReducedMotion` | `boolean`                     | `true`                    | Render a single static frame under `prefers-reduced-motion`.                                                                                                                     |
-| `initialFrame`         | `number`                      | `0`                       | Frame drawn synchronously on create, so there is no blank flash.                                                                                                                 |
-| `hitTest`              | `HitTester`                   | `jsHitTester(shape)`      | Point-in-path test used to sample cells. See [Determinism](#determinism-jshittester).                                                                                            |
+| Option                 | Type                                 | Default                   | Description                                                                                                                                                                      |
+| ---------------------- | ------------------------------------ | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `shape`                | `Shape`                              | —                         | Required. Silhouette to sample cells inside.                                                                                                                                     |
+| `brightness`           | `Brightness`                         | —                         | Required. Per-cell, per-frame brightness function.                                                                                                                               |
+| `size`                 | `number \| 'fill'`                   | `48`                      | Height in CSS px (web) or dp (native); width follows the shape's aspect ratio. `'fill'` tracks the parent's content box — web only, see [Responsive sizing](#responsive-sizing). |
+| `maxDpr`               | `number`                             | `3`                       | Web only. Upper bound on the backing-store device pixel ratio.                                                                                                                   |
+| `cols`                 | `number`                             | `16`                      | Grid columns.                                                                                                                                                                    |
+| `rows`                 | `number`                             | derived from aspect ratio | Grid rows.                                                                                                                                                                       |
+| `matrix`               | `DitherMatrix`                       | `'bayer4'`                | Ordered-dither threshold pattern — see [Dither matrices](#dither-matrices).                                                                                                      |
+| `frames`               | `number`                             | `48`                      | Frames per loop.                                                                                                                                                                 |
+| `period`               | `number`                             | `2000`                    | Loop duration, ms.                                                                                                                                                               |
+| `fg`                   | `string \| readonly string[]`        | `'#000'`                  | Fill color, or an ordered palette from darkest to brightest — see [Palettes](#palettes).                                                                                         |
+| `bg`                   | `string`                             | `'transparent'`           | Background fill, or `'transparent'`.                                                                                                                                             |
+| `cache`                | `boolean \| 'auto'`                  | `'auto'`                  | Web only. Pre-render the loop into a sprite strip. `'auto'` = on for `size <= 120`.                                                                                              |
+| `paused`               | `boolean`                            | `false`                   | Freeze the animation.                                                                                                                                                            |
+| `gap`                  | `number`                             | `0.09`                    | Gap between cells, as a fraction of cell size (min 0.6px).                                                                                                                       |
+| `radius`               | `number`                             | `0.14`                    | Corner radius, as a fraction of cell size.                                                                                                                                       |
+| `respectReducedMotion` | `boolean`                            | `true`                    | Render a single static frame under `prefers-reduced-motion`.                                                                                                                     |
+| `initialFrame`         | `number`                             | `0`                       | Frame drawn synchronously on create, so there is no blank flash.                                                                                                                 |
+| `hitTest`              | `HitTester`                          | `jsHitTester(shape)`      | Point-in-path test used to sample cells. See [Determinism](#determinism-jshittester).                                                                                            |
+| `speed`                | `number`                             | `1`                       | Playback rate multiplier. Negative values play backwards. See [Playback controls](#playback-controls).                                                                           |
+| `onFrame`              | `(frame: number, t: number) => void` | —                         | Called after a frame is painted. See [Playback controls](#playback-controls).                                                                                                    |
+| `onLoop`               | `(loops: number) => void`            | —                         | Called each time the internal clock's loop wraps. See [Playback controls](#playback-controls).                                                                                   |
 
 ### `DitheredInstance`
 
@@ -399,9 +428,11 @@ Sampling which cells fall inside a shape needs a point-in-path test, and `Path2D
 | `update(options: Partial<DitheredOptions>)` | Re-configure the instance in place; may resample cells and/or rebuild the sprite cache.              |
 | `renderFrame(frame: number)`                | Draw a specific frame directly, bypassing the animation loop.                                        |
 | `refreshColors()`                           | Re-resolve `'currentColor'` in `fg` and repaint if it changed. Web only — see [Palettes](#palettes). |
+| `setTime(t: number)`                        | Drive playback externally, in loop units. Halts the internal clock.                                  |
+| `clearTime()`                               | Hand playback back to the internal clock, resuming from the current phase.                           |
 | `destroy()`                                 | Stop the loop and release all listeners/observers.                                                   |
 
-`dithered/react`'s `Dithered` component accepts the same options as props (`shape`/`brightness` still required, `hitTest` not exposed as a prop), plus `label` (accessible label, default `'Loading'`, `''` hides it from assistive tech), `className`, `style`, `progress`, `ssrFallback` (default `true`), and `instanceRef` (a `Ref<DitheredInstance | null>`, populated on mount and cleared on unmount — an escape hatch onto the instance, e.g. for calling `refreshColors()`; the regular `ref` keeps forwarding the canvas element, unchanged) — see [Determinate progress](#determinate-progress), [SSR fallback](#ssr-fallback) and [React](#quick-start) above. `dithered/react-native`'s takes the same props with `style: StyleProp<ViewStyle>` in place of `className`/`style`, no `cache`, and an extra `cells` — see [React Native](#react-native) above.
+`dithered/react`'s `Dithered` component accepts the same options as props (`shape`/`brightness` still required, `hitTest` not exposed as a prop), plus `label` (accessible label, default `'Loading'`, `''` hides it from assistive tech), `className`, `style`, `progress`, `time`, `ssrFallback` (default `true`), and `instanceRef` (a `Ref<DitheredInstance | null>`, populated on mount and cleared on unmount — an escape hatch onto the instance, e.g. for calling `refreshColors()`; the regular `ref` keeps forwarding the canvas element, unchanged) — see [Determinate progress](#determinate-progress), [Playback controls](#playback-controls), [SSR fallback](#ssr-fallback) and [React](#quick-start) above. `dithered/react-native`'s takes the same props with `style: StyleProp<ViewStyle>` in place of `className`/`style`, no `cache`, a `time` that also accepts a `SharedValue<number>`, and an extra `cells` — see [React Native](#react-native) above.
 
 ### Sampling
 

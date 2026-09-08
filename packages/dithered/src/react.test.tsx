@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react';
 import { createRef } from 'react';
 import { renderToString } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { renderToSvg } from './core';
+import { DEFAULTS, renderToSvg } from './core';
 import { Dithered } from './react';
 import type { DitheredInstance } from './renderer';
 import type { Palette } from './core';
@@ -159,17 +159,233 @@ describe('Dithered', () => {
     expect(setPausedSpy).toHaveBeenCalledWith(false);
   });
 
-  it('progress={0.5} pauses and renders the expected frame index (default frames=48)', () => {
+  it('progress={0.5} pauses and drives the expected phase (default frames=48)', () => {
     const { rerender } = render(<Dithered shape={SQUARE_SHAPE} />);
     const instance = lastInstance();
     const setPausedSpy = vi.spyOn(instance, 'setPaused');
-    const renderFrameSpy = vi.spyOn(instance, 'renderFrame');
+    const setTimeSpy = vi.spyOn(instance, 'setTime');
 
     rerender(<Dithered shape={SQUARE_SHAPE} progress={0.5} />);
 
     expect(setPausedSpy).toHaveBeenCalledWith(true);
-    // round(0.5 * (48 - 1)) = round(23.5) = 24
-    expect(renderFrameSpy).toHaveBeenCalledWith(24);
+    // progress is sugar over setTime: 0.5 * (48 - 1) / 48 -> frame floor(...) = 23,
+    // one lower than the old round-based mapping (frame 24) — see ADR 0006 §8.
+    expect(setTimeSpy).toHaveBeenCalledWith((0.5 * 47) / 48);
+  });
+
+  // Asserts the actual *painted* frame (via the real `onFrame` path, on
+  // the real underlying instance — `createDithered` is only wrapped in
+  // a spy here, not replaced), not the raw argument `setTime` was
+  // called with. `frames: 10` (where `0.9 * 10 === 9` exactly) can't
+  // distinguish a correct mapping from `p * (frames - 1) / frames`
+  // (finding 2's bug): both give the same argument there. `frames: 48`
+  // — the component's own default — cannot: the naive formula computes
+  // `(1 * 47) / 48 = 46.99999999999999`, which floors to frame 46, not
+  // 47, contradicting the documented "endpoints are unchanged".
+  it('progress endpoints 0 and 1 paint frame 0 and frame frames - 1, at a frame count where the naive formula is inexact', () => {
+    const reported: number[] = [];
+    const onFrame = (f: number) => reported.push(f);
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} frames={48} onFrame={onFrame} />);
+
+    // Move off frame 0 first — the default `initialFrame: 0` already
+    // paints frame 0 at mount, so asserting `progress={0}` lands there
+    // too would pass even if nothing actually moved.
+    rerender(<Dithered shape={SQUARE_SHAPE} frames={48} progress={0.5} onFrame={onFrame} />);
+    reported.length = 0;
+
+    rerender(<Dithered shape={SQUARE_SHAPE} frames={48} progress={0} onFrame={onFrame} />);
+    expect(reported[reported.length - 1]).toBe(0);
+
+    rerender(<Dithered shape={SQUARE_SHAPE} frames={48} progress={1} onFrame={onFrame} />);
+    expect(reported[reported.length - 1]).toBe(47);
+  });
+
+  // ADR 0006 test 39, swept across frame counts that include several
+  // where `progress * (frames - 1) / frames` is not exact.
+  it('progress endpoints paint frame 0 and frame frames - 1 across a sweep of frame counts', () => {
+    // 49, 22 and 26 are the load-bearing entries: they are frame counts
+    // where a bare `k / frames` still rounds down even with an exact
+    // `wrapPhase`, so they catch a regression to the formula ADR 0006
+    // §8 rejects. The round numbers alone would not.
+    for (const frames of [48, 36, 3, 12, 19, 27, 46, 47, 54, 49, 22, 26]) {
+      const reported: number[] = [];
+      const onFrame = (f: number) => reported.push(f);
+      const { rerender, unmount } = render(
+        <Dithered shape={SQUARE_SHAPE} frames={frames} onFrame={onFrame} />,
+      );
+
+      // Move off frame 0 first so `progress={0}` is an observable repaint.
+      rerender(<Dithered shape={SQUARE_SHAPE} frames={frames} progress={0.5} onFrame={onFrame} />);
+      reported.length = 0;
+
+      rerender(<Dithered shape={SQUARE_SHAPE} frames={frames} progress={0} onFrame={onFrame} />);
+      expect(reported[reported.length - 1]).toBe(0);
+
+      rerender(<Dithered shape={SQUARE_SHAPE} frames={frames} progress={1} onFrame={onFrame} />);
+      expect(reported[reported.length - 1]).toBe(frames - 1);
+
+      unmount();
+    }
+  });
+
+  // ADR 0006 test 49 / finding 7. `frames: 0` used to reach `setTime`
+  // with a non-finite phase (`Math.floor(0.5 * -1) === -1`, then
+  // `phaseForFrame(-1, 0) === -Infinity`) — finding 1's blank-canvas bug,
+  // entered through the `progress` mapping rather than `time` directly.
+  it('progress with frames: 0 does not produce a non-finite phase', () => {
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} />);
+    const instance = lastInstance();
+    const setTimeSpy = vi.spyOn(instance, 'setTime');
+
+    rerender(<Dithered shape={SQUARE_SHAPE} frames={0} progress={0.5} />);
+
+    expect(setTimeSpy).toHaveBeenCalledTimes(1);
+    expect(Number.isFinite(setTimeSpy.mock.calls[0]![0])).toBe(true);
+  });
+
+  // ADR 0006 test 49, second half. The mapping must read
+  // `DEFAULTS.frames`, not repeat the library's default as a bare `48`
+  // literal, so the two can't silently drift apart if the real default
+  // ever changes. Mutates the shared `DEFAULTS` object for the duration
+  // of the test, restored in `finally`.
+  it("progress's frame mapping (no frames prop) follows DEFAULTS.frames rather than a hard-coded 48", () => {
+    const original = DEFAULTS.frames;
+    DEFAULTS.frames = 20;
+    try {
+      const { rerender } = render(<Dithered shape={SQUARE_SHAPE} />);
+      const instance = lastInstance();
+      const setTimeSpy = vi.spyOn(instance, 'setTime');
+
+      rerender(<Dithered shape={SQUARE_SHAPE} progress={0.5} />);
+
+      // frame = floor(0.5 * (20 - 1)) = 9; phase = phaseForFrame(9, 20).
+      expect(setTimeSpy).toHaveBeenCalledWith((9 + 0.5) / 20);
+    } finally {
+      DEFAULTS.frames = original;
+    }
+  });
+
+  it('time takes precedence over progress when both are set', () => {
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} progress={0.5} />);
+    const instance = lastInstance();
+    const setTimeSpy = vi.spyOn(instance, 'setTime');
+
+    rerender(<Dithered shape={SQUARE_SHAPE} progress={0.5} time={0.2} />);
+
+    expect(setTimeSpy).toHaveBeenCalledWith(0.2);
+    expect(setTimeSpy).not.toHaveBeenCalledWith((0.5 * 47) / 48);
+  });
+
+  // ADR 0006 test 31 / finding 5. The original version of this test only
+  // asserted that `setTime` was *called* with `0.35` and that
+  // `clearTime` was called — never the two things its name actually
+  // claims: that the argument produces the right *painted* frame, and
+  // that the RAF loop genuinely stops (as opposed to `setTime` being a
+  // no-op stub that happens to record its argument).
+  it('time renders the matching frame and pauses the loop, then clearTime resumes on removal', () => {
+    const reported: number[] = [];
+    const onFrame = (f: number) => reported.push(f);
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} frames={10} onFrame={onFrame} />);
+    const instance = lastInstance();
+    const clearTimeSpy = vi.spyOn(instance, 'clearTime');
+
+    expect(env.rafCallbacks.length).toBe(1); // scheduled normally before time takes over
+    reported.length = 0; // drop the mount-time initial paint at frame 0
+
+    rerender(<Dithered shape={SQUARE_SHAPE} frames={10} time={0.35} onFrame={onFrame} />);
+
+    // The actual painted frame index, via the real onFrame path — not
+    // just the raw argument setTime happened to receive.
+    expect(reported[reported.length - 1]).toBe(Math.floor(0.35 * 10));
+    // The internal RAF loop actually stopped: no new frame was
+    // scheduled, and the one that was pending got cancelled.
+    expect(env.rafCallbacks.length).toBe(1);
+    expect(cancelAnimationFrame).toHaveBeenCalled();
+
+    rerender(<Dithered shape={SQUARE_SHAPE} frames={10} />);
+    expect(clearTimeSpy).toHaveBeenCalled();
+  });
+
+  // ADR 0006 test 50, web half / finding 6. `time={null}` (as opposed
+  // to an absent prop — e.g. `time={sharedProgress ?? null}`) must
+  // behave exactly like `time` being `undefined`: `clearTime()` runs and
+  // playback keeps going, rather than freezing (the native failure mode
+  // this finding is really about — see native/playback.test.ts's
+  // `isExternallyDriven` coverage). `typeof null === 'number'` is
+  // already false, so the effect falls through to `clearTime()`; this
+  // pins that so it can't regress.
+  it('time={null} behaves as not externally driven: clearTime runs and playback resumes', () => {
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} time={0.2} />);
+    const instance = lastInstance();
+    const clearTimeSpy = vi.spyOn(instance, 'clearTime');
+    const rafCountWhileDriven = env.rafCallbacks.length;
+
+    rerender(<Dithered shape={SQUARE_SHAPE} time={null} />);
+
+    expect(clearTimeSpy).toHaveBeenCalled();
+    // The real instance actually resumed scheduling — not just a spy
+    // recording that the method was called.
+    expect(env.rafCallbacks.length).toBeGreaterThan(rafCountWhileDriven);
+  });
+
+  // Finding 3 (third review). `time={null}` is documented as behaving
+  // exactly like an absent prop, and the time effect hands it to
+  // `clearTime()` — so it does not own pausing and must not suppress the
+  // paused effect. The gate was `time === undefined`, which `null` fails,
+  // silently disabling the `paused` prop for the whole
+  // `time={sharedValue ?? null}` pattern the docs recommend.
+  it('paused still works while time={null}', () => {
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} time={null} paused={false} />);
+    const instance = lastInstance();
+    const setPausedSpy = vi.spyOn(instance, 'setPaused');
+
+    rerender(<Dithered shape={SQUARE_SHAPE} time={null} paused={true} />);
+
+    expect(setPausedSpy).toHaveBeenCalledWith(true);
+  });
+
+  it('time changing does not trigger update() (no reconfigure)', () => {
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} time={0} />);
+    const instance = lastInstance();
+    const updateSpy = vi.spyOn(instance, 'update');
+
+    rerender(<Dithered shape={SQUARE_SHAPE} time={0.1} />);
+    rerender(<Dithered shape={SQUARE_SHAPE} time={0.2} />);
+
+    expect(updateSpy).not.toHaveBeenCalled();
+    expect(mockedCreateDithered).toHaveBeenCalledTimes(1);
+  });
+
+  it('speed forwards to the instance via update() without recreating it', () => {
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} speed={1} />);
+    const instance = lastInstance();
+    const updateSpy = vi.spyOn(instance, 'update');
+
+    rerender(<Dithered shape={SQUARE_SHAPE} speed={2} />);
+
+    expect(updateSpy).toHaveBeenCalledWith(expect.objectContaining({ speed: 2 }));
+    expect(mockedCreateDithered).toHaveBeenCalledTimes(1);
+  });
+
+  it('an inline onFrame that changes identity every render never triggers update(), and the latest callback is invoked', () => {
+    let latestReported = -1;
+    const { rerender } = render(
+      <Dithered shape={SQUARE_SHAPE} onFrame={() => (latestReported = -2)} />,
+    );
+    const instance = lastInstance();
+    const updateSpy = vi.spyOn(instance, 'update');
+
+    // A fresh arrow function every render — the common, unmemoized case.
+    rerender(<Dithered shape={SQUARE_SHAPE} onFrame={(f) => (latestReported = f)} />);
+    rerender(<Dithered shape={SQUARE_SHAPE} onFrame={(f) => (latestReported = f)} />);
+
+    expect(updateSpy).not.toHaveBeenCalled();
+
+    // Directly exercise the trampoline `createDithered` was actually
+    // constructed with, simulating the core reporting a painted frame.
+    const optionsPassed = mockedCreateDithered.mock.calls[0]![1];
+    optionsPassed.onFrame?.(7, 0.5);
+    expect(latestReported).toBe(7); // the *latest* render's callback ran, not the first's
   });
 
   it('does not recreate the instance when only progress changes', () => {

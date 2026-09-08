@@ -1,19 +1,24 @@
 import {
   DEFAULTS,
+  advancePhase,
   assignDefined,
   clonePaletteOption,
   computeGeometry,
   effectiveDpr,
   fitSize,
-  frameAt,
+  frameForPhase,
   hasCurrentColor,
+  loopsAt,
   paintFrame,
+  phaseForFrame,
   resolveOptions,
   resolvePalette,
   resolveRows,
   resolveSizePx,
   surfaceSize,
   toPalette,
+  wrapFrame,
+  wrapPhase,
   type DitheredOptions,
   type PaintContext,
   type PaintGeometry,
@@ -44,13 +49,23 @@ export interface DitheredInstance {
    * other option change to trigger `update()`.
    */
   refreshColors(): void;
+  /**
+   * Drives playback externally: sets the loop phase to `t` (loop units —
+   * `1` is one full loop) and halts the internal clock. Idempotent —
+   * repeated calls that land on the same frame index repaint at most
+   * once — and does not fire `onLoop`, since a jump isn't a wrap. A
+   * non-finite `t` (`NaN`, `Infinity`, `-Infinity`) is ignored: the
+   * displayed frame holds and neither callback fires.
+   */
+  setTime(t: number): void;
+  /**
+   * Hands playback back to the internal clock, resuming from wherever
+   * `setTime` left the phase rather than snapping back to the phase the
+   * clock had reached before `setTime` took over.
+   */
+  clearTime(): void;
   /** Stops the loop and releases all listeners/observers. */
   destroy(): void;
-}
-
-/** Wraps a frame index into `[0, count)`, matching `wrapFrame`'s semantics in `core/static.ts`. */
-function wrapFrame(frame: number, count: number): number {
-  return ((Math.round(frame) % count) + count) % count;
 }
 
 interface MeasuredBox {
@@ -83,6 +98,12 @@ function prefersReducedMotion(opts: ResolvedOptions): boolean {
  * follows `devicePixelRatio` (clamped to `maxDpr`) even when it changes
  * after creation — see the responsive-sizing ADR (0011) for the full
  * design.
+ *
+ * Playback itself is a phase accumulator in loop units (`phase += (dt /
+ * period) * speed`, see `core/clock.ts`), not a function of wall-clock
+ * time — that's what makes `speed`, negative `speed`, `onLoop`, and
+ * `setTime`/`clearTime` possible without ever moving the displayed frame
+ * discontinuously. See ADR 0006.
  */
 export function createDithered(
   canvas: HTMLCanvasElement,
@@ -196,6 +217,30 @@ export function createDithered(
   let isPaused = opts.paused;
   let visible = true;
   let destroyed = false;
+
+  // Playback state: `phase` is in loop units (1 = one full loop) and is
+  // the single source of truth for the displayed frame, whether it's
+  // being advanced by the internal clock or pinned by `setTime`.
+  // `lastNow` is `null` whenever the clock is not mid-run (freshly
+  // created, just resumed from a pause, or just handed back by
+  // `clearTime`) so the next tick's `dt` is 0 rather than a jump across
+  // however long playback was stopped.
+  //
+  // Seeded via `phaseForFrame`, not a bare `initialFrame / opts.frames`:
+  // the latter rounds down for a third of its valid inputs (ADR 0006
+  // §1), which would both paint the wrong initial frame and report it
+  // to `onFrame` below. `initialFrame` is wrapped into `[0, opts.frames)`
+  // *before* that conversion (ADR 0006 §6) so an out-of-range value
+  // (`-1`, `frames`, ...) seeds the same `loopsAt` starting point — `0`
+  // — as native's `wrapFrame`-then-convert seed does; seeding it
+  // unwrapped makes `loopsAt` start at `-1` for `initialFrame: -1`, so
+  // the first forward wrap fires `onLoop(0)` instead of `onLoop(1)`.
+  let phase =
+    opts.frames > 0 ? phaseForFrame(wrapFrame(opts.initialFrame, opts.frames), opts.frames) : 0;
+  let lastNow: number | null = null;
+  // True while a `setTime` caller owns `phase`; the internal clock never
+  // runs while this is set, regardless of `isPaused`.
+  let driven = false;
 
   function computedColor(): string {
     if (typeof getComputedStyle === 'undefined') return '';
@@ -420,11 +465,15 @@ export function createDithered(
    */
   function resizeTo(fitted: number): void {
     sizePx = fitted;
-    // Captured *before* `buildCache()` runs: it always resets `currentFrame`
-    // to -1, which would otherwise make this ternary dead and silently
-    // snap a paused/determinate instance back to `initialFrame` on every
-    // resize that crosses a cell boundary (see review finding 2).
-    const frameToShow = currentFrame >= 0 ? currentFrame % opts.frames : opts.initialFrame;
+    // `phase` — not `currentFrame` — is the source of truth for what's
+    // displayed (see the field comment; `renderFrame()`/`setTime()` both
+    // keep it in sync). Captured before `buildCache()` runs, since that
+    // always resets `currentFrame` to -1 (review finding 2). While
+    // reduced motion is in effect, the frame shown is always `initialFrame`.
+    const frameToShow = reduced ? opts.initialFrame : frameForPhase(phase, opts.frames);
+    // Also captured here, before a possible `buildCache()` below resets
+    // `currentFrame` to -1 — see the identical comment in `update()`.
+    const frameBeforeRepaint = currentFrame;
     applySurface();
     // Floored at 2 device px: `W`/`builtW` are always whole device pixels
     // (rounded in `applySurface()`), so the smallest possible nonzero delta
@@ -457,7 +506,12 @@ export function createDithered(
     ) {
       buildCache();
     }
+    // A resize always warrants a repaint at the new dimensions, even if
+    // `frameToShow` happens to equal `currentFrame` — but `onFrame` only
+    // fires when the frame index actually moved.
+    const frameChanged = frameToShow !== frameBeforeRepaint;
     blit(frameToShow);
+    if (frameChanged) opts.onFrame?.(frameToShow, frameToShow / opts.frames);
   }
 
   // --- the three configure stages (see ADR 0011) ------------------------
@@ -584,8 +638,22 @@ export function createDithered(
     currentFrame = frame;
   }
 
+  /**
+   * Paints the frame `phase` maps to, if it differs from what's already
+   * on screen, and fires `onFrame`. The one place both the internal
+   * clock and `setTime` funnel through, so "a repeated frame index is
+   * never redrawn or reported twice" holds for either driver.
+   */
+  function paintForPhase(): void {
+    const f = frameForPhase(phase, opts.frames);
+    if (f !== currentFrame) {
+      blit(f);
+      opts.onFrame?.(f, wrapPhase(phase));
+    }
+  }
+
   function schedule(): void {
-    if (destroyed || isPaused || !visible || reduced || dormant) return;
+    if (destroyed || isPaused || !visible || reduced || dormant || driven) return;
     if (typeof document !== 'undefined' && document.hidden) return;
     if (raf) return;
     raf = requestAnimationFrame(tick);
@@ -594,12 +662,20 @@ export function createDithered(
   function halt(): void {
     if (raf) cancelAnimationFrame(raf);
     raf = 0;
+    lastNow = null;
   }
 
   function tick(now: number): void {
     raf = 0;
-    const f = frameAt(now, opts.period, opts.frames);
-    if (f !== currentFrame) blit(f);
+    const dt = lastNow === null ? 0 : now - lastNow;
+    lastNow = now;
+
+    const loopsBefore = loopsAt(phase);
+    phase = advancePhase(phase, dt, opts.period, opts.speed);
+    const loopsAfter = loopsAt(phase);
+    if (loopsAfter !== loopsBefore) opts.onLoop?.(loopsAfter);
+
+    paintForPhase();
     schedule();
   }
 
@@ -623,7 +699,7 @@ export function createDithered(
   } else {
     applySurface();
     buildCache();
-    blit(opts.initialFrame);
+    paintForPhase();
   }
 
   const io =
@@ -667,10 +743,13 @@ export function createDithered(
     }
     // Captured before `buildCache()` clobbers `currentFrame` — see the
     // identical comment in `resizeTo` (review finding 2).
-    const frameToShow = currentFrame >= 0 ? currentFrame % opts.frames : opts.initialFrame;
+    const frameToShow = reduced ? opts.initialFrame : frameForPhase(phase, opts.frames);
+    const frameBeforeRepaint = currentFrame;
     applySurface();
     buildCache();
+    const frameChanged = frameToShow !== frameBeforeRepaint;
     blit(frameToShow);
+    if (frameChanged) opts.onFrame?.(frameToShow, frameToShow / opts.frames);
   }
 
   function disarmDpr(): void {
@@ -707,6 +786,14 @@ export function createDithered(
 
   return {
     setPaused(paused: boolean) {
+      // Kept in sync with `opts.paused`, not just the local `isPaused`
+      // flag: `update()` re-derives `isPaused` from `opts.paused` on
+      // every call (a patch that doesn't itself touch `paused` must
+      // leave it alone), so if this didn't update `opts` too, the next
+      // unrelated `update()` (e.g. `update({ speed })`) would silently
+      // revert whatever `setPaused()` last set back to the mount-time
+      // value (review finding 6).
+      opts.paused = paused;
       isPaused = paused;
       if (paused) halt();
       else schedule();
@@ -876,16 +963,20 @@ export function createDithered(
         const initialFrameChanged = opts.initialFrame !== prevInitialFrame;
         const forceRepaint = reducedChanged || initialFrameChanged;
 
-        // Captured before `buildCache()` clobbers `currentFrame` — see the
-        // identical comment in `resizeTo` (review finding 2). While
+        // `phase` — not `currentFrame` — is the source of truth for
+        // what's displayed (see the field comment; `renderFrame()`/
+        // `setTime()` both keep it in sync), so it naturally survives a
+        // `frames` change through `frameForPhase` with the new count.
+        // Captured before `buildCache()` clobbers `currentFrame` — see
+        // the identical comment in `resizeTo` (review finding 2). While
         // reduced motion is (now) in effect, the frame shown is always
-        // `initialFrame` — the documented single static frame — never
-        // whatever the loop happened to leave `currentFrame` on.
-        const frameToShow = nextReduced
-          ? opts.initialFrame
-          : currentFrame >= 0
-            ? currentFrame % opts.frames
-            : opts.initialFrame;
+        // `initialFrame` — the documented single static frame.
+        const frameToShow = nextReduced ? opts.initialFrame : frameForPhase(phase, opts.frames);
+        // Also captured here, before `buildCache()` resets `currentFrame`
+        // to -1: comparing `frameToShow` against the *live* `currentFrame`
+        // after that reset would report every cache-affecting repaint as a
+        // "new" frame to `onFrame`, even one that redraws the same index.
+        const frameBeforeRepaint = currentFrame;
 
         // Run only the stages this patch actually touches (ADR 0011's
         // three-stage table), rather than unconditionally reapplying the
@@ -943,16 +1034,43 @@ export function createDithered(
 
         reduced = nextReduced;
         isPaused = opts.paused;
-        halt();
-        haltedForRepaint = true;
 
+        // `halt()` only runs when there's actually a reason to — a
+        // dormant/repaint transition that needs the canvas/loop settled
+        // before touching it, or (below) a newly-blocking flag that must
+        // cancel an in-flight `raf`. Calling it unconditionally on every
+        // `update()` would reset `lastNow` to `null` on every call,
+        // corrupting the next tick's `dt` for a patch that never touched
+        // playback at all (e.g. `update({ speed })` — the very next tick
+        // must still measure real elapsed time, not treat the clock as
+        // freshly (re)started).
         if (dormant) {
+          halt();
+          haltedForRepaint = true;
           canvas.style.width = '0px';
           canvas.style.height = '0px';
         } else if (repainted) {
+          halt();
+          haltedForRepaint = true;
+          // Always redraw when `repainted` — even a forced repaint whose
+          // frame index happens to match what's already on screen (e.g.
+          // `initialFrame` changing without `respectReducedMotion` active,
+          // review finding 7) — but only report a new frame to `onFrame`
+          // when the index actually moved, matching `paintForPhase`'s
+          // "never redraw or report the same frame twice" contract.
+          const frameChanged = frameToShow !== frameBeforeRepaint;
           blit(frameToShow);
+          if (frameChanged) opts.onFrame?.(frameToShow, frameToShow / opts.frames);
         }
-        schedule();
+
+        // Cancels a RAF already in flight, not just future scheduling:
+        // `schedule()` on its own only guards against scheduling a *new*
+        // one, so an `update()` that newly forbids playback via `reduced`
+        // (e.g. `respectReducedMotion` flipped back on while the media
+        // query already matches) would otherwise leave the pending tick
+        // to run once more before the next `schedule()` call finally bails.
+        if (isPaused || driven || reduced || dormant) halt();
+        else schedule();
       } catch (err) {
         opts = previous;
         if (canvas.style.width !== prevStyleWidth) canvas.style.width = prevStyleWidth;
@@ -985,13 +1103,52 @@ export function createDithered(
     },
 
     renderFrame(frame: number) {
+      // Kept in sync with `phase`, not just `currentFrame`: a later
+      // resize, DPR change, or `update()` reconfigure all compute "what's
+      // currently displayed" via `frameForPhase(phase, opts.frames)`
+      // (see the `phase` field comment) — without this, a direct
+      // `renderFrame()` call (e.g. a determinate `progress` render) would
+      // repaint correctly now but snap back to a stale phase on the next
+      // unrelated reconfigure. Does not fire `onFrame`/set `driven`,
+      // matching "bypasses the animation loop" — this is a one-off
+      // override, not a hand-off away from the internal clock.
+      phase = opts.frames > 0 ? wrapFrame(frame, opts.frames) / opts.frames : 0;
       blit(frame);
     },
 
     refreshColors() {
       if (!applyResolvedFg()) return;
       buildCache();
-      blit(currentFrame >= 0 ? currentFrame : opts.initialFrame);
+      blit(frameForPhase(phase, opts.frames));
+    },
+
+    setTime(t: number) {
+      // Calling `setTime` at all is the statement that this instance is
+      // externally driven, so `driven`/`halt()` come first and apply
+      // even to a non-finite `t`. Otherwise the PRD's flagship case —
+      // `time={scrollY / contentHeight}`, which is `NaN` on the first
+      // render, before layout — would leave the internal clock running
+      // and the indicator animating freely until a finite ratio
+      // arrived, which is neither what the README promises ("the
+      // displayed frame just holds") nor what native does (it treats a
+      // non-finite `time` as driving, and holds).
+      driven = true;
+      halt();
+      // The *value* is then ignored (ADR 0006 §3) rather than clamped to
+      // frame 0: `frameForPhase`'s totality is a backstop for anything
+      // that slips past every driver, not license for a driver to snap
+      // to frame 0 on its own. The phase is left where it was, so the
+      // displayed frame holds and `onFrame` does not fire.
+      if (!Number.isFinite(t)) return;
+      phase = t;
+      paintForPhase();
+    },
+
+    clearTime() {
+      if (!driven) return;
+      driven = false;
+      lastNow = null;
+      if (!isPaused) schedule();
     },
 
     destroy() {

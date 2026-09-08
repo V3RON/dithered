@@ -18,11 +18,16 @@ export type {
   Size,
 } from './core';
 export {
+  advancePhase,
   computeGeometry,
   frameAt,
+  frameForPhase,
+  loopsAt,
   paintFrame,
+  phaseForFrame,
   resolveOptions,
   resolveRows,
+  wrapPhase,
   CURRENT_COLOR,
   hasCurrentColor,
   resolvePalette,
@@ -54,3 +59,10 @@ export { useDitheredPictures } from './react-native/pictures';
 export type { DitheredPictures, DitheredPicturesOptions } from './react-native/pictures';
 export { skiaPaintContext } from './react-native/paint-context';
 export { skiaHitTester } from './react-native/hit-test';
+export {
+  advancePhaseUI,
+  frameForPhaseUI,
+  loopsAtUI,
+  phaseForFrameUI,
+  wrapPhaseUI,
+} from './react-native/playback';

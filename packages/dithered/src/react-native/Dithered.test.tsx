@@ -24,6 +24,10 @@ vi.mock('react-native-reanimated', () => ({
   useFrameCallback: vi.fn(() => ({ setActive: vi.fn() })),
   useReducedMotion: vi.fn(() => false),
   useSharedValue: vi.fn(<T,>(initial: T) => ({ value: initial })),
+  // Unused by these tests (none pass a `SharedValue` `time`), so a no-op
+  // stand-in is enough — real reaction semantics belong to Reanimated's
+  // own test suite, not this component's.
+  useAnimatedReaction: vi.fn(),
 }));
 
 // The same recording-Skia recipe `pictures.test.ts` uses for the

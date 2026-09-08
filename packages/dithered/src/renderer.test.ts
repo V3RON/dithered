@@ -53,6 +53,60 @@ describe('frameAt', () => {
     expect(frameAt(0, 2000, 48)).toBe(0);
     expect(frameAt(1999, 2000, 48)).toBe(47);
   });
+
+  // ADR 0006 test 46 / finding 3. `frameAt` keeps its pre-ADR-0006 body
+  // verbatim rather than delegating to `frameForPhase`: `(nowMs % period)
+  // / period` and `(nowMs / period) % 1` are not the same computation in
+  // floating point, and diverge at `Date.now()` magnitudes — the
+  // existing tests above use timestamps of at most a few thousand ms and
+  // cannot see it. This pins the original arithmetic against a large,
+  // deterministic sample of `Date.now()`-magnitude timestamps (a fixed
+  // seed, not `Date.now()` itself, so the test is reproducible), over
+  // periods that include 333 (where the two formulations diverge at a
+  // real rate) and 2000 (where, per the ADR, they happen not to).
+  it('agrees with its pre-refactor implementation over a large sample of Date.now()-magnitude timestamps', () => {
+    // The exact original body (see ADR 0006 §1 and the commit history),
+    // duplicated here rather than imported, so this test pins `frameAt`
+    // against an independent reference rather than restating its own
+    // implementation.
+    function referenceFrameAt(nowMs: number, period: number, frames: number): number {
+      const phase = ((nowMs % period) + period) % period;
+      return Math.floor((phase / period) * frames) % frames;
+    }
+
+    // The ADR's own worked example: frameAt(1352750077665.375, 333, 48)
+    // is 26 under the original body and 25 under a `frameForPhase`
+    // delegation.
+    expect(frameAt(1352750077665.375, 333, 48)).toBe(26);
+    expect(frameAt(1352750077665.375, 333, 48)).toBe(referenceFrameAt(1352750077665.375, 333, 48));
+
+    // A small deterministic PRNG (mulberry32) rather than Math.random(),
+    // so a failure is reproducible without recording the seed elsewhere.
+    function mulberry32(seed: number) {
+      let a = seed;
+      return () => {
+        a |= 0;
+        a = (a + 0x6d2b79f5) | 0;
+        let t = Math.imul(a ^ (a >>> 15), 1 | a);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+    const rand = mulberry32(0xd17ee7ed);
+
+    const periods = [333, 2000, 700, 1000, 4001];
+    const frameCounts = [48, 24, 60, 10];
+    let sampled = 0;
+    for (let i = 0; i < 500; i++) {
+      // Date.now()-magnitude: current era is ~1.7-1.8e12 ms.
+      const nowMs = 1_700_000_000_000 + rand() * 1e11;
+      const period = periods[i % periods.length]!;
+      const frames = frameCounts[i % frameCounts.length]!;
+      expect(frameAt(nowMs, period, frames)).toBe(referenceFrameAt(nowMs, period, frames));
+      sampled++;
+    }
+    expect(sampled).toBe(500);
+  });
 });
 
 function makeCells(n: number): Cell[] {
@@ -2312,5 +2366,618 @@ describe('createDithered — responsive sizing', () => {
     } finally {
       small.restore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Playback controls: speed, onFrame, onLoop, setTime/clearTime, and the
+// update() structural/runtime split (ADR 0006).
+// ---------------------------------------------------------------------------
+
+describe('createDithered playback controls', () => {
+  let env: ReturnType<typeof stubAnimationGlobals>;
+
+  beforeEach(() => {
+    env = stubAnimationGlobals();
+  });
+
+  afterEach(() => {
+    env.restore();
+  });
+
+  function baseOptions(overrides: Partial<DitheredOptions> = {}): DitheredOptions {
+    return {
+      shape: SQUARE_SHAPE,
+      brightness: () => true,
+      size: 40,
+      cols: 4,
+      cache: false,
+      ...overrides,
+    };
+  }
+
+  /**
+   * Spies on `document.createElement`, so a test can assert whether the
+   * sprite-strip cache was (re)built without asserting on its contents.
+   * Real canvases still get created for non-'canvas' tags and for the
+   * caller's own `<canvas>`; jsdom has no 2D context implementation, so
+   * a stub context stands in only for the strip itself, keeping the
+   * cache path exercised without an unimplemented-API console error.
+   */
+  function spyCreateElement() {
+    const real = document.createElement.bind(document);
+    return vi.spyOn(document, 'createElement').mockImplementation(((tag: string) => {
+      if (tag !== 'canvas') return real(tag);
+      const strip = real('canvas') as HTMLCanvasElement;
+      strip.getContext = vi.fn(() => make2dCtx()) as unknown as HTMLCanvasElement['getContext'];
+      return strip;
+    }) as typeof document.createElement);
+  }
+
+  /** The RAF callback most recently registered by `requestAnimationFrame`. */
+  function lastTick(): FrameRequestCallback {
+    const cb = env.rafCallbacks[env.rafCallbacks.length - 1];
+    if (!cb) throw new Error('no animation frame is currently scheduled');
+    return cb;
+  }
+
+  it('speed=2 advances twice as far per RAF tick as speed=1', () => {
+    // Drives a fresh instance through two ticks (a dt=0 baseline, then a
+    // 500ms step) and returns the last frame index reported to onFrame.
+    function driveTwoTicks(speed: number): number {
+      const reported: number[] = [];
+      const onFrame = vi.fn((f: number) => reported.push(f));
+      const { canvas } = makeFakeCanvas();
+      createDithered(canvas, baseOptions({ speed, onFrame }));
+      lastTick()(0); // dt=0: establishes lastNow, no movement yet
+      lastTick()(500);
+      return reported[reported.length - 1]!;
+    }
+
+    // period=2000, frames=48: 500ms is a quarter loop at speed 1.
+    expect(driveTwoTicks(1)).toBe(12);
+    expect(driveTwoTicks(2)).toBe(24);
+  });
+
+  it('update({ speed }) does not move the frame at the moment of the change, only the subsequent rate', () => {
+    const onFrame = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ speed: 1, onFrame }));
+    lastTick()(0);
+    lastTick()(500); // phase 0.25 -> frame 12
+    expect(onFrame).toHaveBeenLastCalledWith(12, expect.any(Number));
+
+    onFrame.mockClear();
+    instance.update({ speed: 4 }); // non-structural: no repaint at all
+    expect(onFrame).not.toHaveBeenCalled();
+
+    // dt=100 at the new speed: +0.2. `initialFrame` (default 0) now
+    // seeds `phase` via `phaseForFrame`, not a bare division (finding
+    // 3/ADR §1), so the running phase carries a permanent +0.5-frame
+    // (1/96) offset from what a naive "starts at exactly 0" reading
+    // would suggest: 25/96 + 0.2 = 221/480 -> frame 22, not 21.
+    lastTick()(600);
+    expect(onFrame).toHaveBeenLastCalledWith(22, expect.any(Number));
+  });
+
+  it('negative speed walks the frame index backwards and wraps 0 -> frames - 1', () => {
+    const onFrame = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    createDithered(canvas, baseOptions({ speed: -1, onFrame }));
+    lastTick()(0);
+    // dt=25ms: the seeded phase (1/96, from `phaseForFrame(0, 48)`) has
+    // to be overcome before the phase actually goes negative — a dt=1ms
+    // nudge no longer crosses 0, it just eats into that half-frame
+    // headroom. 25ms clears it (period 2000ms, speed -1: -25/2000 <
+    // -1/96) and lands just below 0.
+    lastTick()(25);
+    expect(onFrame).toHaveBeenLastCalledWith(47, expect.any(Number));
+  });
+
+  it('onFrame never fires twice for the same index across consecutive ticks', () => {
+    const onFrame = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    createDithered(canvas, baseOptions({ onFrame }));
+    onFrame.mockClear(); // drop the initial-paint call
+
+    lastTick()(0); // dt=0: no change
+    expect(onFrame).not.toHaveBeenCalled();
+
+    lastTick()(1); // dt=1ms: phase 0.0005 -> still frame 0
+    expect(onFrame).not.toHaveBeenCalled();
+
+    lastTick()(50); // dt=49ms: phase 0.025 -> frame 1
+    expect(onFrame).toHaveBeenCalledTimes(1);
+    expect(onFrame).toHaveBeenLastCalledWith(1, expect.any(Number));
+
+    onFrame.mockClear();
+    lastTick()(50.4); // dt=0.4ms: still frame 1
+    expect(onFrame).not.toHaveBeenCalled();
+  });
+
+  // ADR 0006 test 45 / finding 4. `update({ period })` alone (the
+  // original version of this test) is non-structural, so `update()`
+  // never even reaches `renderer.ts`'s repaint branch — it passes
+  // whether or not the `if (f !== previousFrame)` guard exists at all,
+  // because nothing is painted either way. `update({ fg })` is the real
+  // case: it's structural, so `configure()` + `blit()` really do
+  // repaint (asserted below via `ctx.fill`), and the guard is what keeps
+  // `onFrame` silent when that repaint lands on the same frame index it
+  // started from.
+  it('onFrame does not fire for a repaint at the same frame index', () => {
+    const onFrame = vi.fn();
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ onFrame }));
+    onFrame.mockClear();
+
+    // Non-structural: never reaches the repaint branch at all.
+    instance.update({ period: 4000 });
+    expect(onFrame).not.toHaveBeenCalled();
+
+    // Structural, but the frame index doesn't move (nothing has ticked
+    // the clock): a real repaint happens, and onFrame must stay silent.
+    ctx.fill.mockClear();
+    instance.update({ fg: '#ff00ff' });
+    expect(ctx.fill).toHaveBeenCalled(); // confirms a repaint actually happened
+    expect(onFrame).not.toHaveBeenCalled();
+  });
+
+  it("onFrame's t is the wrapped phase, always in [0, 1)", () => {
+    const seenPhases: number[] = [];
+    const onFrame = vi.fn((_f: number, t: number) => seenPhases.push(t));
+    const { canvas } = makeFakeCanvas();
+    createDithered(canvas, baseOptions({ onFrame, speed: -1 }));
+    lastTick()(0);
+    // dt=100ms: large enough to clear the seeded phase's half-frame
+    // headroom (1/96, from `phaseForFrame(0, 48)` — see finding 3) and
+    // still wrap the phase below 0.
+    lastTick()(100);
+
+    for (const t of seenPhases) {
+      expect(t).toBeGreaterThanOrEqual(0);
+      expect(t).toBeLessThan(1);
+    }
+    // wrapPhase(1/96 - 100/2000) = wrapPhase(-19/480) = 461/480.
+    expect(seenPhases[seenPhases.length - 1]).toBeCloseTo(461 / 480, 6);
+  });
+
+  it('onLoop fires once per whole-loop crossing, with the cumulative signed count', () => {
+    const onLoop = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    createDithered(canvas, baseOptions({ onLoop, period: 1000 }));
+    lastTick()(0);
+    lastTick()(1000); // one full period
+    expect(onLoop).toHaveBeenCalledTimes(1);
+    expect(onLoop).toHaveBeenLastCalledWith(1);
+
+    lastTick()(2000); // another full period
+    expect(onLoop).toHaveBeenCalledTimes(2);
+    expect(onLoop).toHaveBeenLastCalledWith(2);
+  });
+
+  it('onLoop coalesces several boundary crossings inside one tick into a single call', () => {
+    const onLoop = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    createDithered(canvas, baseOptions({ onLoop, period: 1000 }));
+    lastTick()(0);
+    lastTick()(5000); // a stall: 5 periods elapse in a single tick
+    expect(onLoop).toHaveBeenCalledTimes(1);
+    expect(onLoop).toHaveBeenLastCalledWith(5);
+  });
+
+  it('onLoop reports -1 when a negative speed wraps backward past 0', () => {
+    const onLoop = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    createDithered(canvas, baseOptions({ onLoop, period: 1000, speed: -1 }));
+    lastTick()(0);
+    // dt=11ms: the seeded phase (1/96, from `phaseForFrame(0, 48)`) is
+    // ~10.4ms of backward travel at this period/speed — dt=1ms no
+    // longer crosses the loop boundary, dt=11ms does.
+    lastTick()(11);
+    expect(onLoop).toHaveBeenCalledTimes(1);
+    expect(onLoop).toHaveBeenLastCalledWith(-1);
+  });
+
+  it('onFrame fires for the initial paint at initialFrame, at a frame count where initialFrame / frames is not exact', () => {
+    // frames: 20, initialFrame: 5 (5/20 = 0.25 exactly) would pass even
+    // with the bare-division bug (finding 3) — picking a value where the
+    // division isn't float-exact is what makes this test load-bearing.
+    const onFrame = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    createDithered(canvas, baseOptions({ onFrame, initialFrame: 1, frames: 48 }));
+    expect(onFrame).toHaveBeenCalledTimes(1);
+    expect(onFrame.mock.calls[0]![0]).toBe(1);
+    expect(onFrame.mock.calls[0]![1]).toBeCloseTo(1.5 / 48, 10);
+  });
+
+  // ADR 0006 test 40: initialFrame paints exactly that frame for every
+  // valid index. The frame counts matter: 48/60/36 are round numbers
+  // where a bare `k / frames` happens to round-trip correctly, so a
+  // regression to it would slip past them. 49, 22 and 26 are counts
+  // where it still fails (49/1 -> 0, 22/15 -> 14, 26/15 -> 14), and
+  // they are what actually pins `phaseForFrame` here.
+  it('initialFrame paints frame k for every k in [0, frames), at frames 48, 60, 36, 49, 22 and 26', () => {
+    for (const frames of [48, 60, 36, 49, 22, 26]) {
+      for (let k = 0; k < frames; k++) {
+        const onFrame = vi.fn();
+        const { canvas } = makeFakeCanvas();
+        createDithered(canvas, baseOptions({ onFrame, initialFrame: k, frames }));
+        expect(onFrame).toHaveBeenCalledTimes(1);
+        expect(onFrame.mock.calls[0]![0]).toBe(k);
+      }
+    }
+  });
+
+  it('setTime halts the internal loop: no new RAF is ever scheduled, and the displayed frame matches what was requested', () => {
+    const onFrame = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ onFrame, frames: 10 }));
+    const rafCountBefore = env.rafCallbacks.length;
+    onFrame.mockClear();
+
+    instance.setTime(0.5); // floor(0.5 * 10) = 5
+
+    expect(cancelAnimationFrame).toHaveBeenCalled();
+    // The frame actually moved (not just "nothing was scheduled" — a
+    // no-op instance would also satisfy that half of the claim).
+    expect(onFrame).toHaveBeenLastCalledWith(5, expect.any(Number));
+    // ...and nothing was scheduled to move it any further.
+    expect(env.rafCallbacks.length).toBe(rafCountBefore);
+
+    // Even an operation that would ordinarily (re)schedule playback —
+    // an explicit `setPaused(false)`, a no-op here since the instance
+    // was never paused — must not resurrect the internal clock while
+    // `time` still owns the phase.
+    instance.setPaused(false);
+    expect(env.rafCallbacks.length).toBe(rafCountBefore);
+  });
+
+  it('setTime paints the frame for the phase; repeated calls within one frame index paint once', () => {
+    const onFrame = vi.fn();
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ onFrame, frames: 10 }));
+    onFrame.mockClear();
+    ctx.clearRect.mockClear();
+
+    instance.setTime(0.35); // floor(0.35 * 10) = 3
+    expect(onFrame).toHaveBeenCalledTimes(1);
+    expect(onFrame.mock.calls[0]![0]).toBe(3);
+    expect(onFrame.mock.calls[0]![1]).toBeCloseTo(0.35);
+    expect(ctx.clearRect).toHaveBeenCalledTimes(1);
+
+    onFrame.mockClear();
+    ctx.clearRect.mockClear();
+    instance.setTime(0.38); // still floor(0.38 * 10) = 3
+    expect(onFrame).not.toHaveBeenCalled();
+    expect(ctx.clearRect).not.toHaveBeenCalled();
+  });
+
+  it('setTime never fires onLoop, even crossing a whole-loop boundary, but does fire onFrame', () => {
+    const onLoop = vi.fn();
+    const onFrame = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ onLoop, onFrame, frames: 10 }));
+    onFrame.mockClear();
+
+    instance.setTime(2.5); // several whole loops away from the initial phase
+
+    expect(onLoop).not.toHaveBeenCalled();
+    expect(onFrame).toHaveBeenCalledTimes(1);
+    expect(onFrame.mock.calls[0]![0]).toBe(5); // wrapPhase(2.5) = 0.5 -> floor(0.5*10)
+  });
+
+  it('clearTime resumes the internal clock from the external phase, without a jump', () => {
+    const onFrame = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ onFrame, frames: 10, period: 1000 }));
+
+    instance.setTime(0.42); // floor(4.2) = 4
+    onFrame.mockClear();
+    instance.clearTime();
+
+    expect(env.rafCallbacks.length).toBeGreaterThan(0);
+    lastTick()(123); // first resumed tick: dt must be 0, so the frame holds
+    expect(onFrame).not.toHaveBeenCalled();
+
+    lastTick()(123 + 100); // dt=100: +0.1 from the resumed phase (0.42) -> 0.52 -> frame 5
+    expect(onFrame).toHaveBeenCalledTimes(1);
+    expect(onFrame.mock.calls[0]![0]).toBe(5);
+  });
+
+  it('clearTime is a safe no-op when the instance is not currently driven', () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+    expect(() => instance.clearTime()).not.toThrow();
+  });
+
+  // ADR 0006 test 44 / finding 1. The PRD's flagship use case:
+  // `time={scrollY / contentHeight}` is `NaN` on the first render,
+  // before layout. A non-finite `t` must not corrupt playback state —
+  // the displayed frame holds, neither callback fires, and a later
+  // finite `setTime` still works exactly as if the bad call never
+  // happened.
+  it('setTime(NaN) / setTime(Infinity) leave the displayed frame untouched and fire neither callback', () => {
+    const onFrame = vi.fn();
+    const onLoop = vi.fn();
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ onFrame, onLoop, frames: 10 }));
+
+    instance.setTime(0.35); // floor(3.5) = 3, the known-good baseline
+    onFrame.mockClear();
+    onLoop.mockClear();
+    ctx.clearRect.mockClear();
+
+    for (const bad of [NaN, Infinity, -Infinity]) {
+      instance.setTime(bad);
+      expect(onFrame).not.toHaveBeenCalled();
+      expect(onLoop).not.toHaveBeenCalled();
+      expect(ctx.clearRect).not.toHaveBeenCalled(); // nothing was repainted
+    }
+
+    // Still driveable afterwards: a subsequent finite `setTime` behaves
+    // normally, as if the non-finite calls above never happened.
+    instance.setTime(0.72); // floor(7.2) = 7
+    expect(onFrame).toHaveBeenCalledTimes(1);
+    expect(onFrame.mock.calls[0]![0]).toBe(7);
+  });
+
+  // Finding 5 (third review). Ignoring the *value* is not the same as
+  // ignoring the *call*: passing `time` at all means "this instance is
+  // externally driven", so a non-finite `t` must still halt the internal
+  // clock. Otherwise `time={scrollY / contentHeight}` would leave the
+  // indicator animating freely until layout produced a finite ratio —
+  // and native, which treats a non-finite `time` as driving, would hold
+  // while web ran.
+  it('setTime(NaN) still halts the internal clock, so the displayed frame really does hold', () => {
+    const onFrame = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ onFrame, frames: 10 }));
+    expect(env.rafCallbacks.length).toBe(1); // free-running at mount
+
+    instance.setTime(NaN);
+    onFrame.mockClear();
+
+    // No new frame is ever scheduled, and driving the one already in
+    // flight paints nothing further.
+    const scheduled = env.rafCallbacks.length;
+    lastTick()(10_000);
+    expect(env.rafCallbacks.length).toBe(scheduled);
+    expect(onFrame).not.toHaveBeenCalled();
+  });
+
+  // Finding 2 (third review). `speed`/`period`/`initialFrame` reach the
+  // accumulator without passing `setTime`'s guard, and nothing but
+  // `setTime` ever resets `phase` — so before `advancePhase` was made
+  // total, one bad `speed` froze the frame permanently while firing
+  // `onLoop(NaN)` on every tick, because `NaN !== NaN`.
+  it('a non-finite speed does not poison the accumulator, and update() recovers', () => {
+    const onFrame = vi.fn();
+    const onLoop = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ onFrame, onLoop, frames: 10 }));
+
+    lastTick()(0);
+    instance.update({ speed: NaN });
+    onFrame.mockClear();
+    onLoop.mockClear();
+
+    // Ticking with a NaN speed advances nothing and reports nothing —
+    // in particular it does not fire onLoop once per frame forever.
+    for (let i = 1; i <= 20; i++) lastTick()(i * 16);
+    expect(onLoop).not.toHaveBeenCalled();
+    expect(onFrame).not.toHaveBeenCalled();
+
+    // And the instance is not wedged: a good speed drives it again.
+    instance.update({ speed: 1 });
+    lastTick()(20 * 16);
+    lastTick()(20 * 16 + 400); // dt=400ms of a 2000ms period -> +0.2
+    expect(onFrame).toHaveBeenCalled();
+  });
+
+  it('a non-finite period or initialFrame does not wedge playback', () => {
+    const onFrame = vi.fn();
+    const onLoop = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    createDithered(canvas, baseOptions({ onFrame, onLoop, frames: 10, initialFrame: Infinity }));
+    // `wrapFrame` is total, so the seed falls back to frame 0 rather
+    // than seeding the accumulator with NaN. Asserting the painted frame
+    // alone would not catch an un-total `wrapFrame`: `frameForPhase` is
+    // itself total, so a NaN phase still *paints* frame 0. The tell is
+    // `loopsAt(NaN) !== loopsAt(NaN)` — NaN compares unequal to itself —
+    // firing `onLoop(NaN)` on every single tick.
+    expect(onFrame.mock.calls[0]![0]).toBe(0);
+    for (let i = 0; i <= 10; i++) lastTick()(i * 16);
+    expect(onLoop).not.toHaveBeenCalled();
+
+    const onFrame2 = vi.fn();
+    const { canvas: canvas2 } = makeFakeCanvas();
+    const instance = createDithered(canvas2, baseOptions({ onFrame: onFrame2, frames: 10 }));
+    lastTick()(0);
+    instance.update({ period: 0 }); // dt/0 -> Infinity
+    onFrame2.mockClear();
+    for (let i = 1; i <= 10; i++) lastTick()(i * 16);
+    expect(onFrame2).not.toHaveBeenCalled();
+    instance.update({ period: 2000 });
+    lastTick()(10 * 16);
+    lastTick()(10 * 16 + 400);
+    expect(onFrame2).toHaveBeenCalled();
+  });
+
+  it('clearTime re-applies `paused`: it does not resume playback while paused is true', () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ paused: true }));
+    expect(env.rafCallbacks.length).toBe(0);
+
+    instance.setTime(0.5);
+    instance.clearTime();
+
+    expect(env.rafCallbacks.length).toBe(0);
+  });
+
+  // The PRD's explicit acceptance criterion: two differently-configured
+  // instances handed the same `time` render the same frame, because the
+  // frame is a pure function of (phase, frames) with no hidden origin.
+  it('two instances given the same time render the same frame', () => {
+    let frameA = 0;
+    let frameB = 0;
+    const onFrameA = vi.fn((f: number) => {
+      frameA = f;
+    });
+    const onFrameB = vi.fn((f: number) => {
+      frameB = f;
+    });
+    const { canvas: canvasA } = makeFakeCanvas();
+    const { canvas: canvasB } = makeFakeCanvas();
+    const instanceA = createDithered(
+      canvasA,
+      baseOptions({ onFrame: onFrameA, frames: 24, period: 3000, fg: '#111', cols: 4 }),
+    );
+    const instanceB = createDithered(
+      canvasB,
+      baseOptions({ onFrame: onFrameB, frames: 24, period: 700, fg: '#222', cols: 12, gap: 0.2 }),
+    );
+
+    for (const t of [0, 0.1, 0.33, 0.5, 0.999, 1.4, -0.2, 2.75]) {
+      instanceA.setTime(t);
+      instanceB.setTime(t);
+      expect(frameA).toBe(frameB);
+    }
+  });
+
+  it('update({ speed }) / update({ period }) / update({ paused }) do not rebuild the sprite strip', () => {
+    const createElementSpy = spyCreateElement();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ cache: true }));
+    createElementSpy.mockClear(); // drop the initial build
+
+    instance.update({ speed: 3 });
+    instance.update({ period: 5000 });
+    instance.update({ paused: true });
+
+    expect(createElementSpy).not.toHaveBeenCalledWith('canvas');
+    createElementSpy.mockRestore();
+  });
+
+  it('update() re-passing identical structural values (e.g. a React re-render) is also a no-op rebuild', () => {
+    const createElementSpy = spyCreateElement();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ cache: true, fg: '#123456' }));
+    createElementSpy.mockClear(); // drop the initial build
+
+    // The React wrapper builds a full options object from its props on
+    // every render, so `fg`/`cols`/`size` are compared by value, not
+    // just presence, against what's already resolved.
+    instance.update({ fg: '#123456', cols: 4, size: 40 });
+
+    expect(createElementSpy).not.toHaveBeenCalledWith('canvas');
+    createElementSpy.mockRestore();
+  });
+
+  it('update({ cols }) does rebuild the sprite strip', () => {
+    const createElementSpy = spyCreateElement();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ cache: true }));
+    createElementSpy.mockClear(); // drop the initial build
+
+    instance.update({ cols: 8 });
+
+    expect(createElementSpy).toHaveBeenCalledWith('canvas');
+    createElementSpy.mockRestore();
+  });
+
+  it('update({ frames }) preserves the phase rather than the raw frame index', () => {
+    const onFrame = vi.fn();
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ onFrame, frames: 10 }));
+
+    instance.setTime(0.5); // frame floor(0.5 * 10) = 5
+    onFrame.mockClear();
+    instance.update({ frames: 20 }); // same phase 0.5 -> floor(0.5 * 20) = 10, not 5 % 20
+
+    expect(onFrame).toHaveBeenCalledTimes(1);
+    expect(onFrame.mock.calls[0]![0]).toBe(10);
+  });
+
+  // ADR 0006 test 41 / finding 6: `setPaused()` and `update()` disagreed
+  // about who owns `paused` — `update()` unconditionally reset it back
+  // to the resolved option, discarding whatever `setPaused()` last set
+  // whenever the patch didn't itself touch `paused`.
+  it('update({ speed }) does not resurrect a paused value overridden by setPaused()', () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ paused: true }));
+    expect(env.rafCallbacks.length).toBe(0);
+
+    instance.setPaused(false);
+    expect(env.rafCallbacks.length).toBe(1);
+
+    instance.update({ speed: 2 });
+
+    // `update()`'s own schedule()/halt() call can't tell us anything by
+    // itself here (whether paused or not, `raf` is already non-zero, so
+    // `schedule()`'s guard is a no-op either way) — the tell is whether
+    // the *next* tick reschedules itself. If `update()` silently reset
+    // `isPaused` back to the mount-time `true`, the pending tick's own
+    // `schedule()` call bails and playback stops dead; if not, it keeps
+    // rescheduling.
+    const before = env.rafCallbacks.length;
+    lastTick()(0);
+    expect(env.rafCallbacks.length).toBe(before + 1);
+  });
+
+  it('pausing and resuming does not jump the phase', () => {
+    // dt values deliberately avoid landing the phase exactly on a frame
+    // boundary (e.g. 0.3, 0.4 of a 10-frame loop) — floating point makes
+    // `wrapPhase` of an exact boundary an unreliable side of the floor(),
+    // which is a test-authoring hazard here, not a playback bug.
+    const onFrame = vi.fn();
+    const lastFrame = () => onFrame.mock.calls[onFrame.mock.calls.length - 1]?.[0];
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ onFrame, frames: 10, period: 1000 }));
+    lastTick()(0);
+    lastTick()(333); // phase 0.333 -> frame 3
+    expect(lastFrame()).toBe(3);
+
+    instance.setPaused(true);
+    instance.setPaused(false); // resume — long afterwards in wall-clock terms
+
+    lastTick()(999_999); // huge `now`, but dt must be 0 on the first resumed tick
+    expect(lastFrame()).toBe(3); // unchanged: no jump
+
+    // dt=133 now behaves normally from the resumed phase. The seeded
+    // phase (0.05, from `phaseForFrame(0, 10)`) carries through: 0.383 +
+    // 0.133 = 0.516 -> frame 5, not 4.
+    lastTick()(999_999 + 133);
+    expect(lastFrame()).toBe(5);
+  });
+
+  // ADR 0006 test 51 / finding 9. Before ADR 0006, `update()`
+  // unconditionally called `halt()`; the structural/runtime split (§4)
+  // narrowed that to `isPaused || driven`, silently dropping the case
+  // where an update newly makes `reduced` true. `schedule()` at the call
+  // site after it is itself guarded against *scheduling a new* frame,
+  // but does nothing about a frame *already in flight* — so without also
+  // halting on `reduced`, the pending RAF runs one more time before the
+  // guard finally takes effect.
+  it('update() that newly forbids playback via reduced motion cancels the in-flight RAF', () => {
+    // matchMedia matches from the start, but `respectReducedMotion:
+    // false` means the instance ignores it and schedules normally.
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({ matches: true })),
+    );
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ respectReducedMotion: false }));
+    expect(env.rafCallbacks.length).toBe(1);
+
+    (cancelAnimationFrame as unknown as ReturnType<typeof vi.fn>).mockClear();
+    const rafCountBefore = env.rafCallbacks.length;
+
+    // Now `reduced` newly becomes true: `isPaused` and `driven` are both
+    // still false, so only a check against `reduced` itself can catch this.
+    instance.update({ respectReducedMotion: true });
+
+    expect(cancelAnimationFrame).toHaveBeenCalled();
+    // And nothing new was scheduled in its place.
+    expect(env.rafCallbacks.length).toBe(rafCountBefore);
   });
 });

@@ -3,6 +3,7 @@ import type { CSSProperties, MutableRefObject, Ref } from 'react';
 import {
   DEFAULTS,
   hasCurrentColor,
+  phaseForFrame,
   renderToDataURL,
   resolveOptions,
   resolveSizePx,
@@ -36,7 +37,10 @@ export { shapeFromSvgLite } from './svg-lite';
 export type { MixAmount, CellPredicate } from './compose';
 export { compose, blend, mask, timeScale, reverse, offset, invert, clamp } from './compose';
 
-export interface DitheredProps extends Omit<DitheredOptions, 'brightness' | 'shape' | 'hitTest'> {
+export interface DitheredProps extends Omit<
+  DitheredOptions,
+  'brightness' | 'shape' | 'hitTest' | 'onFrame' | 'onLoop'
+> {
   shape: Shape;
   /** Per-cell, per-frame brightness. Default `presets.gem()`. */
   brightness?: Brightness;
@@ -45,8 +49,9 @@ export interface DitheredProps extends Omit<DitheredOptions, 'brightness' | 'sha
   className?: string;
   style?: CSSProperties;
   /**
-   * Determinate progress in `[0, 1]`. When set, the animation is paused
-   * and the frame corresponding to `progress` is rendered directly.
+   * Determinate progress in `[0, 1]`. Sugar over `time` (see below) with
+   * playback paused: `setTime(progress * (frames - 1) / frames)`.
+   * Ignored while `time` is also set — `time` wins.
    */
   progress?: number;
   /**
@@ -69,6 +74,25 @@ export interface DitheredProps extends Omit<DitheredOptions, 'brightness' | 'sha
    * true.
    */
   ssrFallback?: boolean;
+  /**
+   * Drive playback externally, in loop units (`1` = one full loop).
+   * Pauses the internal clock. Applied in its own effect, separate from
+   * every other prop — a scrub at 60 Hz never triggers a reconfigure
+   * (resample / cache rebuild). Takes precedence over `progress` when
+   * both are set; clearing it back to `undefined` *or* `null` resumes
+   * the internal clock from wherever it was left, not from where it was
+   * interrupted — `null` behaves exactly like an absent prop (useful for
+   * `time={someOptionalTime ?? null}`), it does not freeze playback.
+   */
+  time?: number | null;
+  /** Called after a frame is painted, with the frame index and loop phase in `[0, 1)`. */
+  onFrame?: (frame: number, t: number) => void;
+  /**
+   * Called each time the internal clock's loop wraps, with the signed
+   * cumulative loop count. Not fired while `time`/`progress` drive
+   * playback — a jump isn't a wrap.
+   */
+  onLoop?: (loops: number) => void;
 }
 
 // Stable across renders so an un-memoized caller (the common case: nobody
@@ -149,7 +173,11 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     radius,
     respectReducedMotion,
     initialFrame,
+    speed,
     progress,
+    time,
+    onFrame,
+    onLoop,
     label = 'Loading',
     className,
     style,
@@ -235,6 +263,20 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     progress,
   ]);
 
+  // Latest-value refs rather than passing the callbacks through
+  // `update()`: an inline arrow function (the overwhelmingly common
+  // case) has a fresh identity every render, and routing that through
+  // options would either reconfigure on every render or force every
+  // caller to memoize. The core gets one stable trampoline at mount;
+  // these refs are only ever read from an effect or the instance's own
+  // callback, never during render, so assigning them during render
+  // (rather than in a `useLayoutEffect`) is safe and means the
+  // mount-time paint at `initialFrame` already reaches the caller.
+  const onFrameRef = useRef(onFrame);
+  onFrameRef.current = onFrame;
+  const onLoopRef = useRef(onLoop);
+  onLoopRef.current = onLoop;
+
   // Mount/unmount only. Re-creating the instance on every prop change
   // would throw away its cache/animation state for no benefit — that's
   // what the `update()` effect below is for.
@@ -259,6 +301,9 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
       radius,
       respectReducedMotion,
       initialFrame,
+      speed,
+      onFrame: (f, t) => onFrameRef.current?.(f, t),
+      onLoop: (loops) => onLoopRef.current?.(loops),
     });
     instanceRef.current = instance;
     setRef(instanceRefProp, instance);
@@ -277,7 +322,10 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
 
   // Reconfigure (may resample cells / rebuild the sprite cache) on option
   // changes, skipping the initial mount run since `createDithered` above
-  // already applied these values.
+  // already applied these values. `time`, `progress`, `onFrame` and
+  // `onLoop` are deliberately absent: the first two get their own effect
+  // below (a scrub at 60 Hz must never touch this one), and the
+  // callbacks are wired once at mount via the refs above.
   useEffect(() => {
     if (skipNextUpdate.current) {
       skipNextUpdate.current = false;
@@ -300,6 +348,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
       radius,
       respectReducedMotion,
       initialFrame,
+      speed,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
@@ -319,18 +368,24 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     radius,
     respectReducedMotion,
     initialFrame,
+    speed,
   ]);
 
   // Separate from the reconfigure effect so toggling `paused` never
-  // triggers a resample/cache rebuild. Skipped when `progress` is a
-  // controlled value, since that effect owns pausing in that mode.
+  // triggers a resample/cache rebuild. Skipped while `time` or
+  // `progress` is controlled, since the effect below owns pausing then.
   useEffect(() => {
     if (skipNextPaused.current) {
       skipNextPaused.current = false;
       return;
     }
-    if (progress === undefined) instanceRef.current?.setPaused(paused);
-  }, [paused, progress]);
+    // `time == null` — loose, so it covers `null` as well as `undefined`.
+    // `null` is documented as behaving exactly like an absent prop (the
+    // `time={sharedValue ?? null}` pattern), and the effect below hands
+    // it to `clearTime()` rather than to `setTime`, so it does not own
+    // pausing and must not suppress it here.
+    if (progress === undefined && time == null) instanceRef.current?.setPaused(paused);
+  }, [paused, progress, time]);
 
   // Re-resolve `'currentColor'` on *every* render, not just when
   // `className`/`style`/`fg` change. The overwhelmingly common web
@@ -353,16 +408,40 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     instanceRef.current?.refreshColors();
   });
 
-  // Determinate progress: pause and render the matching frame directly.
+  // External phase: `time`, or `progress` as sugar over it. Its own
+  // effect, deliberately outside the reconfigure effect above — driving
+  // this at 60 Hz must never touch `configure()`. `time` wins when both
+  // are passed; when neither is, `clearTime()` hands playback back to
+  // the internal clock from wherever the external driver left it.
   useEffect(() => {
-    if (typeof progress !== 'number') return;
     const instance = instanceRef.current;
     if (!instance) return;
-    instance.setPaused(true);
-    const frameCount = frames ?? 48;
-    const clamped = Math.min(1, Math.max(0, progress));
-    instance.renderFrame(Math.round(clamped * (frameCount - 1)));
-  }, [progress, frames]);
+    if (typeof time === 'number') {
+      instance.setTime(time);
+      return;
+    }
+    if (typeof progress === 'number') {
+      instance.setPaused(true);
+      // Reads `DEFAULTS.frames`, not a hard-coded `48` — this mapping
+      // must track the renderer's actual default, not duplicate it.
+      const frameCount = frames ?? DEFAULTS.frames;
+      const clamped = Math.min(1, Math.max(0, progress));
+      // The frame index is computed once, explicitly, and only then
+      // turned into a phase that quantizes back to it exactly (ADR 0006
+      // §8) — `setTime((clamped * (frameCount - 1)) / frameCount)` looks
+      // equivalent but isn't: the product is quantized straight back by
+      // `frameForPhase`, and the round trip loses a bit for most frame
+      // counts (`progress: 1` at the default `frames: 48` lands on frame
+      // 46, not 47 — see finding 2). `frames: 0` is guarded explicitly:
+      // `phaseForFrame(0, 0)` is `Infinity`, which `setTime` would
+      // otherwise have to ignore via its own non-finite guard rather
+      // than never producing it in the first place.
+      const frame = frameCount > 0 ? Math.floor(clamped * (frameCount - 1)) : 0;
+      instance.setTime(frameCount > 0 ? phaseForFrame(frame, frameCount) : 0);
+      return;
+    }
+    instance.clearTime();
+  }, [time, progress, frames]);
 
   return (
     <canvas

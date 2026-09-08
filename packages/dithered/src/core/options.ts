@@ -80,23 +80,40 @@ export interface DitheredOptions {
    * canvas/Skia rasterization instead.
    */
   hitTest?: HitTester;
+  /** Playback rate multiplier. Default 1. Negative values play backwards. */
+  speed?: number;
+  /**
+   * Called after a frame is painted, with the frame index and the loop
+   * phase in `[0, 1)` at that moment. Fires at most once per painted
+   * frame — never for a redraw that lands on the same index.
+   */
+  onFrame?: (frame: number, t: number) => void;
+  /**
+   * Called each time the internal clock's loop wraps, with the signed
+   * cumulative loop count. Not fired by `setTime`/`renderFrame` — a jump
+   * isn't a wrap.
+   */
+  onLoop?: (loops: number) => void;
 }
 
 // `hitTest` is deliberately excluded from the `Required<...>` half: unlike
 // every other option it has no single resolved default value to assign —
 // `sampleCells`'s own default (`jsHitTester(shape)`) needs the *resolved*
 // shape, so it stays optional here and is applied at the sampling call
-// site instead.
-export type ResolvedOptions = Required<Omit<DitheredOptions, 'hitTest'>> & {
-  hitTest?: HitTester;
-};
+// site instead. `onFrame`/`onLoop` are excluded too, rather than defaulted
+// to no-ops: a no-op default would make "was a callback attached?" an
+// identity check against a module-level sentinel, and would cost native
+// callers a `runOnJS` hop per frame even when nothing is listening.
+type DitheredNonDefaultable = 'hitTest' | 'onFrame' | 'onLoop';
+export type ResolvedOptions = Required<Omit<DitheredOptions, DitheredNonDefaultable>> &
+  Pick<DitheredOptions, DitheredNonDefaultable>;
 
 // `fg` is narrowed back to `string` here (`ResolvedOptions.fg` is `string |
 // readonly string[]`, to allow a palette) since the default is always a
 // single color — `toPalette`/`resolvePalette` in `./palette` lean on
-// `DEFAULTS.fg` being a plain `string` fallback, not a union. `hitTest` is
-// excluded too — see the comment on `ResolvedOptions` above.
-export const DEFAULTS: Omit<ResolvedOptions, 'shape' | 'brightness' | 'hitTest'> & {
+// `DEFAULTS.fg` being a plain `string` fallback, not a union. `hitTest`/
+// `onFrame`/`onLoop` are excluded too — see the comment on `ResolvedOptions` above.
+export const DEFAULTS: Omit<ResolvedOptions, 'shape' | 'brightness' | DitheredNonDefaultable> & {
   fg: string;
 } = {
   size: 48,
@@ -114,6 +131,7 @@ export const DEFAULTS: Omit<ResolvedOptions, 'shape' | 'brightness' | 'hitTest'>
   radius: 0.14,
   respectReducedMotion: true,
   initialFrame: 0,
+  speed: 1,
 };
 
 /**
