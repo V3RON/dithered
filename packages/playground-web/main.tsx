@@ -508,6 +508,13 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
         <h3 style={sectionTitle}>Grab the code</h3>
         <p style={sectionHint}>This matches whatever you've got set up above.</p>
         <pre style={codeBlockStyle}>{snippet}</pre>
+        <p style={{ ...sectionHint, margin: '12px 0 0' }}>
+          On React Native / Expo? Swap the import for{' '}
+          <code style={{ ...codeBlockStyle, display: 'inline', padding: '2px 6px' }}>
+            dithered/native
+          </code>{' '}
+          — same API, rendered through react-native-skia.
+        </p>
       </div>
     </section>
   );
