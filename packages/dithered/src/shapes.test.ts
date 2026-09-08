@@ -1,10 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { sampleCells } from './shape';
 import { circle, diamond, heart, rozenite, shapes, square } from './shapes';
 
-function acceptAllCtx(): CanvasRenderingContext2D {
-  return { isPointInPath: vi.fn(() => true) } as unknown as CanvasRenderingContext2D;
-}
+const ACCEPT_ALL = () => true;
 
 describe('shapes', () => {
   it('exposes all five named shapes', () => {
@@ -23,9 +21,9 @@ describe('shapes', () => {
   );
 
   it.each(Object.entries(shapes))(
-    '%s samples a non-empty grid with an accept-all ctx',
+    '%s samples a non-empty grid with an accept-all hit tester',
     (_name, shape) => {
-      const cells = sampleCells(shape, 12, undefined, acceptAllCtx());
+      const cells = sampleCells(shape, 12, ACCEPT_ALL);
       expect(cells.length).toBeGreaterThan(0);
     },
   );

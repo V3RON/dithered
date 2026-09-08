@@ -1,0 +1,12 @@
+export type { Shape, Cell, HitTester } from './shape';
+export { BAYER_4, aspectOf, defaultRowsFor, sampleCells } from './shape';
+export { domHitTester } from './hit-test';
+export { hash, valueNoise, fbm } from './noise';
+export type { Brightness, DitheredOptions, PaintContext, PaintGeometry } from './core';
+export { computeGeometry, frameAt, paintFrame, resolveOptions, resolveRows } from './core';
+export type { DitheredInstance } from './renderer';
+export { createDithered } from './renderer';
+export { presets, gem, sweep, pulse, rain, wave, fill, gameOfLife } from './presets';
+export { shapes, rozenite, circle, square, diamond, heart } from './shapes';
+export { shapeFromSvg } from './svg';
+export { shapeFromSvgLite } from './svg-lite';

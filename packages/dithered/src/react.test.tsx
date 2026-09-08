@@ -3,7 +3,7 @@ import { createRef } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Dithered } from './react';
 import type { DitheredInstance } from './renderer';
-import { SQUARE_SHAPE, make2dCtx, stubAnimationGlobals } from './test-utils';
+import { SQUARE_SHAPE, make2dCtx, stubAnimationGlobals, stubGetContext } from './test-utils';
 
 vi.mock('./renderer', async () => {
   const actual = await vi.importActual<typeof import('./renderer')>('./renderer');
@@ -25,22 +25,18 @@ function lastInstance(): DitheredInstance {
 describe('Dithered', () => {
   let env: ReturnType<typeof stubAnimationGlobals>;
   let ctx: ReturnType<typeof make2dCtx>;
-  let getContextSpy: { mockRestore: () => void };
+  let getContextStub: ReturnType<typeof stubGetContext>;
 
   beforeEach(() => {
     mockedCreateDithered.mockClear();
     env = stubAnimationGlobals();
     ctx = make2dCtx();
-    getContextSpy = vi
-      .spyOn(HTMLCanvasElement.prototype, 'getContext')
-      .mockReturnValue(ctx as unknown as RenderingContext) as unknown as {
-      mockRestore: () => void;
-    };
+    getContextStub = stubGetContext(ctx);
   });
 
   afterEach(() => {
     env.restore();
-    getContextSpy.mockRestore();
+    getContextStub.restore();
   });
 
   it('renders a canvas with role="status" and an aria-label by default', () => {

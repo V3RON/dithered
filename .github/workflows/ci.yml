@@ -26,14 +26,17 @@ jobs:
       - name: Format check
         run: pnpm format:check
 
+      # Ahead of the typecheck: playground-expo consumes `dithered`
+      # through its package exports, so it typechecks against dist/ —
+      # which is exactly the published surface we want verified.
+      - name: Build
+        run: pnpm build
+
       - name: Typecheck
         run: pnpm typecheck
 
       - name: Test
         run: pnpm test
-
-      - name: Build
-        run: pnpm build
 
       - name: Build playground
         run: pnpm build:playground

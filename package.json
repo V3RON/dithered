@@ -1,91 +1,22 @@
 {
-  "name": "dithered",
-  "version": "0.1.0",
-  "description": "An animated ordered-dither renderer for SVG silhouettes, with a framework-agnostic core and an optional React wrapper.",
-  "keywords": [
-    "dither",
-    "bayer",
-    "canvas",
-    "loader",
-    "spinner",
-    "animation",
-    "react"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/V3RON/dithered"
-  },
-  "homepage": "https://v3ron.github.io/dithered/",
-  "author": "",
+  "name": "dithered-workspace",
+  "private": true,
   "type": "module",
   "license": "MIT",
-  "sideEffects": false,
   "engines": {
     "node": ">=20"
   },
   "packageManager": "pnpm@10.33.0",
-  "files": [
-    "dist"
-  ],
-  "main": "./dist/index.js",
-  "module": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    },
-    "./react": {
-      "types": "./dist/react.d.ts",
-      "import": "./dist/react.js"
-    }
-  },
-  "typesVersions": {
-    "*": {
-      "react": [
-        "dist/react.d.ts"
-      ]
-    }
-  },
   "scripts": {
-    "dev": "vite serve --config vite.playground.config.ts",
-    "build": "tsc --project tsconfig.build.json --emitDeclarationOnly && vite build",
-    "build:playground": "vite build --config vite.playground.config.ts",
-    "prepublishOnly": "pnpm build",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "dev": "pnpm --filter playground-web dev",
+    "build": "pnpm --filter dithered build",
+    "build:playground": "pnpm --filter playground-web build",
+    "typecheck": "pnpm --recursive --parallel typecheck",
+    "test": "pnpm --filter dithered test",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },
-  "peerDependencies": {
-    "react": ">=18",
-    "react-dom": ">=18"
-  },
-  "peerDependenciesMeta": {
-    "react": {
-      "optional": true
-    },
-    "react-dom": {
-      "optional": true
-    }
-  },
   "devDependencies": {
-    "@testing-library/jest-dom": "^7.0.1",
-    "@testing-library/react": "^16.3.3",
-    "@types/react": "^18.3.31",
-    "@types/react-dom": "^18.3.7",
-    "@vitejs/plugin-react": "^4.7.0",
-    "jsdom": "^25.0.1",
-    "prettier": "^3.3.3",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "typescript": "^5.6.3",
-    "vite": "^5.4.11",
-    "vitest": "^2.1.5"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "esbuild"
-    ]
+    "prettier": "^3.3.3"
   }
 }

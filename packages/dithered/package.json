@@ -1,0 +1,105 @@
+{
+  "name": "dithered",
+  "version": "0.1.0",
+  "description": "An animated ordered-dither renderer for SVG silhouettes, with a framework-agnostic core and optional React / React Native wrappers.",
+  "keywords": [
+    "dither",
+    "bayer",
+    "canvas",
+    "loader",
+    "spinner",
+    "animation",
+    "react",
+    "react-native",
+    "skia"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/V3RON/dithered",
+    "directory": "packages/dithered"
+  },
+  "homepage": "https://v3ron.github.io/dithered/",
+  "author": "",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "import": "./dist/react.js"
+    },
+    "./react-native": {
+      "types": "./dist/react-native.d.ts",
+      "import": "./dist/react-native.js"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "react": [
+        "dist/react.d.ts"
+      ],
+      "react-native": [
+        "dist/react-native.d.ts"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "tsc --project tsconfig.build.json --emitDeclarationOnly && vite build",
+    "prepublishOnly": "pnpm build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "@shopify/react-native-skia": ">=1.5",
+    "react": ">=18",
+    "react-dom": ">=18",
+    "react-native": ">=0.73",
+    "react-native-reanimated": ">=3.16"
+  },
+  "peerDependenciesMeta": {
+    "@shopify/react-native-skia": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    },
+    "react-native": {
+      "optional": true
+    },
+    "react-native-reanimated": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@shopify/react-native-skia": "^1.5.0",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react": "^4.7.0",
+    "jsdom": "^25.0.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-native": "^0.76.5",
+    "react-native-reanimated": "^3.16.7",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.5"
+  }
+}
