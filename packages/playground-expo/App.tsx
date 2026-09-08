@@ -35,6 +35,12 @@ const CUSTOM_SVG_SHAPE = shapeFromSvgLite(`<svg viewBox="0 0 100 100">
   <circle cx="76" cy="74" r="24" />
 </svg>`);
 
+// Stable so neither `<Dithered>` below re-records on every render of its
+// own slider state.
+const SPEED_BRIGHTNESS = wave();
+const SCRUB_SHAPE = heart;
+const SCRUB_BRIGHTNESS = pulse();
+
 const PRESETS: Array<{ name: string; brightness: Brightness }> = [
   { name: 'gem', brightness: gem() },
   { name: 'sweep', brightness: sweep() },
@@ -108,6 +114,8 @@ function Chip({ label, active, onPress }: { label: string; active: boolean; onPr
   );
 }
 
+const SPEED_STEPS = [-2, -1, 0.5, 1, 2, 3];
+
 export default function App() {
   const [paused, setPaused] = useState(false);
   const [progress, setProgress] = useState(0.35);
@@ -115,6 +123,8 @@ export default function App() {
   const [mix, setMix] = useState(0.5);
   const [toneCount, setToneCount] = useState<1 | 2 | 3>(1);
   const [matrix, setMatrix] = useState<Extract<DitherMatrix, string>>('bayer4');
+  const [speed, setSpeed] = useState(1);
+  const [scrub, setScrub] = useState(0);
 
   const blendTarget = BLEND_TARGETS.find((t) => t.name === blendName);
   const blended = blendTarget
@@ -266,6 +276,66 @@ export default function App() {
                     onPress={() => setMatrix(name)}
                   />
                 ))}
+              </View>
+            </View>
+          </Section>
+
+          <Section title="Playback speed">
+            <View style={{ gap: 12 }}>
+              <Tile label={`${speed.toFixed(1)}x`}>
+                <Dithered
+                  shape={rozenite}
+                  brightness={SPEED_BRIGHTNESS}
+                  size={72}
+                  fg={INK}
+                  speed={speed}
+                  label={`wave at ${speed}x`}
+                />
+              </Tile>
+              <View style={styles.chipRow}>
+                {SPEED_STEPS.map((s) => (
+                  <Chip key={s} label={`${s}x`} active={s === speed} onPress={() => setSpeed(s)} />
+                ))}
+              </View>
+            </View>
+          </Section>
+
+          <Section title="Scrub playback">
+            <View style={{ gap: 12 }}>
+              <View style={styles.row}>
+                <Tile label={`time = ${scrub.toFixed(2)}`}>
+                  <Dithered
+                    shape={SCRUB_SHAPE}
+                    brightness={SCRUB_BRIGHTNESS}
+                    size={72}
+                    fg={INK}
+                    time={scrub}
+                    label="Scrubbed preview"
+                  />
+                </Tile>
+                <Tile label="free-running">
+                  <Dithered
+                    shape={SCRUB_SHAPE}
+                    brightness={SCRUB_BRIGHTNESS}
+                    size={72}
+                    fg={INK}
+                    label="Free-running preview"
+                  />
+                </Tile>
+              </View>
+              <View style={styles.controls}>
+                <Pressable
+                  style={styles.button}
+                  onPress={() => setScrub((t) => Math.max(0, Math.round((t - 0.1) * 100) / 100))}
+                >
+                  <Text style={styles.buttonText}>Scrub -</Text>
+                </Pressable>
+                <Pressable
+                  style={styles.button}
+                  onPress={() => setScrub((t) => Math.min(0.99, Math.round((t + 0.1) * 100) / 100))}
+                >
+                  <Text style={styles.buttonText}>Scrub +</Text>
+                </Pressable>
               </View>
             </View>
           </Section>
