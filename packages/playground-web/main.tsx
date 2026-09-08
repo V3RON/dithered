@@ -182,18 +182,42 @@ const PRESET_ENTRIES = Object.entries(presets) as [
   (opts?: Record<string, unknown>) => Brightness,
 ][];
 
+// Three plain <circle> elements, not a hand-rolled <path> — deliberately
+// not one of the built-in shapes, so switching to "Custom SVG" always
+// starts from something new to look at, and doubles as a live example of
+// the basic-shape support (ADR 0010): every element here is unioned into
+// one Shape, same as a design tool's multi-object SVG export.
+const DEFAULT_CUSTOM_SVG = `<svg viewBox="0 0 100 100">
+  <circle cx="50" cy="30" r="24" />
+  <circle cx="24" cy="74" r="24" />
+  <circle cx="76" cy="74" r="24" />
+</svg>`;
+
 // Computed once at module load: every brightness instance below is a stable
-// reference, so `Dithered` never reconfigures its gallery instances.
-const GALLERY_ITEMS = SHAPE_ENTRIES.flatMap(([shapeName, shape]) =>
-  PRESET_ENTRIES.map(([presetName, factory]) => ({
-    key: `${shapeName}-${presetName}`,
-    label: `${shapeName} / ${presetName}`,
-    shapeName,
-    presetName,
-    shape,
-    brightness: factory(),
-  })),
-);
+// reference, so `Dithered` never reconfigures its gallery instances. The
+// trailing "custom" entry gives ADR 0010's basic-shape support a visible
+// example right in the gallery, not just as the "Custom (paste SVG)"
+// textarea's placeholder text.
+const GALLERY_ITEMS = [
+  ...SHAPE_ENTRIES.flatMap(([shapeName, shape]) =>
+    PRESET_ENTRIES.map(([presetName, factory]) => ({
+      key: `${shapeName}-${presetName}`,
+      label: `${shapeName} / ${presetName}`,
+      shapeName,
+      presetName,
+      shape,
+      brightness: factory(),
+    })),
+  ),
+  {
+    key: 'custom-gem',
+    label: 'custom (3 circles) / gem',
+    shapeName: 'custom',
+    presetName: 'gem',
+    shape: shapeFromSvg(DEFAULT_CUSTOM_SVG),
+    brightness: presets.gem(),
+  },
+];
 
 interface GalleryProps {
   onSelect: (shapeName: string, presetName: string) => void;
@@ -251,12 +275,6 @@ function Gallery({ onSelect }: GalleryProps) {
 
 // The named matrices, in the order the "Matrix" select offers them.
 const MATRIX_NAMES: Extract<DitherMatrix, string>[] = ['bayer2', 'bayer4', 'bayer8', 'blueNoise'];
-
-// A five-pointed star — deliberately not one of the built-in shapes, so
-// switching to "Custom SVG" always starts from something new to look at.
-const DEFAULT_CUSTOM_SVG = `<svg viewBox="0 0 100 100">
-  <path d="M50 2 L61 37 L98 37 L68 59 L79 95 L50 73 L21 95 L32 59 L2 37 L39 37 Z" />
-</svg>`;
 
 function parseCustomShape(svg: string): { shape: Shape | null; error: string | null } {
   try {
@@ -598,7 +616,9 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
                 spellCheck={false}
               />
               <p style={{ ...sectionHint, margin: '6px 0 0' }}>
-                Needs a viewBox and at least one &lt;path&gt; — the preview updates as you type.
+                Needs a viewBox and at least one shape (&lt;path&gt;, &lt;rect&gt;, &lt;circle&gt;,
+                &lt;ellipse&gt;, &lt;polygon&gt; or &lt;polyline&gt;) — the preview updates as you
+                type.
               </p>
               {svgError && <div style={errorStyle}>{svgError}</div>}
             </div>
@@ -829,6 +849,10 @@ function App() {
   const applyExample = (nextShapeKey: string, nextPresetKey: string) => {
     setShapeKey(nextShapeKey);
     setPresetKey(nextPresetKey);
+    // Reset the textarea too, so the "custom" gallery tile always shows
+    // its three-circle example rather than whatever a prior edit left in
+    // svgText — built-in shapes ignore svgText, so this is a no-op for them.
+    if (nextShapeKey === 'custom') setSvgText(DEFAULT_CUSTOM_SVG);
     setBlendKey(DEFAULTS.blendKey);
     setMix(DEFAULTS.mix);
     setPalette(DEFAULTS.palette);
