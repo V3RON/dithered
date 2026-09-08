@@ -51,6 +51,20 @@ const MIX_STEPS = [0, 0.25, 0.5, 0.75, 1];
 
 const INK = '#111111';
 const MUTED = '#6b7280';
+const ACCENT = '#8232ff';
+
+// `gem()`, not `FILL_UP`: `fill()` returns a boolean brightness, which
+// always resolves to the single brightest tone (see `paintFrame`'s
+// boolean handling) and so can never demonstrate more than one tone.
+const MULTI_TONE_BRIGHTNESS = gem();
+
+// Darkest -> brightest, one default per tone count — identical to the web
+// playground's `DEFAULT_PALETTES` (ADR 0005), accent color included.
+const TONE_PALETTES: Readonly<Record<1 | 2 | 3, readonly string[]>> = {
+  1: [ACCENT],
+  2: ['#2a1a4a', ACCENT],
+  3: ['#2a1a4a', ACCENT, '#d9c2ff'],
+};
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -83,11 +97,13 @@ export default function App() {
   const [progress, setProgress] = useState(0.35);
   const [blendName, setBlendName] = useState('none');
   const [mix, setMix] = useState(0.5);
+  const [toneCount, setToneCount] = useState<1 | 2 | 3>(1);
 
   const blendTarget = BLEND_TARGETS.find((t) => t.name === blendName);
   const blended = blendTarget
     ? compose.blend(BLEND_PRIMARY, blendTarget.brightness, mix)
     : BLEND_PRIMARY;
+  const palette = TONE_PALETTES[toneCount];
 
   return (
     <SafeAreaProvider>
@@ -183,6 +199,31 @@ export default function App() {
                   ))}
                 </View>
               )}
+            </View>
+          </Section>
+
+          <Section title="Multi-tone palette">
+            <View style={{ gap: 12 }}>
+              <Tile label={`${toneCount} tone${toneCount > 1 ? 's' : ''}`}>
+                <Dithered
+                  shape={rozenite}
+                  brightness={MULTI_TONE_BRIGHTNESS}
+                  size={72}
+                  fg={toneCount === 1 ? palette[0] : [...palette]}
+                  paused={paused}
+                  label={`rozenite, ${toneCount} tones`}
+                />
+              </Tile>
+              <View style={styles.chipRow}>
+                {([1, 2, 3] as const).map((count) => (
+                  <Chip
+                    key={count}
+                    label={`${count}`}
+                    active={count === toneCount}
+                    onPress={() => setToneCount(count)}
+                  />
+                ))}
+              </View>
             </View>
           </Section>
 
