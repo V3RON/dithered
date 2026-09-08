@@ -22,8 +22,22 @@ export interface DitheredOptions {
   frames?: number;
   /** Loop duration in ms. Default 2000. */
   period?: number;
-  /** Fill color for drawn cells. Default '#000'. */
-  fg?: string;
+  /**
+   * A single fill color, or an ordered palette of tones from darkest to
+   * brightest — a brightness value then dithers between adjacent tones
+   * instead of just on/off. See `toneLevel` for the quantization rule.
+   * `'currentColor'`, anywhere in a palette, resolves to the canvas's
+   * computed text color; web only (`dithered/react` and `createDithered`),
+   * rejected on `dithered/native`. Default '#000'.
+   *
+   * `readonly string[]` (not just `string[]`) so the exported `Palette`
+   * type — itself `readonly string[]` — can be passed straight back in,
+   * e.g. `fg={somePalette}` or `fg={['#a00', '#0a0'] as const}`. Safe
+   * because every entry point copies the array before storing it
+   * (`clonePaletteOption`/`toPalette`), so nothing here ever mutates the
+   * caller's array regardless of its mutability.
+   */
+  fg?: string | readonly string[];
   /** Background fill, or 'transparent'. Default 'transparent'. */
   bg?: string;
   /**
@@ -46,7 +60,11 @@ export interface DitheredOptions {
 
 export type ResolvedOptions = Required<DitheredOptions>;
 
-export const DEFAULTS: Omit<ResolvedOptions, 'shape' | 'brightness'> = {
+// `fg` is narrowed back to `string` here (`ResolvedOptions.fg` is `string |
+// readonly string[]`, to allow a palette) since the default is always a
+// single color — `toPalette`/`resolvePalette` in `./palette` lean on
+// `DEFAULTS.fg` being a plain `string` fallback, not a union.
+export const DEFAULTS: Omit<ResolvedOptions, 'shape' | 'brightness'> & { fg: string } = {
   size: 48,
   cols: 16,
   rows: 0, // 0 means "derive from aspect ratio" (see resolveRows)
@@ -84,8 +102,37 @@ export function assignDefined<T extends object>(base: T, patch: Partial<T>): T {
   return result;
 }
 
+/**
+ * Copies a caller-supplied `fg` array so it is never retained by
+ * reference. ADR 0005 §1 normalizes `fg` into a palette "once, at the
+ * edge" — this is that edge for a mutable `string[]`. Without it,
+ * `createDithered(canvas, { fg: callerArray, ... })` (or
+ * `instance.update({ fg: callerArray })`) followed by a later
+ * `callerArray[i] = ...` would silently change what gets painted on some
+ * future frame, with no `update()` call in sight — and whether that
+ * mutation is observed immediately, on the next reconfigure, or never
+ * would depend on whether the instance caches its sprite strip, which is
+ * exactly the kind of behavior-varies-by-unrelated-setting bug a public
+ * API shouldn't have. A `string` needs no copy: strings are immutable, so
+ * aliasing one is harmless.
+ */
+export function clonePaletteOption(
+  fg: string | readonly string[] | undefined,
+): string | string[] | undefined {
+  // `typeof`/`undefined` checks rather than `Array.isArray`: narrowing a
+  // `readonly string[]` union member through an `Array.isArray` guard
+  // doesn't eliminate it from the non-array branch (a `readonly` array
+  // isn't assignable to the mutable `any[]` the guard narrows against), so
+  // the else branch would keep the widened, un-copied type. This narrows
+  // cleanly either way.
+  return typeof fg === 'string' || fg === undefined ? fg : [...fg];
+}
+
 export function resolveOptions(options: DitheredOptions): ResolvedOptions {
-  return assignDefined(DEFAULTS as ResolvedOptions, options);
+  return assignDefined(DEFAULTS as ResolvedOptions, {
+    ...options,
+    fg: clonePaletteOption(options.fg),
+  });
 }
 
 /** The grid row count, deriving one from the shape's aspect ratio when unset. */

@@ -263,6 +263,54 @@ function parseCustomShape(svg: string): { shape: Shape | null; error: string | n
   }
 }
 
+// Darkest -> brightest, one default per tone count rather than a single
+// 3-tone array indexed by position: the accent is always present, and every
+// entry is distinct from the others *at that tone count*. Indexing a single
+// default array by position would make `DEFAULT_PALETTE[1] === ACCENT`
+// collide with the 1-tone default (also just `[ACCENT]`), producing a
+// duplicate the moment the user grew from the untouched default — see ADR
+// 0005 review round 2, finding 1.
+const DEFAULT_PALETTES: Readonly<Record<1 | 2 | 3, readonly string[]>> = {
+  1: [ACCENT],
+  2: ['#2a1a4a', ACCENT],
+  3: ['#2a1a4a', ACCENT, '#d9c2ff'],
+};
+
+/** Whether `palette` is exactly the untouched default for its own length. */
+function isDefaultPalette(palette: readonly string[]): boolean {
+  const def = DEFAULT_PALETTES[palette.length as 1 | 2 | 3] as readonly string[] | undefined;
+  return def !== undefined && palette.every((color, i) => color === def[i]);
+}
+
+/**
+ * Grows or shrinks `palette` to exactly `count` tones (1-3).
+ *
+ * - If `palette` is still the untouched default for its current length, the
+ *   whole palette switches wholesale to the default for `count` — growing
+ *   *and* shrinking. This is what makes the default 1 -> 2 -> 3 -> 2 -> 1
+ *   path show a genuinely new tone at every step and land back on the plain
+ *   accent at 1, instead of e.g. truncating 2 tones down to `['#2a1a4a']`
+ *   (losing the accent) or filling new slots positionally from a palette
+ *   anchored at a different length (the duplicate in finding 1).
+ * - Otherwise the user has edited at least one swatch, so their colors are
+ *   preserved: shrinking truncates (keeping the darker tones, since the
+ *   palette is darkest-first), and growing fills only the new slots, each
+ *   from the 3-tone default pool, skipping any candidate already present in
+ *   the palette so growing never introduces a duplicate tone.
+ */
+function resizePalette(palette: string[], count: number): string[] {
+  if (isDefaultPalette(palette)) return [...DEFAULT_PALETTES[count as 1 | 2 | 3]];
+
+  if (count <= palette.length) return palette.slice(0, count);
+
+  const next = palette.slice();
+  const pool = DEFAULT_PALETTES[3];
+  for (let i = palette.length; i < count; i++) {
+    next.push(pool.find((color) => !next.includes(color)) ?? ACCENT);
+  }
+  return next;
+}
+
 export interface PlaygroundState {
   shapeKey: string;
   setShapeKey: (key: string) => void;
@@ -272,8 +320,9 @@ export interface PlaygroundState {
   setBlendKey: (key: string) => void;
   mix: number;
   setMix: (mix: number) => void;
-  fg: string;
-  setFg: (fg: string) => void;
+  /** Darkest-first; a single entry renders (and is emitted) as a plain color, not a one-tone array. */
+  palette: string[];
+  setPalette: (palette: string[]) => void;
   cols: number;
   setCols: (cols: number) => void;
   period: number;
@@ -297,8 +346,8 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
     setBlendKey,
     mix,
     setMix,
-    fg,
-    setFg,
+    palette,
+    setPalette,
     cols,
     setCols,
     period,
@@ -320,6 +369,15 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
   const [advanced, setAdvanced] = useState(false);
 
   const isCustomShape = shapeKey === 'custom';
+
+  const setToneCount = (count: number) => setPalette(resizePalette(palette, count));
+  const setToneColor = (index: number, color: string) =>
+    setPalette(palette.map((c, i) => (i === index ? color : c)));
+  // `<Dithered>`'s `fg` and `buildSnippet`'s emitted prop both collapse a
+  // one-tone palette back to a plain string, so `fg="..."` (not
+  // `fg={['...']}`) is what a single swatch produces — matching the
+  // library's own `n === 1` fast path (see ADR 0005 §2/§3).
+  const fg = palette.length === 1 ? palette[0] : palette;
 
   // Re-parse the pasted SVG whenever it changes, but only while it's
   // actually in use — so the textarea "reacts to changes" without the user
@@ -380,7 +438,7 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
         golSeed,
         blendKey,
         mix,
-        fg,
+        palette,
         cols,
         period,
       }),
@@ -393,7 +451,7 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
       golSeed,
       blendKey,
       mix,
-      fg,
+      palette,
       cols,
       period,
     ],
@@ -476,8 +534,16 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
             </label>
 
             <label style={row}>
-              <span style={label}>Color</span>
-              <input type="color" value={fg} onChange={(e) => setFg(e.target.value)} />
+              <span style={label}>Tones</span>
+              <select
+                style={fieldStyle}
+                value={palette.length}
+                onChange={(e) => setToneCount(Number(e.target.value))}
+              >
+                <option value={1}>1 (single color)</option>
+                <option value={2}>2</option>
+                <option value={3}>3</option>
+              </select>
             </label>
           </div>
 
@@ -494,6 +560,23 @@ const Playground = forwardRef<HTMLElement, PlaygroundState>(function Playground(
               />
             </label>
           )}
+
+          <div style={row}>
+            <span style={label}>
+              {palette.length > 1 ? 'Palette (darkest → brightest)' : 'Color'}
+            </span>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {palette.map((color, i) => (
+                <input
+                  key={i}
+                  type="color"
+                  value={color}
+                  onChange={(e) => setToneColor(i, e.target.value)}
+                  aria-label={palette.length > 1 ? `Tone ${i + 1} of ${palette.length}` : 'Color'}
+                />
+              ))}
+            </div>
+          </div>
 
           {isCustomShape && (
             <div style={subCard}>
@@ -602,7 +685,7 @@ function buildSnippet(opts: {
   golSeed: number;
   blendKey: string;
   mix: number;
-  fg: string;
+  palette: string[];
   cols: number;
   period: number;
 }): string {
@@ -615,7 +698,7 @@ function buildSnippet(opts: {
     golSeed,
     blendKey,
     mix,
-    fg,
+    palette,
     cols,
     period,
   } = opts;
@@ -629,10 +712,17 @@ function buildSnippet(opts: {
     ? `compose.blend(presets.${presetKey}(${presetArgs}), presets.${blendKey}(), ${mix})`
     : `presets.${presetKey}(${presetArgs})`;
 
+  // A single tone is a plain string prop, matching the library's own
+  // `n === 1` fast path; only 2+ tones become an array literal.
+  const fgProp =
+    palette.length === 1
+      ? `fg="${palette[0]}"`
+      : `fg={[${palette.map((color) => `'${color}'`).join(', ')}]}`;
+
   const propParts = [
     `shape={${isCustomShape ? 'shape' : `shapes.${shapeKey}`}}`,
     `brightness={${brightnessExpr}}`,
-    `fg="${fg}"`,
+    fgProp,
   ];
   if (cols !== 16) propParts.push(`cols={${cols}}`);
   if (period !== 2000) propParts.push(`period={${period}}`);
@@ -684,7 +774,7 @@ const DEFAULTS = {
   presetKey: 'gem',
   blendKey: 'none',
   mix: 0.5,
-  fg: ACCENT,
+  palette: [...DEFAULT_PALETTES[1]],
   cols: 16,
   period: 2000,
   noiseAmt: 0.8,
@@ -696,7 +786,7 @@ function App() {
   const [presetKey, setPresetKey] = useState(DEFAULTS.presetKey);
   const [blendKey, setBlendKey] = useState(DEFAULTS.blendKey);
   const [mix, setMix] = useState(DEFAULTS.mix);
-  const [fg, setFg] = useState(DEFAULTS.fg);
+  const [palette, setPalette] = useState<string[]>(DEFAULTS.palette);
   const [cols, setCols] = useState(DEFAULTS.cols);
   const [period, setPeriod] = useState(DEFAULTS.period);
   const [noiseAmt, setNoiseAmt] = useState(DEFAULTS.noiseAmt);
@@ -712,7 +802,7 @@ function App() {
     setPresetKey(nextPresetKey);
     setBlendKey(DEFAULTS.blendKey);
     setMix(DEFAULTS.mix);
-    setFg(DEFAULTS.fg);
+    setPalette(DEFAULTS.palette);
     setCols(DEFAULTS.cols);
     setPeriod(DEFAULTS.period);
     setNoiseAmt(DEFAULTS.noiseAmt);
@@ -748,8 +838,8 @@ function App() {
         setBlendKey={setBlendKey}
         mix={mix}
         setMix={setMix}
-        fg={fg}
-        setFg={setFg}
+        palette={palette}
+        setPalette={setPalette}
         cols={cols}
         setCols={setCols}
         period={period}

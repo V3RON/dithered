@@ -39,22 +39,34 @@ const { SQUARE_SHAPE } = await import('../test-utils');
 import type { Cell } from '../shape';
 import type { SkCanvas } from '@shopify/react-native-skia';
 
+interface FakePaint {
+  color: string;
+}
+
 type Draw =
   { op: 'rect'; rect: FakeRect; color: string } | { op: 'rrect'; rrect: FakeRRect; color: string };
 
 function fakeCanvas() {
   const draws: Draw[] = [];
+  // Tracked separately from `draws` (rather than folded into it) so the
+  // pre-existing draw-log assertions below don't need to change shape —
+  // one paint is now cached per color rather than mutated in place, so
+  // the paint reference itself is stable for a given color, letting
+  // tests assert reuse independently of what got drawn.
+  const paints: FakePaint[] = [];
   const canvas = {
     // The paint object is mutated in place, so snapshot its color at the
     // moment of the draw call rather than holding a reference.
-    drawRect: vi.fn((rect: FakeRect, paint: { color: string }) =>
-      draws.push({ op: 'rect', rect, color: paint.color }),
-    ),
-    drawRRect: vi.fn((rrect: FakeRRect, paint: { color: string }) =>
-      draws.push({ op: 'rrect', rrect, color: paint.color }),
-    ),
+    drawRect: vi.fn((rect: FakeRect, paint: FakePaint) => {
+      draws.push({ op: 'rect', rect, color: paint.color });
+      paints.push(paint);
+    }),
+    drawRRect: vi.fn((rrect: FakeRRect, paint: FakePaint) => {
+      draws.push({ op: 'rrect', rrect, color: paint.color });
+      paints.push(paint);
+    }),
   };
-  return { canvas: canvas as unknown as SkCanvas, draws };
+  return { canvas: canvas as unknown as SkCanvas, draws, paints };
 }
 
 describe('skiaPaintContext', () => {
@@ -133,6 +145,19 @@ describe('skiaPaintContext', () => {
 
     expect(env.draws[0].color).toBe('color:#abcdef');
   });
+
+  it('creates one SkPaint per distinct color and reuses it on repeat assignments', () => {
+    const ctx = skiaPaintContext(env.canvas);
+    ctx.fillStyle = '#123456';
+    ctx.fillRect(0, 0, 1, 1);
+    ctx.fillStyle = '#abcdef';
+    ctx.fillRect(0, 0, 1, 1);
+    ctx.fillStyle = '#123456'; // switch back to a color already seen
+    ctx.fillRect(0, 0, 1, 1);
+
+    expect(env.paints[0]).not.toBe(env.paints[1]); // distinct colors
+    expect(env.paints[0]).toBe(env.paints[2]); // same color -> same paint
+  });
 });
 
 describe('paintFrame through skiaPaintContext', () => {
@@ -176,5 +201,71 @@ describe('paintFrame through skiaPaintContext', () => {
 
     expect(draws.every((d) => d.op === 'rrect')).toBe(true);
     expect(draws).toHaveLength(2);
+  });
+
+  it('paints a multi-tone palette, reusing one paint per tone across cells', () => {
+    const { canvas, draws, paints } = fakeCanvas();
+    const threeCells: Cell[] = [
+      { i: 0, j: 0, u: -0.33, v: 0, threshold: 0.5 },
+      { i: 1, j: 0, u: 0, v: 0, threshold: 0.5 },
+      { i: 2, j: 0, u: 0.33, v: 0, threshold: 0.5 },
+    ];
+    const opts = resolveOptions({
+      shape: SQUARE_SHAPE,
+      // Cells 0 and 2 land on the brightest tone; cell 1 is skipped.
+      brightness: (cell) => cell.i !== 1,
+      cols: 3,
+      bg: 'transparent',
+      fg: ['#a00', '#0a0'],
+    });
+
+    paintFrame(
+      skiaPaintContext(canvas),
+      threeCells,
+      opts.brightness,
+      0,
+      computeGeometry(opts, 30, 10),
+    );
+
+    expect(draws).toHaveLength(2);
+    expect(draws[0].color).toBe('color:#0a0');
+    expect(draws[1].color).toBe('color:#0a0');
+    // Same color across both draws -> the cached paint was reused, not
+    // re-created or mutated out from under the first draw.
+    expect(paints[0]).toBe(paints[1]);
+  });
+
+  // The test above uses boolean brightness, so every drawn cell lands on
+  // the same (brightest) tone — it can't tell a per-tone paint mix-up
+  // apart from a working implementation, since there's only one tone in
+  // play. This uses a numeric brightness ramp that puts three *different*
+  // tones in one frame, so each drawn rrect must carry its own tone's
+  // color and its own cached `SkPaint` — not, say, whatever paint was
+  // last assigned, or all three sharing one paint.
+  it('gives each of several tones in one frame its own paint and color', () => {
+    const { canvas, draws, paints } = fakeCanvas();
+    const cells: Cell[] = [
+      { i: 0, j: 0, u: -0.33, v: 0, threshold: 0.5 },
+      { i: 1, j: 0, u: 0, v: 0, threshold: 0.5 },
+      { i: 2, j: 0, u: 0.33, v: 0, threshold: 0.5 },
+    ];
+    // Same quantization table as `renderer.test.ts`'s multi-tone tests:
+    // b=0.4 -> level 1 ('#a00'), b=0.6 -> level 2 ('#0a0'), b=0.95 ->
+    // level 3 ('#00a') -- three distinct tones, one cell each.
+    const brightnessByCell = [0.4, 0.6, 0.95];
+    const opts = resolveOptions({
+      shape: SQUARE_SHAPE,
+      brightness: (cell) => brightnessByCell[cell.i],
+      cols: 3,
+      bg: 'transparent',
+      fg: ['#a00', '#0a0', '#00a'],
+    });
+
+    paintFrame(skiaPaintContext(canvas), cells, opts.brightness, 0, computeGeometry(opts, 30, 10));
+
+    expect(draws.map((d) => d.color)).toEqual(['color:#a00', 'color:#0a0', 'color:#00a']);
+    // Three distinct tones -> three distinct cached paints, each used for
+    // exactly the one draw of its own color.
+    expect(new Set(paints).size).toBe(3);
   });
 });

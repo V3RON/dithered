@@ -1,5 +1,6 @@
 import type { Cell } from '../shape';
 import type { Brightness, ResolvedOptions } from './options';
+import { toneLevel, toPalette, type Palette } from './palette';
 
 /**
  * The tiny slice of `CanvasRenderingContext2D` that painting needs.
@@ -26,7 +27,13 @@ export interface PaintGeometry {
   gap: number;
   /** Corner radius, in surface units. */
   radius: number;
-  fg: string;
+  /**
+   * A single color (unchanged), or an ordered palette from darkest to
+   * brightest — see `toPalette`/`toneLevel` in `./palette`. Widened from
+   * `string` rather than replaced so every existing hand-built geometry
+   * literal (`{ fg: '#000', ... }`) stays valid.
+   */
+  fg: string | Palette;
   bg: string;
   /** Canvas (or sprite-strip frame) width/height in surface units. */
   width: number;
@@ -64,10 +71,48 @@ export function computeGeometry(
   };
 }
 
+/** Draws one cell's rounded (or plain, if `roundRect` is unsupported) square. */
+function drawCell(
+  ctx: PaintContext,
+  cell: Cell,
+  ox: number,
+  s: number,
+  gap: number,
+  radius: number,
+): void {
+  const w = s - gap * 2;
+  const x = ox + cell.i * s + gap;
+  const y = cell.j * s + gap;
+  ctx.beginPath();
+  if (typeof ctx.roundRect === 'function') {
+    ctx.roundRect(x, y, w, w, radius);
+  } else {
+    ctx.rect(x, y, w, w);
+  }
+  ctx.fill();
+}
+
 /**
  * Paints one frame's worth of cells: an optional background fill, then a
- * rounded square (or plain rect, if `roundRect` is unsupported) per cell
- * whose brightness clears its Bayer threshold.
+ * rounded square (or plain rect) per cell whose brightness clears its
+ * Bayer threshold — or, for a multi-tone `fg`, whose quantized
+ * {@link toneLevel} is non-zero, in the color of that level's tone.
+ *
+ * `brightness` is called exactly once per cell per frame regardless of
+ * palette size — `gameOfLife` is stateful, and re-invoking it per tone
+ * would both corrupt it and cost `n` times the work. For `n > 1` this
+ * means a single pass bucketing cell indices by level, then one drawing
+ * pass per non-empty bucket, so `fillStyle` is assigned at most `n` times
+ * (plus once for `bg`). Cells keep their original relative order within a
+ * bucket; since cells tile a non-overlapping grid, that reordering across
+ * buckets can never change a pixel.
+ *
+ * A single color (`fg: string`, or a one-entry palette) instead takes the
+ * original inline loop verbatim — no `toPalette`/`toneLevel` call, no
+ * bucket array, and (for `fg: string`) no allocation at all. That keeps
+ * this case's context-call sequence byte-for-byte identical to before
+ * multi-tone palettes existed, which is what makes `fg: string` output
+ * provably unchanged (ADR 0005 §2).
  */
 export function paintFrame(
   ctx: PaintContext,
@@ -83,21 +128,40 @@ export function paintFrame(
     ctx.fillRect(ox, 0, width, height);
   }
 
-  ctx.fillStyle = fg;
+  if (typeof fg === 'string') {
+    ctx.fillStyle = fg;
+    for (const cell of cells) {
+      const b = brightness(cell, phase);
+      const draw = typeof b === 'boolean' ? b : b > cell.threshold;
+      if (draw) drawCell(ctx, cell, ox, s, gap, radius);
+    }
+    return;
+  }
+
+  const palette = toPalette(fg);
+  const tones = palette.length;
+
+  if (tones === 1) {
+    ctx.fillStyle = palette[0];
+    for (const cell of cells) {
+      const b = brightness(cell, phase);
+      const draw = typeof b === 'boolean' ? b : b > cell.threshold;
+      if (draw) drawCell(ctx, cell, ox, s, gap, radius);
+    }
+    return;
+  }
+
+  const buckets: Cell[][] = Array.from({ length: tones }, () => []);
   for (const cell of cells) {
     const b = brightness(cell, phase);
-    const draw = typeof b === 'boolean' ? b : b > cell.threshold;
-    if (!draw) continue;
+    const level = typeof b === 'boolean' ? (b ? tones : 0) : toneLevel(b, cell.threshold, tones);
+    if (level > 0) buckets[level - 1].push(cell);
+  }
 
-    const w = s - gap * 2;
-    const x = ox + cell.i * s + gap;
-    const y = cell.j * s + gap;
-    ctx.beginPath();
-    if (typeof ctx.roundRect === 'function') {
-      ctx.roundRect(x, y, w, w, radius);
-    } else {
-      ctx.rect(x, y, w, w);
-    }
-    ctx.fill();
+  for (let level = 1; level <= tones; level++) {
+    const bucket = buckets[level - 1];
+    if (bucket.length === 0) continue;
+    ctx.fillStyle = palette[level - 1];
+    for (const cell of bucket) drawCell(ctx, cell, ox, s, gap, radius);
   }
 }

@@ -1,5 +1,6 @@
 import { forwardRef, useEffect, useRef } from 'react';
 import type { CSSProperties, MutableRefObject, Ref } from 'react';
+import { hasCurrentColor, toPalette } from './core';
 import { gem } from './presets';
 import { createDithered } from './renderer';
 import type { Brightness, DitheredInstance, DitheredOptions } from './renderer';
@@ -35,6 +36,17 @@ export interface DitheredProps extends Omit<DitheredOptions, 'brightness' | 'sha
    * and the frame corresponding to `progress` is rendered directly.
    */
   progress?: number;
+  /**
+   * Populated with the underlying `DitheredInstance` on mount, and reset
+   * to `null` on unmount. This is the only way to reach the instance from
+   * `dithered/react` — `ref` keeps forwarding to the canvas element,
+   * unchanged — and it exists so `refreshColors()` is callable directly
+   * for the case the `[className, style, fg]`-independent refresh effect
+   * below doesn't cover on its own: an ambient `currentColor` change with
+   * no re-render of this component at all (see the Palettes section of
+   * the README).
+   */
+  instanceRef?: Ref<DitheredInstance | null>;
 }
 
 // Stable across renders so an un-memoized caller (the common case: nobody
@@ -49,6 +61,42 @@ function mergeRefs<T>(...refs: Array<Ref<T> | undefined>): (value: T) => void {
       else (ref as MutableRefObject<T | null>).current = value;
     }
   };
+}
+
+/** Assigns `value` to a single (possibly absent) ref, function or object form. */
+function setRef<T>(ref: Ref<T> | undefined, value: T): void {
+  if (!ref) return;
+  if (typeof ref === 'function') ref(value);
+  else (ref as MutableRefObject<T>).current = value;
+}
+
+/** A stable join of a palette's *value*, for identity-insensitive comparison. */
+function paletteKey(fg: string | readonly string[] | undefined): string | undefined {
+  return fg === undefined ? undefined : typeof fg === 'string' ? fg : fg.join(' ');
+}
+
+/**
+ * Returns `fg` unchanged in value, but keeps returning the *same
+ * reference* across renders as long as its value (not identity) is
+ * unchanged.
+ *
+ * `fg={['#a', '#b']}` is a fresh array every render for an unmemoized
+ * caller — the common case, since nobody wraps an inline palette literal
+ * in `useMemo`. Without this, every render would see a new `fg` identity
+ * and the reconfigure effect below would rebuild the sprite cache and
+ * re-record every frame on every render, palette or not.
+ */
+function useStablePalette(
+  fg: string | readonly string[] | undefined,
+): string | readonly string[] | undefined {
+  const key = paletteKey(fg);
+  const ref = useRef(fg);
+  const keyRef = useRef(key);
+  if (key !== keyRef.current) {
+    keyRef.current = key;
+    ref.current = fg;
+  }
+  return ref.current;
 }
 
 /**
@@ -69,7 +117,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     rows,
     frames,
     period,
-    fg,
+    fg: fgProp,
     bg,
     cache,
     paused = false,
@@ -81,6 +129,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     label = 'Loading',
     className,
     style,
+    instanceRef: instanceRefProp,
   },
   forwardedRef,
 ) {
@@ -88,6 +137,9 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
   const instanceRef = useRef<DitheredInstance | null>(null);
   const skipNextUpdate = useRef(true);
   const skipNextPaused = useRef(true);
+
+  // Stabilized by value, not identity — see `useStablePalette`.
+  const fg = useStablePalette(fgProp);
 
   // Mount/unmount only. Re-creating the instance on every prop change
   // would throw away its cache/animation state for no benefit — that's
@@ -113,12 +165,17 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
       initialFrame,
     });
     instanceRef.current = instance;
+    setRef(instanceRefProp, instance);
     skipNextUpdate.current = true;
     skipNextPaused.current = true;
     return () => {
       instance.destroy();
       instanceRef.current = null;
+      setRef(instanceRefProp, null);
     };
+    // `instanceRefProp` deliberately excluded, same as `forwardedRef`
+    // below: a ref changing identity between renders shouldn't tear down
+    // and recreate the instance, only mount/unmount should.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -174,6 +231,27 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     }
     if (progress === undefined) instanceRef.current?.setPaused(paused);
   }, [paused, progress]);
+
+  // Re-resolve `'currentColor'` on *every* render, not just when
+  // `className`/`style`/`fg` change. The overwhelmingly common web
+  // theming mechanism is a class toggled on some *ancestor* element — a
+  // `<div className={theme}>` wrapping `<Dithered fg="currentColor" />`
+  // — which changes none of this component's own props. Re-rendering
+  // `<Dithered>` (which the ancestor's own re-render/CSS cascade does not
+  // by itself force, but any parent state change that reaches this
+  // subtree will) is the only reliable signal available here short of a
+  // MutationObserver, which is deliberately out of scope (ADR 0005 §5).
+  // `refreshColors()` no-ops when the resolved color hasn't actually
+  // changed, so running it unconditionally on every render costs at most
+  // one `getComputedStyle` call and is never visible as a repaint when
+  // nothing changed. Still guarded on the palette actually containing the
+  // token, so a plain `fg` never pays even that cost. No dependency array
+  // — this is intentionally not a `useEffect(fn, [...])`.
+  useEffect(() => {
+    if (fg === undefined) return;
+    if (!hasCurrentColor(toPalette(fg))) return;
+    instanceRef.current?.refreshColors();
+  });
 
   // Determinate progress: pause and render the matching frame directly.
   useEffect(() => {

@@ -9,8 +9,19 @@
 export type { Shape, Cell, HitTester } from './shape';
 export { BAYER_4, aspectOf, defaultRowsFor, sampleCells } from './shape';
 export { hash, valueNoise, fbm } from './noise';
-export type { Brightness, DitheredOptions, PaintContext, PaintGeometry } from './core';
-export { computeGeometry, frameAt, paintFrame, resolveOptions, resolveRows } from './core';
+export type { Brightness, DitheredOptions, PaintContext, PaintGeometry, Palette } from './core';
+export {
+  computeGeometry,
+  frameAt,
+  paintFrame,
+  resolveOptions,
+  resolveRows,
+  CURRENT_COLOR,
+  hasCurrentColor,
+  resolvePalette,
+  toPalette,
+  toneLevel,
+} from './core';
 export { presets, gem, sweep, pulse, rain, wave, fill, gameOfLife } from './presets';
 export type { MixAmount, CellPredicate } from './compose';
 export { compose, blend, mask, timeScale, reverse, offset, invert, clamp } from './compose';
