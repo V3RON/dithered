@@ -91,7 +91,13 @@ export default function App() {
           <Section title="Shapes">
             {SHAPES.map(({ name, shape }) => (
               <Tile key={name} label={name}>
-                <Dithered shape={shape} size={56} fg={INK} paused={paused} label={`${name} loader`} />
+                <Dithered
+                  shape={shape}
+                  size={56}
+                  fg={INK}
+                  paused={paused}
+                  label={`${name} loader`}
+                />
               </Tile>
             ))}
           </Section>

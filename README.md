@@ -6,11 +6,11 @@
 
 The library is a platform-free core plus thin per-platform renderers, in three entry points:
 
-| Entry                    | Renders with                 | Needs                                                                            |
-| ------------------------ | ----------------------------- | --------------------------------------------------------------------------------- |
-| `dithered`               | canvas 2D                    | nothing                                                                          |
-| `dithered/react`         | canvas 2D, in a `<canvas>`   | `react`, `react-dom`                                                             |
-| `dithered/react-native`  | `@shopify/react-native-skia` | `react`, `react-native`, `@shopify/react-native-skia`, `react-native-reanimated` |
+| Entry                   | Renders with                 | Needs                                                                            |
+| ----------------------- | ---------------------------- | -------------------------------------------------------------------------------- |
+| `dithered`              | canvas 2D                    | nothing                                                                          |
+| `dithered/react`        | canvas 2D, in a `<canvas>`   | `react`, `react-dom`                                                             |
+| `dithered/react-native` | `@shopify/react-native-skia` | `react`, `react-native`, `@shopify/react-native-skia`, `react-native-reanimated` |
 
 `dithered/react` and `dithered/react-native` each re-export the entire `dithered` core (shapes, presets, `sampleCells`, etc.) alongside their `Dithered` component, so a React or React Native app never needs a second import from plain `dithered`.
 
