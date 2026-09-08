@@ -5,6 +5,9 @@ import { resolveMatrix, thresholdFor, type DitherMatrix } from './matrix';
 export { BAYER_4 } from './matrix';
 export type { DitherMatrix } from './matrix';
 
+/** SVG's two fill algorithms — see `<Shape>.fillRule`. */
+export type FillRule = 'nonzero' | 'evenodd';
+
 /**
  * A silhouette shape: an SVG path `d` string plus the viewBox it was
  * authored in. Cells are sampled in viewBox units, then interpreted in
@@ -13,6 +16,13 @@ export type { DitherMatrix } from './matrix';
 export interface Shape {
   path: string;
   viewBox: { x: number; y: number; width: number; height: number };
+  /**
+   * SVG's `fill-rule`, resolved from the source document. Omitted (rather
+   * than defaulting to `'nonzero'`) when every contributing element used
+   * the default rule, so existing `Shape` values and snapshots — which
+   * predate this field — still compare equal.
+   */
+  fillRule?: FillRule;
 }
 
 /** One sampled grid cell inside a shape's silhouette. */

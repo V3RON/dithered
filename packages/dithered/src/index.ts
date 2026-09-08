@@ -1,4 +1,4 @@
-export type { Shape, Cell, HitTester } from './shape';
+export type { Shape, Cell, FillRule, HitTester } from './shape';
 export { BAYER_4, aspectOf, defaultRowsFor, sampleCells } from './shape';
 export { domHitTester } from './hit-test';
 export { hash, valueNoise, fbm } from './noise';
@@ -24,6 +24,8 @@ export {
   resolveMatrix,
   thresholdFor,
 } from './matrix';
+export type { PathSegment } from './core';
+export { arcToCubics, parsePath, serializePath, toAbsolute, transformSegments } from './core';
 export type { DitheredInstance } from './renderer';
 export { createDithered } from './renderer';
 export { presets, gem, sweep, pulse, rain, wave, fill, gameOfLife } from './presets';

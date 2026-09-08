@@ -4,6 +4,9 @@ const makeFromSVGString = vi.fn();
 
 vi.mock('@shopify/react-native-skia', () => ({
   Skia: { Path: { MakeFromSVGString: (d: string) => makeFromSVGString(d) } },
+  // Real values matter here (only for readability/debugging) — skiaHitTester
+  // only ever compares shape.fillRule, never this enum, against 'evenodd'.
+  FillType: { Winding: 0, EvenOdd: 1 },
 }));
 
 const { skiaHitTester } = await import('./hit-test');
@@ -38,5 +41,24 @@ describe('skiaHitTester', () => {
     expect(() => skiaHitTester({ ...SQUARE_SHAPE, path: 'not a path' })).toThrow(
       /could not parse/i,
     );
+  });
+
+  it('leaves the default fill type alone when the shape does not specify one', () => {
+    const setFillType = vi.fn();
+    makeFromSVGString.mockReturnValueOnce({ contains: () => true, setFillType });
+
+    skiaHitTester(SQUARE_SHAPE);
+
+    expect(setFillType).not.toHaveBeenCalled();
+  });
+
+  it('sets FillType.EvenOdd when the shape asks for the evenodd fill rule', async () => {
+    const { FillType } = await import('@shopify/react-native-skia');
+    const setFillType = vi.fn();
+    makeFromSVGString.mockReturnValueOnce({ contains: () => true, setFillType });
+
+    skiaHitTester({ ...SQUARE_SHAPE, fillRule: 'evenodd' });
+
+    expect(setFillType).toHaveBeenCalledWith(FillType.EvenOdd);
   });
 });

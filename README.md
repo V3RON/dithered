@@ -108,27 +108,39 @@ import { shapes } from 'dithered';
 createDithered(canvas, { shape: shapes.heart, brightness: presets.pulse() });
 ```
 
-Build a `Shape` from your own SVG with `shapeFromSvg`, which reads the root `viewBox` and concatenates every `<path>` descendant's `d` attribute (only `<path>` elements are supported):
+Build a `Shape` from your own SVG with `shapeFromSvg`, which reads the root `viewBox` and walks the document collecting geometry in document order:
 
 ```ts
 import { shapeFromSvg } from 'dithered';
 
 const shape = shapeFromSvg(`
   <svg viewBox="0 0 100 100">
-    <path d="M10 10 H90 V90 H10 Z" />
+    <g transform="translate(50 50) rotate(15)">
+      <rect x="-30" y="-30" width="60" height="60" rx="8" />
+    </g>
   </svg>
 `);
 ```
 
-`shapeFromSvg` uses `DOMParser`, so it is web-only. `shapeFromSvgLite` is the same contract implemented by scanning the source text, and is exported from both `dithered` and `dithered/react-native`:
+Supported geometry: `<path>` (its `d` verbatim), `<rect>` (including `rx`/`ry`), `<circle>`, `<ellipse>`, `<polygon>` and `<polyline>` — each converted to path data and concatenated, exactly as `<path>` values are today. `<line>` is accepted but contributes nothing (zero area). `transform` on an element or an ancestor `<g>` (`translate`, `scale`, `rotate`, `matrix`, `skewX`/`skewY`, composed left to right as SVG specifies) is baked into that element's coordinates, so nested groups from Figma/Illustrator exports work as expected.
+
+A few things are skipped rather than drawn: `<defs>`, `<clipPath>`, `<mask>`, `<symbol>`, `<pattern>`, `<marker>` and similar non-rendered containers; anything under `display="none"`; and any geometry whose resolved `fill` is `none` with no `stroke` (Figma's `<svg fill="none">` + per-path `fill` is handled correctly — the root's `fill="none"` doesn't shadow a path that sets its own). A shape with `fill="none"` and a `stroke` still contributes its _fill_ area, since stroke outlines are out of scope — see the ADR below for the reasoning.
+
+`fill-rule="evenodd"` is honored: `shape.fillRule` is set to `'evenodd'` when every contributing element agrees on it, and left `undefined` for the (default) `nonzero` case, so existing `Shape` values are unaffected. A document that mixes both rules throws, since one `Shape` can't represent both — split the file or normalize `fill-rule` in your editor.
+
+`<use>`, `<text>` and `<image>` are not supported; a document containing only those throws a specific error telling you to expand symbols and convert text to outlines before re-exporting. See [ADR 0010](packages/dithered/docs/adrs/0010-wider-svg-input.md) for the full design.
+
+**Known limitation:** every element's geometry is concatenated into one path string, so elements that overlap and rely on being filled _independently_ — a real SVG renderer always paints each element's own area solid, regardless of what's under it — will instead show a hole where they overlap, because the merged path's winding cancels there. If your SVG relies on this (two shapes touching or overlapping, each meant to render solid), union them into one shape in your editor before exporting.
+
+`shapeFromSvg` uses `DOMParser`, so it is web-only. `shapeFromSvgLite` is the same contract implemented by scanning the source text into a tree rather than parsing it, and is exported from both `dithered` and `dithered/react-native`:
 
 ```ts
 import { shapeFromSvgLite } from 'dithered/react-native';
 ```
 
-It handles well-formed SVG as design tools emit it — comments and CDATA are skipped, attributes may be single- or double-quoted — but it is not an XML parser: entity references are not expanded, and a `>` inside an attribute value will confuse it. On the web, prefer `shapeFromSvg`.
+It handles well-formed SVG as design tools emit it — comments and CDATA are skipped, attributes may be single- or double-quoted, tag names are matched case-insensitively, numeric and predefined character references are expanded — but it is not an XML parser: an undefined named entity is left as written, there's no DTD or validation, and a `>` inside an attribute value will confuse it. On the web, prefer `shapeFromSvg`.
 
-A `Shape` is plain data (`{ path, viewBox }`), so the other option is to convert once at build time and commit the result — which is all `shapes.ts` is:
+A `Shape` is plain data (`{ path, viewBox, fillRule? }`), so the other option is to convert once at build time and commit the result — which is all `shapes.ts` is:
 
 ```ts
 // scripts/shapes.mjs, run in Node

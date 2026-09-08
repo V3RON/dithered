@@ -67,4 +67,16 @@ describe('domHitTester', () => {
       restore();
     }
   });
+
+  it('defaults to the nonzero fill rule when the shape does not specify one', () => {
+    const ctx = fakeContext(() => true);
+    domHitTester(SQUARE, ctx)(1, 1);
+    expect(ctx.isPointInPath).toHaveBeenCalledWith(expect.anything(), 1, 1, 'nonzero');
+  });
+
+  it("forwards the shape's fillRule to isPointInPath", () => {
+    const ctx = fakeContext(() => true);
+    domHitTester({ ...SQUARE, fillRule: 'evenodd' }, ctx)(1, 1);
+    expect(ctx.isPointInPath).toHaveBeenCalledWith(expect.anything(), 1, 1, 'evenodd');
+  });
 });

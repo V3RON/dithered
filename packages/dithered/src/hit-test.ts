@@ -11,7 +11,8 @@ import type { HitTester, Shape } from './shape';
 export function domHitTester(shape: Shape, ctx?: CanvasRenderingContext2D): HitTester {
   const context = ctx ?? createScratchContext();
   const path = new Path2D(shape.path);
-  return (x, y) => context.isPointInPath(path, x, y);
+  const fillRule = shape.fillRule ?? 'nonzero';
+  return (x, y) => context.isPointInPath(path, x, y, fillRule);
 }
 
 function createScratchContext(): CanvasRenderingContext2D {

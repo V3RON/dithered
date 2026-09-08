@@ -13,6 +13,7 @@ import {
   pulse,
   rain,
   rozenite,
+  shapeFromSvgLite,
   sweep,
   wave,
   type Brightness,
@@ -23,6 +24,16 @@ import {
 // Built once at module scope: `<Dithered>` re-records every frame when
 // `brightness` or `shape` changes identity, so these must be stable.
 const FILL_UP = fill();
+
+// Three plain <circle> elements, parsed with `shapeFromSvgLite` (the
+// native counterpart to the web playground's `shapeFromSvg`) — a live
+// example of the basic-shape support (ADR 0010): every element here is
+// unioned into one Shape, same as a design tool's multi-object SVG export.
+const CUSTOM_SVG_SHAPE = shapeFromSvgLite(`<svg viewBox="0 0 100 100">
+  <circle cx="50" cy="30" r="24" />
+  <circle cx="24" cy="74" r="24" />
+  <circle cx="76" cy="74" r="24" />
+</svg>`);
 
 const PRESETS: Array<{ name: string; brightness: Brightness }> = [
   { name: 'gem', brightness: gem() },
@@ -38,6 +49,7 @@ const SHAPES: Array<{ name: string; shape: Shape }> = [
   { name: 'circle', shape: circle },
   { name: 'diamond', shape: diamond },
   { name: 'heart', shape: heart },
+  { name: 'custom (3 circles)', shape: CUSTOM_SVG_SHAPE },
 ];
 
 // Module-level, stable across renders — same reasoning as `FILL_UP` above.
