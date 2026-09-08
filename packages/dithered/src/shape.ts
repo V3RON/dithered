@@ -1,4 +1,5 @@
 import { resolveMatrix, thresholdFor, type DitherMatrix } from './matrix';
+import { jsHitTester } from './core/path-hit-test';
 
 // Re-exported so existing deep imports of `BAYER_4` from `shape.ts` keep
 // working now that the matrices live in `matrix.ts`.
@@ -73,6 +74,10 @@ export function defaultRowsFor(shape: Shape, cols: number): number {
  * Samples a `cols` x `rows` grid of cell centres over `shape`'s viewBox,
  * keeping only the cells whose centre `hitTest` accepts.
  *
+ * `hitTest` defaults to `jsHitTester(shape)` — pure JS, so this runs
+ * without a DOM or Skia. Pass `domHitTester`/`skiaHitTester` explicitly
+ * to sample against canvas/Skia rasterization instead.
+ *
  * `rows` defaults to a value that keeps cells roughly square given the
  * shape's aspect ratio. `matrix` picks the ordered-dither threshold
  * pattern tiled across the grid (default `'bayer4'`) — resolved once up
@@ -81,7 +86,7 @@ export function defaultRowsFor(shape: Shape, cols: number): number {
 export function sampleCells(
   shape: Shape,
   cols: number,
-  hitTest: HitTester,
+  hitTest: HitTester = jsHitTester(shape),
   rows: number = defaultRowsFor(shape, cols),
   matrix: DitherMatrix = 'bayer4',
 ): Cell[] {

@@ -16,7 +16,6 @@ import {
   type Palette,
   type ResolvedOptions,
 } from './core';
-import { domHitTester } from './hit-test';
 import { sampleCells, type Cell } from './shape';
 
 // Re-exported so `dithered`'s public surface (and the deep import
@@ -43,6 +42,11 @@ export interface DitheredInstance {
   refreshColors(): void;
   /** Stops the loop and releases all listeners/observers. */
   destroy(): void;
+}
+
+/** Wraps a frame index into `[0, count)`, matching `wrapFrame`'s semantics in `core/static.ts`. */
+function wrapFrame(frame: number, count: number): number {
+  return ((Math.round(frame) % count) + count) % count;
 }
 
 function prefersReducedMotion(opts: ResolvedOptions): boolean {
@@ -84,8 +88,23 @@ export function createDithered(
   let paintOpts: ResolvedOptions = opts;
   let reduced = prefersReducedMotion(opts);
 
+  // `W`/`H` are the backing store's *integer* pixel dimensions — what
+  // `canvas.width`/`height`, the sprite strip, and `drawImage` need.
+  // `cssW`/`cssH` are the CSS-pixel size `canvas.style` is set to. The
+  // context is given a device transform, `setTransform(W / cssW, 0, 0,
+  // H / cssH, 0, 0)` — the browser's own two independent stretch
+  // factors — and everything is then painted in CSS pixels, through
+  // `computeGeometry(opts, cssW, cssH)`: the identical call
+  // `renderToSvg` makes. There is no correction factor left to get
+  // wrong on either axis; the backing store's rounding of `W`/`H` still
+  // resamples the result by a fraction of a device pixel, but that is
+  // rasterization, not geometry. See the ADR's "the canvas must paint
+  // in CSS pixels under a device transform" section.
   let W = 0;
   let H = 0;
+  let cssW = 0;
+  let cssH = 0;
+  let dpr = 1;
   let cells: Cell[] = [];
   let sheet: HTMLCanvasElement | null = null;
 
@@ -136,18 +155,28 @@ export function createDithered(
   function buildCache(): void {
     const useCache = opts.cache === 'auto' ? opts.size <= 120 : opts.cache;
     if (useCache) {
+      // `W / cssW`, not `dpr`: that is the factor the browser actually
+      // stretches the backing store by when painting it into the CSS
+      // box, so geometry matches `renderToSvg`'s CSS-pixel geometry
+      // exactly (up to the half-device-pixel `W`/`H` rounding can
+      // introduce) — see the field comments above.
       const strip = document.createElement('canvas');
       strip.width = W * opts.frames;
       strip.height = H;
       const sctx = strip.getContext('2d');
       if (sctx) {
+        // One frame per `W`-wide device-pixel slot, painted in CSS
+        // pixels under the same device transform `blit` uses for the
+        // direct-paint path — `ox = f * cssW` lands each frame flush
+        // against `f * W` in the backing store.
+        sctx.setTransform(W / cssW, 0, 0, H / cssH, 0, 0);
         for (let f = 0; f < opts.frames; f++) {
           paintFrame(
             sctx,
             cells,
             opts.brightness,
             f / opts.frames,
-            computeGeometry(paintOpts, W, H, f * W),
+            computeGeometry(paintOpts, cssW, cssH, f * cssW),
           );
         }
         sheet = strip;
@@ -160,11 +189,10 @@ export function createDithered(
   }
 
   function configure(): void {
-    const dpr = Math.min((typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1, 3);
+    const newDpr = Math.min((typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1, 3);
     const css = surfaceSize(opts);
-    const device = surfaceSize(opts, dpr);
-    const newW = Math.round(device.width);
-    const newH = Math.round(device.height);
+    const newW = Math.round(css.width * newDpr);
+    const newH = Math.round(css.height * newDpr);
 
     // Sample first, before touching the canvas or any module state: an
     // invalid `matrix` (or any other bad option) throws here, and
@@ -178,7 +206,7 @@ export function createDithered(
     const newCells = sampleCells(
       opts.shape,
       opts.cols,
-      domHitTester(opts.shape, ctx),
+      opts.hitTest,
       resolveRows(opts),
       opts.matrix,
     );
@@ -188,6 +216,12 @@ export function createDithered(
     canvas.style.height = css.height + 'px';
     W = canvas.width = newW;
     H = canvas.height = newH;
+    // `cssW`/`cssH`/`dpr` — see the field comments above — kept in sync
+    // with `W`/`H` here so a later `buildCache()`/`blit()` (which read
+    // them via closure) always sees this same configure()'s values.
+    cssW = css.width;
+    cssH = css.height;
+    dpr = newDpr;
     cells = newCells;
 
     buildCache();
@@ -196,14 +230,24 @@ export function createDithered(
   }
 
   function blit(f: number): void {
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, W, H);
+    const frame = wrapFrame(f, opts.frames);
+    ctx.setTransform(W / cssW, 0, 0, H / cssH, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
     if (sheet) {
-      ctx.drawImage(sheet, f * W, 0, W, H, 0, 0, W, H);
+      // The strip's slots are `W` (device pixels) wide, so the blit
+      // itself runs under the identity transform in device units.
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.drawImage(sheet, frame * W, 0, W, H, 0, 0, W, H);
     } else {
-      paintFrame(ctx, cells, opts.brightness, f / opts.frames, computeGeometry(paintOpts, W, H));
+      paintFrame(
+        ctx,
+        cells,
+        opts.brightness,
+        frame / opts.frames,
+        computeGeometry(paintOpts, cssW, cssH),
+      );
     }
-    currentFrame = f;
+    currentFrame = frame;
   }
 
   function schedule(): void {
@@ -294,6 +338,9 @@ export function createDithered(
       const prevCanvasHeight = canvas.height;
       const prevW = W;
       const prevH = H;
+      const prevCssW = cssW;
+      const prevCssH = cssH;
+      const prevDpr = dpr;
       const prevCells = cells;
       const prevSheet = sheet;
       const prevCurrentFrame = currentFrame;
@@ -323,6 +370,9 @@ export function createDithered(
         if (canvas.height !== prevCanvasHeight) canvas.height = prevCanvasHeight;
         W = prevW;
         H = prevH;
+        cssW = prevCssW;
+        cssH = prevCssH;
+        dpr = prevDpr;
         cells = prevCells;
         sheet = prevSheet;
         currentFrame = prevCurrentFrame;

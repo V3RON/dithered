@@ -1,4 +1,4 @@
-import { aspectOf, defaultRowsFor, type Cell, type Shape } from '../shape';
+import { aspectOf, defaultRowsFor, type Cell, type HitTester, type Shape } from '../shape';
 import type { DitherMatrix } from '../matrix';
 
 /**
@@ -65,15 +65,31 @@ export interface DitheredOptions {
   respectReducedMotion?: boolean;
   /** Frame drawn synchronously on create, so there is no blank flash. Default 0. */
   initialFrame?: number;
+  /**
+   * Point-in-path test used to sample cells. Defaults to `jsHitTester`
+   * (see `sampleCells`); pass `domHitTester`/`skiaHitTester` to opt into
+   * canvas/Skia rasterization instead.
+   */
+  hitTest?: HitTester;
 }
 
-export type ResolvedOptions = Required<DitheredOptions>;
+// `hitTest` is deliberately excluded from the `Required<...>` half: unlike
+// every other option it has no single resolved default value to assign —
+// `sampleCells`'s own default (`jsHitTester(shape)`) needs the *resolved*
+// shape, so it stays optional here and is applied at the sampling call
+// site instead.
+export type ResolvedOptions = Required<Omit<DitheredOptions, 'hitTest'>> & {
+  hitTest?: HitTester;
+};
 
 // `fg` is narrowed back to `string` here (`ResolvedOptions.fg` is `string |
 // readonly string[]`, to allow a palette) since the default is always a
 // single color — `toPalette`/`resolvePalette` in `./palette` lean on
-// `DEFAULTS.fg` being a plain `string` fallback, not a union.
-export const DEFAULTS: Omit<ResolvedOptions, 'shape' | 'brightness'> & { fg: string } = {
+// `DEFAULTS.fg` being a plain `string` fallback, not a union. `hitTest` is
+// excluded too — see the comment on `ResolvedOptions` above.
+export const DEFAULTS: Omit<ResolvedOptions, 'shape' | 'brightness' | 'hitTest'> & {
+  fg: string;
+} = {
   size: 48,
   cols: 16,
   rows: 0, // 0 means "derive from aspect ratio" (see resolveRows)

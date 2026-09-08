@@ -1,6 +1,8 @@
 import { render, screen } from '@testing-library/react';
 import { createRef } from 'react';
+import { renderToString } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { renderToSvg } from './core';
 import { Dithered } from './react';
 import type { DitheredInstance } from './renderer';
 import type { Palette } from './core';
@@ -340,5 +342,102 @@ describe('Dithered', () => {
       expect.anything(),
       expect.objectContaining({ fg: palette }),
     );
+  });
+});
+
+describe('Dithered SSR fallback', () => {
+  let env: ReturnType<typeof stubAnimationGlobals>;
+  let getContextStub: ReturnType<typeof stubGetContext>;
+
+  beforeEach(() => {
+    mockedCreateDithered.mockClear();
+    env = stubAnimationGlobals();
+    getContextStub = stubGetContext(make2dCtx());
+  });
+
+  afterEach(() => {
+    env.restore();
+    getContextStub.restore();
+  });
+
+  it('renderToString includes a non-blank background-image data URL fallback', () => {
+    const html = renderToString(<Dithered shape={SQUARE_SHAPE} brightness={() => true} />);
+
+    expect(html).toContain('<canvas');
+    const match = html.match(/background-image:\s*url\((data:image\/svg\+xml;utf8,[^)]*)\)/);
+    expect(match).not.toBeNull();
+
+    // A regression that rendered a well-formed but empty `<svg
+    // …></svg>` — the exact "blank SSR canvas" this fallback exists to
+    // prevent — would satisfy the prefix-only check this replaces;
+    // decode the payload and require actual drawn cells.
+    const dataUrl = match![1];
+    const svg = decodeURIComponent(dataUrl.slice('data:image/svg+xml;utf8,'.length));
+    const rectCount = (svg.match(/<rect\b/g) ?? []).length;
+    expect(rectCount).toBeGreaterThan(0);
+  });
+
+  it('SSR fallback honours `progress`, rendering the frame the mount effect will actually paint', () => {
+    // Frame-varying, unlike the `() => true` used elsewhere in this file:
+    // with every cell drawn on every frame, frame 0 and frame 42's SVGs
+    // would be identical regardless of which frame the fallback picks,
+    // and this test would not be able to tell `initialFrame` (the pre-fix
+    // behaviour) apart from the correct frame.
+    const brightness = (cell: { u: number }, t: number) => cell.u < t - 0.5;
+    const html = renderToString(
+      <Dithered shape={SQUARE_SHAPE} brightness={brightness} progress={0.9} />,
+    );
+    const match = html.match(/background-image:\s*url\((data:image\/svg\+xml;utf8,[^)]*)\)/);
+    expect(match).not.toBeNull();
+    const svg = decodeURIComponent(match![1].slice('data:image/svg+xml;utf8,'.length));
+
+    // round(0.9 * (48 - 1)) = round(42.3) = 42 — the frame the
+    // determinate-progress mount effect paints via `instance.renderFrame`
+    // (see the `progress={0.5}` test above for the same arithmetic).
+    const expectedFrame42 = renderToSvg({ shape: SQUARE_SHAPE, brightness, frame: 42 });
+    expect(svg).toBe(expectedFrame42);
+
+    // Falling back to `initialFrame` (0) instead — the pre-fix behaviour
+    // — would render this SVG, which must differ from the one above.
+    const frame0 = renderToSvg({ shape: SQUARE_SHAPE, brightness, frame: 0 });
+    expect(svg).not.toBe(frame0);
+  });
+
+  it('ssrFallback={false} omits the background-image', () => {
+    const html = renderToString(
+      <Dithered shape={SQUARE_SHAPE} brightness={() => true} ssrFallback={false} />,
+    );
+
+    expect(html).not.toContain('background-image');
+  });
+
+  it('the background-image is gone once the component has mounted', () => {
+    render(<Dithered shape={SQUARE_SHAPE} brightness={() => true} />);
+    const canvas = document.querySelector('canvas')!;
+
+    expect(canvas.style.backgroundImage).toBe('');
+  });
+
+  it('hydrating the server-rendered markup logs no hydration mismatch warning', () => {
+    const html = renderToString(<Dithered shape={SQUARE_SHAPE} brightness={() => true} />);
+    const container = document.createElement('div');
+    container.innerHTML = html;
+    document.body.appendChild(container);
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      // RTL's `hydrate` option drives `hydrateRoot` wrapped in `act()`, so
+      // passive effects (the mount effect that clears the fallback) flush
+      // synchronously within this test rather than after teardown.
+      render(<Dithered shape={SQUARE_SHAPE} brightness={() => true} />, {
+        container,
+        hydrate: true,
+      });
+      const messages = errorSpy.mock.calls.map((args) => String(args[0]));
+      expect(messages.filter((m) => /did not match|hydrat/i.test(m))).toEqual([]);
+    } finally {
+      errorSpy.mockRestore();
+      container.remove();
+    }
   });
 });

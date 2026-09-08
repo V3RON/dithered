@@ -86,6 +86,7 @@ export function Dithered({
   respectReducedMotion = true,
   progress,
   cells,
+  hitTest,
   label = 'Loading',
   style,
 }: DitheredProps) {
@@ -102,6 +103,7 @@ export function Dithered({
     gap,
     radius,
     cells,
+    hitTest,
   });
   const frameCount = pictures.length;
 

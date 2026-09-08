@@ -26,6 +26,8 @@ export {
 } from './matrix';
 export type { PathSegment } from './core';
 export { arcToCubics, parsePath, serializePath, toAbsolute, transformSegments } from './core';
+export type { RenderToSvgOptions, SvgPaintContext } from './core';
+export { jsHitTester, renderToDataURL, renderToSvg, svgPaintContext } from './core';
 export type { DitheredInstance } from './renderer';
 export { createDithered } from './renderer';
 export { presets, gem, sweep, pulse, rain, wave, fill, gameOfLife } from './presets';

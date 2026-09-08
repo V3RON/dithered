@@ -51,7 +51,15 @@ export function frameAt(nowMs: number, period: number, frames: number): number {
   return Math.floor((phase / period) * frames) % frames;
 }
 
-/** Derives the per-cell drawing geometry for a surface of `width` x `height`. */
+/**
+ * Derives the per-cell drawing geometry for a surface of `width` x
+ * `height`, in CSS pixels on web and dp on native — the one unit every
+ * caller now passes. `createDithered` reaches this through a device
+ * transform rather than by scaling its arguments, so a coordinate
+ * computed here needs no further correction to match `renderToSvg`'s.
+ * The 0.6 minimum gap is therefore unambiguously 0.6 of that unit,
+ * meaning the same physical size on every display.
+ */
 export function computeGeometry(
   opts: ResolvedOptions,
   width: number,

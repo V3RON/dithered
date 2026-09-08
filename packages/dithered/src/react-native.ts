@@ -33,6 +33,8 @@ export {
 } from './matrix';
 export type { PathSegment } from './core';
 export { arcToCubics, parsePath, serializePath, toAbsolute, transformSegments } from './core';
+export type { RenderToSvgOptions, SvgPaintContext } from './core';
+export { jsHitTester, renderToDataURL, renderToSvg, svgPaintContext } from './core';
 export { presets, gem, sweep, pulse, rain, wave, fill, gameOfLife } from './presets';
 export type { MixAmount, CellPredicate } from './compose';
 export { compose, blend, mask, timeScale, reverse, offset, invert, clamp } from './compose';

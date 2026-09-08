@@ -35,3 +35,15 @@ export type { AttrGetter } from './svg-shapes';
 export { basicShapeToPath } from './svg-shapes';
 export type { SvgNode } from './svg-tree';
 export { collectGeometry } from './svg-tree';
+// `Point`/`PathCommand`/`arcToCubics`/`parsePath`/`flattenPath`/`pathToPolygons`/
+// `DEFAULT_TOLERANCE_DIVISOR` from `./path-geometry` are deliberately not
+// re-exported here: `arcToCubics`/`parsePath` would collide with the
+// same-named, differently-shaped exports from `./path` above. Nothing in
+// the README documents these as public API (only `jsHitTester` is), so
+// they stay internal to `path-hit-test.ts`/`static.ts`.
+export type { JsHitTesterOptions } from './path-hit-test';
+export { jsHitTester, pointInPolygons } from './path-hit-test';
+export type { SvgPaintContext } from './svg-paint';
+export { escapeXml, formatNumber, svgPaintContext } from './svg-paint';
+export type { RenderToSvgOptions } from './static';
+export { renderToDataURL, renderToSvg } from './static';

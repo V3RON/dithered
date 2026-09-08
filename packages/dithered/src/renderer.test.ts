@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDithered, frameAt, paintFrame, type DitheredOptions } from './renderer';
-import type { Cell } from './shape';
+import { computeGeometry, resolveOptions, resolveRows } from './core';
+import { sampleCells, type Cell } from './shape';
+import { shapes } from './shapes';
 import {
   SQUARE_SHAPE,
   make2dCtx,
@@ -475,6 +477,102 @@ describe('createDithered', () => {
     ctx.clearRect.mockClear();
     instance.renderFrame(3);
     expect(ctx.clearRect).toHaveBeenCalledTimes(1);
+  });
+
+  // ADR item 13: `blit` re-establishes the device transform (not the
+  // identity) before painting, clears in CSS units, and paints through
+  // `computeGeometry(opts, cssW, cssH)` — the identical call `renderToSvg`
+  // makes — rather than a scaled copy of device-pixel geometry. Assert the
+  // transform/clear calls directly, and that the coordinates `paintFrame`
+  // receives equal `computeGeometry(opts, cssW, cssH)`'s own math exactly,
+  // not up to a correction factor.
+  it('paints under the device transform, clears in CSS units, and matches computeGeometry(opts, cssW, cssH) exactly', () => {
+    const options = baseOptions({ shape: shapes.rozenite, size: 48, cols: 16 });
+    vi.stubGlobal('devicePixelRatio', 2.75);
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, options);
+    ctx.setTransform.mockClear();
+    ctx.clearRect.mockClear();
+    ctx.rect.mockClear();
+    instance.renderFrame(0);
+
+    const cssW = parseFloat(canvas.style.width as string);
+    const cssH = parseFloat(canvas.style.height as string);
+    const W = canvas.width;
+    const H = canvas.height;
+
+    expect(ctx.setTransform).toHaveBeenCalledWith(W / cssW, 0, 0, H / cssH, 0, 0);
+    expect(ctx.clearRect).toHaveBeenCalledWith(0, 0, cssW, cssH);
+
+    const opts = resolveOptions(options);
+    const geometry = computeGeometry(opts, cssW, cssH);
+    const cells = sampleCells(opts.shape, opts.cols, opts.hitTest, resolveRows(opts));
+    const expectedRects = cells.map((cell) => {
+      const w = geometry.cellSize - geometry.gap * 2;
+      const x = cell.i * geometry.cellSize + geometry.gap;
+      const y = cell.j * geometry.cellSize + geometry.gap;
+      return [x, y, w, w];
+    });
+    expect(ctx.rect.mock.calls).toEqual(expectedRects);
+  });
+
+  // Regression: `blit` used to index the sprite strip/paint phase with the
+  // raw frame number, unlike `core/static.ts`'s `wrapFrame` and
+  // `native/Dithered.tsx`'s local copy of it. An out-of-range
+  // `initialFrame` (or `renderFrame` argument) therefore disagreed with
+  // the React SSR fallback (which does wrap, via `renderToDataURL`) and,
+  // worse, indexed past the sprite strip entirely when caching was on —
+  // `drawImage`'s source rect landed outside the strip and painted
+  // nothing.
+  // `document.createElement('canvas')` (the sprite-strip cache) is a real
+  // `HTMLCanvasElement` under jsdom, whose `getContext('2d')` returns
+  // `null` (no "canvas" package installed) unless stubbed — hence
+  // `stubGetContext`, on top of `makeFakeCanvas`'s own plain-object canvas
+  // for the visible one.
+  it('wraps an out-of-range initialFrame into [0, frames) rather than indexing past the sprite strip', () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const strip = stubGetContext(make2dCtx());
+    try {
+      createDithered(canvas, baseOptions({ cache: true, frames: 48, initialFrame: 50 }));
+
+      // 50 wraps to 50 % 48 = 2; the cached sprite strip's per-frame
+      // source slot is `frame * canvas.width`.
+      expect(ctx.drawImage).toHaveBeenCalledTimes(1);
+      const [, sx] = ctx.drawImage.mock.calls[0];
+      expect(sx).toBe(2 * canvas.width);
+    } finally {
+      strip.restore();
+    }
+  });
+
+  it("wraps a negative initialFrame the same way core/static.ts's wrapFrame does", () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const strip = stubGetContext(make2dCtx());
+    try {
+      createDithered(canvas, baseOptions({ cache: true, frames: 48, initialFrame: -1 }));
+
+      // -1 wraps to 47, matching `((Math.round(-1) % 48) + 48) % 48`.
+      const [, sx] = ctx.drawImage.mock.calls[0];
+      expect(sx).toBe(47 * canvas.width);
+    } finally {
+      strip.restore();
+    }
+  });
+
+  it('renderFrame also wraps an out-of-range frame index', () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const strip = stubGetContext(make2dCtx());
+    try {
+      const instance = createDithered(canvas, baseOptions({ cache: true, frames: 48 }));
+      ctx.drawImage.mockClear();
+
+      instance.renderFrame(50);
+
+      const [, sx] = ctx.drawImage.mock.calls[0];
+      expect(sx).toBe(2 * canvas.width);
+    } finally {
+      strip.restore();
+    }
   });
 
   // Regression: a caller (notably the React wrapper, which always builds a

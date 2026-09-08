@@ -11,7 +11,6 @@ import {
   type DitheredOptions,
 } from '../core';
 import { sampleCells, type Cell } from '../shape';
-import { skiaHitTester } from './hit-test';
 import { skiaPaintContext } from './paint-context';
 
 export interface DitheredPicturesOptions extends DitheredOptions {
@@ -76,6 +75,7 @@ export function useDitheredPictures(options: DitheredPicturesOptions): DitheredP
     bg,
     gap,
     radius,
+    hitTest,
   } = options;
 
   // Joined by value rather than depended on by identity: an inline
@@ -103,13 +103,14 @@ export function useDitheredPictures(options: DitheredPicturesOptions): DitheredP
       bg,
       gap,
       radius,
+      hitTest,
     });
     const { width, height } = surfaceSize(opts);
     const frameCount = Math.max(1, opts.frames);
 
     const cells =
       providedCells ??
-      sampleCells(opts.shape, opts.cols, skiaHitTester(opts.shape), resolveRows(opts), opts.matrix);
+      sampleCells(opts.shape, opts.cols, opts.hitTest, resolveRows(opts), opts.matrix);
 
     const geometry = computeGeometry(opts, width, height);
     const bounds = Skia.XYWHRect(0, 0, width, height);
@@ -124,5 +125,19 @@ export function useDitheredPictures(options: DitheredPicturesOptions): DitheredP
     // none of them change what is drawn, only when. `fg` is also absent —
     // `fgKey` (its value, not its identity) is the real dependency.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shape, brightness, providedCells, size, cols, rows, matrix, frames, fgKey, bg, gap, radius]);
+  }, [
+    shape,
+    brightness,
+    providedCells,
+    size,
+    cols,
+    rows,
+    matrix,
+    frames,
+    fgKey,
+    bg,
+    gap,
+    radius,
+    hitTest,
+  ]);
 }
