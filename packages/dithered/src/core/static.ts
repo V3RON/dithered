@@ -1,7 +1,7 @@
 import { sampleCells } from '../shape';
 import { jsHitTester } from './path-hit-test';
 import type { DitheredOptions } from './options';
-import { resolveOptions, resolveRows, surfaceSize } from './options';
+import { resolveOptions, resolveRows, resolveSizePx, surfaceSize } from './options';
 import { computeGeometry, paintFrame } from './paint';
 import { escapeXml, formatNumber, svgPaintContext } from './svg-paint';
 
@@ -57,7 +57,7 @@ export function renderToSvg(options: RenderToSvgOptions): string {
         'both must be finite and positive.',
     );
   }
-  const { width, height } = surfaceSize(opts);
+  const { width, height } = surfaceSize(resolveSizePx(opts.size), opts.shape);
   if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
     throw new Error(
       `renderToSvg: options.size (${opts.size}) produces a degenerate surface ` +

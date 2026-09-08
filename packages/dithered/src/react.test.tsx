@@ -6,7 +6,13 @@ import { renderToSvg } from './core';
 import { Dithered } from './react';
 import type { DitheredInstance } from './renderer';
 import type { Palette } from './core';
-import { SQUARE_SHAPE, make2dCtx, stubAnimationGlobals, stubGetContext } from './test-utils';
+import {
+  SQUARE_SHAPE,
+  make2dCtx,
+  setClientBox,
+  stubAnimationGlobals,
+  stubGetContext,
+} from './test-utils';
 
 vi.mock('./renderer', async () => {
   const actual = await vi.importActual<typeof import('./renderer')>('./renderer');
@@ -342,6 +348,60 @@ describe('Dithered', () => {
       expect.anything(),
       expect.objectContaining({ fg: palette }),
     );
+  });
+
+  it('passes maxDpr through to createDithered', () => {
+    render(<Dithered shape={SQUARE_SHAPE} maxDpr={2} />);
+    expect(mockedCreateDithered).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ maxDpr: 2 }),
+    );
+  });
+
+  // -- size="fill" (responsive sizing, ADR 0011) -----------------------------
+
+  describe('size="fill"', () => {
+    let container: HTMLDivElement;
+
+    beforeEach(() => {
+      container = document.createElement('div');
+      document.body.appendChild(container);
+      setClientBox(container, { width: 200, height: 200 });
+    });
+
+    afterEach(() => {
+      container.remove();
+    });
+
+    it('fits the parent container on mount', () => {
+      render(<Dithered shape={SQUARE_SHAPE} size="fill" />, { container });
+      const canvas = container.querySelector('canvas')!;
+      expect(canvas.style.width).toBe('200px');
+      expect(canvas.style.height).toBe('200px');
+    });
+
+    // Regression: `Dithered` always builds a full options object from its
+    // props, so every prop change (not just `size`) reaches `update()` with
+    // `size: 'fill'` set. That must not clobber a fractional
+    // ResizeObserver-delivered size with a coarser, integer-`clientWidth`-
+    // based re-measurement on an unrelated prop change (review finding 2).
+    it('a prop change other than size preserves the ResizeObserver-delivered size instead of re-measuring via clientWidth', () => {
+      const { rerender } = render(<Dithered shape={SQUARE_SHAPE} size="fill" fg="#111111" />, {
+        container,
+      });
+      const canvas = container.querySelector('canvas')!;
+      expect(canvas.style.width).toBe('200px'); // the initial synchronous fit
+
+      const ro = env.resizeObserverInstances[env.resizeObserverInstances.length - 1];
+      ro.trigger({ width: 199.3, height: 199.3 }); // a live, fractional RO delivery
+      expect(canvas.style.width).toBe('199.3px');
+
+      rerender(<Dithered shape={SQUARE_SHAPE} size="fill" fg="#222222" />);
+
+      // Must keep the RO-delivered value, not clobber it with a fresh
+      // clientWidth-based re-measurement of the (unchanged) 200px container.
+      expect(canvas.style.width).toBe('199.3px');
+    });
   });
 });
 

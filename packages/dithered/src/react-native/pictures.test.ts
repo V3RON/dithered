@@ -293,3 +293,39 @@ describe('useDitheredPictures — matrix', () => {
     }
   });
 });
+
+describe('useDitheredPictures: responsive sizing', () => {
+  it("throws the web-only error for size: 'fill'", () => {
+    // React logs the caught render error to console.error/warn (and jsdom
+    // additionally reports the "uncaught" window error); both are just
+    // React's dev-mode diagnostics for a render we expect to throw.
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(() =>
+        renderHook(() =>
+          useDitheredPictures({
+            shape: SQUARE_SHAPE,
+            brightness: () => true,
+            size: 'fill',
+          }),
+        ),
+      ).toThrow(/web-only/i);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('resolves a numeric size normally', () => {
+    const { result } = renderHook(() =>
+      useDitheredPictures({
+        shape: SQUARE_SHAPE,
+        brightness: () => true,
+        size: 40,
+        cols: 4,
+      }),
+    );
+    expect(result.current.width).toBe(40);
+    expect(result.current.height).toBe(40);
+    expect(result.current.pictures.length).toBeGreaterThan(0);
+  });
+});

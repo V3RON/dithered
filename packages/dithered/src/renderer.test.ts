@@ -1,15 +1,39 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// Wraps the real `sampleCells` in a spy so resize/DPR tests can assert it's
+// *not* called, without changing its behaviour for anything else in this
+// file (including the existing `createDithered` tests above).
+vi.mock('./shape', async () => {
+  const actual = await vi.importActual<typeof import('./shape')>('./shape');
+  return { ...actual, sampleCells: vi.fn(actual.sampleCells) };
+});
+
+// eslint-disable-next-line import/first -- must come after vi.mock so it resolves to the mock.
 import { createDithered, frameAt, paintFrame, type DitheredOptions } from './renderer';
+// eslint-disable-next-line import/first -- must come after vi.mock so it resolves to the mock.
 import { computeGeometry, resolveOptions, resolveRows } from './core';
-import { sampleCells, type Cell } from './shape';
+// eslint-disable-next-line import/first -- must come after vi.mock so it resolves to the mock.
+import { sampleCells, type Cell, type Shape } from './shape';
+// eslint-disable-next-line import/first -- must come after vi.mock so it resolves to the mock.
 import { shapes } from './shapes';
+// eslint-disable-next-line import/first -- must come after vi.mock so it resolves to the mock.
 import {
   SQUARE_SHAPE,
   make2dCtx,
+  makeCanvasWithParent,
   makeFakeCanvas,
+  setClientBox,
   stubAnimationGlobals,
   stubGetContext,
 } from './test-utils';
+
+const mockedSampleCells = sampleCells as unknown as ReturnType<typeof vi.fn<typeof sampleCells>>;
+
+/** A 2:1 wide shape, for tests that care that width follows the aspect ratio. */
+const WIDE_SHAPE: Shape = {
+  path: 'M0 0 H20 V10 H0 Z',
+  viewBox: { x: 0, y: 0, width: 20, height: 10 },
+};
 
 describe('frameAt', () => {
   it('quantizes time into [0, frames)', () => {
@@ -681,7 +705,11 @@ describe('createDithered', () => {
 
     palette[1] = '#ff00ff'; // mutate the array `createDithered` was given
     rec.cellColors.length = 0;
-    instance.update({}); // reconfigures (rebuilds the strip) without touching fg
+    // `frames` (not `fg`) forces the cache-affecting reconfigure that
+    // rebuilds the strip — `update()` only touches the stages a patch
+    // actually affects (ADR 0011), so an empty patch alone would leave
+    // the untouched strip in place instead of proving anything here.
+    instance.update({ frames: 2 });
 
     expect(rec.cellColors).not.toContain('#ff00ff');
     expect(rec.cellColors).toContain('#0a0');
@@ -853,8 +881,12 @@ describe('createDithered', () => {
 
       expect(() => instance.update({ matrix: raggedMatrix() })).toThrow(/ragged/);
 
+      // `period` alone doesn't affect the surface or the sprite cache
+      // (ADR 0011), so a valid `update()` restricted to it is a no-op
+      // repaint-wise; a real reconfigure (`brightness`, cache-affecting)
+      // is what actually exercises "not poisoned by the earlier throw".
       ctx.fill.mockClear();
-      expect(() => instance.update({ period: 3000 })).not.toThrow();
+      expect(() => instance.update({ period: 3000, brightness: () => true })).not.toThrow();
       expect(ctx.fill).toHaveBeenCalled();
     });
   });
@@ -954,6 +986,69 @@ describe('createDithered', () => {
       // A subsequent valid update() still succeeds.
       expect(() => instance.update({ period: 3000 })).not.toThrow();
     });
+  });
+
+  // Round-2's selective-stage `update()` only runs a stage when it detects
+  // a relevant option delta, which is the ADR's stated design (and much
+  // cheaper) — but a few real deltas fell outside every detection set,
+  // silently losing a repaint (review finding 7).
+
+  it('update({ initialFrame }) still repaints (review finding 7)', () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+    ctx.clearRect.mockClear();
+
+    instance.update({ initialFrame: 3 });
+
+    expect(ctx.clearRect).toHaveBeenCalled();
+  });
+
+  it('update({ respectReducedMotion: true }) under an active reduced-motion preference falls back to initialFrame instead of leaving whatever frame was showing (review finding 7)', () => {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({ matches: true })),
+    );
+    const seenT: number[] = [];
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(
+      canvas,
+      baseOptions({
+        respectReducedMotion: false, // not yet respecting the (already-active) OS preference
+        initialFrame: 2,
+        frames: 10,
+        brightness: (_cell, t) => {
+          seenT.push(t as number);
+          return true;
+        },
+      }),
+    );
+    seenT.length = 0;
+    instance.renderFrame(5); // simulate the loop having progressed to frame 5
+    expect(seenT[0]).toBeCloseTo(0.5); // 5 / 10
+
+    seenT.length = 0;
+    instance.update({ respectReducedMotion: true });
+
+    // The documented reduced-motion contract is a single static frame —
+    // `initialFrame` (2), not whatever frame the (now-halted) loop last
+    // happened to show.
+    expect(seenT[0]).toBeCloseTo(0.2); // 2 / 10
+  });
+
+  it('update() re-reads devicePixelRatio when matchMedia is unavailable (review finding 6)', () => {
+    vi.stubGlobal('matchMedia', undefined);
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+    expect(canvas.width).toBe(40); // dpr defaults to 1
+
+    // A degraded environment with no `matchMedia` has no listener to catch
+    // this — the only way back to a crisp backing store is `update()`
+    // re-checking `devicePixelRatio` itself, as it did before the
+    // selective-stage rewrite.
+    vi.stubGlobal('devicePixelRatio', 2);
+    instance.update({});
+
+    expect(canvas.width).toBe(80);
   });
 });
 
@@ -1083,5 +1178,1139 @@ describe('createDithered: currentColor', () => {
 
     stub.restore();
     mixedCanvas.remove();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Responsive sizing (ADR 0011): `size: 'fill'` and DPR-change handling.
+// ---------------------------------------------------------------------------
+
+describe('createDithered — responsive sizing', () => {
+  let env: ReturnType<typeof stubAnimationGlobals>;
+
+  beforeEach(() => {
+    env = stubAnimationGlobals();
+    mockedSampleCells.mockClear();
+  });
+
+  afterEach(() => {
+    env.restore();
+  });
+
+  function fillOptions(overrides: Partial<DitheredOptions> = {}): DitheredOptions {
+    return {
+      shape: SQUARE_SHAPE,
+      brightness: () => true,
+      size: 'fill',
+      cols: 4,
+      cache: false,
+      ...overrides,
+    };
+  }
+
+  /** A real `<canvas>` inside a real `<div>` parent, with a stubbed 2D context. */
+  function setup(box: { width: number; height: number } | null) {
+    const { parent, canvas } = makeCanvasWithParent();
+    if (box) setClientBox(parent, box);
+    const ctx = make2dCtx();
+    const getContextStub = stubGetContext(ctx);
+    return { parent, canvas, ctx, restore: getContextStub.restore };
+  }
+
+  function lastResizeObserver() {
+    const instances = env.resizeObserverInstances;
+    return instances[instances.length - 1];
+  }
+
+  // -- fitting -------------------------------------------------------------
+
+  it("size: 'fill' fits the parent's content box, with width following the shape's aspect ratio", () => {
+    const { parent, canvas, restore } = setup({ width: 300, height: 100 });
+    try {
+      createDithered(canvas, fillOptions({ shape: WIDE_SHAPE }));
+      // aspect 2: fitSize(300, 100, 2) = min(100, 150) = 100.
+      expect(canvas.style.height).toBe('100px');
+      expect(canvas.style.width).toBe('200px');
+      expect(canvas.width).toBe(200); // dpr defaults to 1 in jsdom
+      expect(canvas.height).toBe(100);
+      expect(parent).toBeDefined();
+    } finally {
+      restore();
+    }
+  });
+
+  it('a larger ResizeObserver delivery re-fits: CSS size and backing store both follow, at size x dpr', () => {
+    vi.stubGlobal('devicePixelRatio', 2);
+    const { canvas, restore } = setup({ width: 100, height: 100 });
+    try {
+      createDithered(canvas, fillOptions());
+      expect(canvas.style.width).toBe('100px');
+      expect(canvas.width).toBe(200); // 100 * dpr 2
+
+      lastResizeObserver().trigger({ width: 200, height: 200 });
+
+      expect(canvas.style.width).toBe('200px');
+      expect(canvas.style.height).toBe('200px');
+      expect(canvas.width).toBe(400); // 200 * dpr 2
+      expect(canvas.height).toBe(400);
+    } finally {
+      restore();
+    }
+  });
+
+  it('accounts for a vertical writing-mode parent when reading a ResizeObserver contentBoxSize entry (review finding 8)', () => {
+    const { parent, canvas, restore } = setup({ width: 300, height: 100 });
+    parent.style.writingMode = 'vertical-rl';
+    try {
+      createDithered(canvas, fillOptions({ shape: WIDE_SHAPE }));
+
+      const ro = lastResizeObserver();
+      // Under a vertical writing mode the inline axis runs vertically, so
+      // `inlineSize` reports the box's visual *height* (100) and
+      // `blockSize` its visual *width* (300) -- swapped relative to the
+      // horizontal-writing-mode assumption `boxFromEntry` previously made
+      // unconditionally.
+      const entry = {
+        target: parent,
+        contentBoxSize: [{ inlineSize: 100, blockSize: 300 }],
+        contentRect: {
+          width: 300,
+          height: 100,
+          x: 0,
+          y: 0,
+          top: 0,
+          left: 0,
+          right: 300,
+          bottom: 100,
+        },
+      } as unknown as ResizeObserverEntry;
+      ro.callback([entry], ro as unknown as ResizeObserver);
+
+      // aspect 2: fitSize(300, 100, 2) = min(100, 150) = 100. Reading the
+      // logical sizes as if the mode were horizontal would instead compute
+      // fitSize(100, 300, 2) = 50.
+      expect(canvas.style.height).toBe('100px');
+      expect(canvas.style.width).toBe('200px');
+    } finally {
+      restore();
+    }
+  });
+
+  // -- one-cell resize threshold --------------------------------------------
+
+  it('a sub-cell resize does not resample and does not rebuild the sprite strip', () => {
+    const { canvas, restore } = setup({ width: 100, height: 100 });
+    try {
+      // cols: 4, cache forced on so there is a strip to (not) rebuild.
+      createDithered(canvas, fillOptions({ cache: true }));
+      const callsBefore = mockedSampleCells.mock.calls.length;
+      const createSpy = vi.spyOn(document, 'createElement');
+
+      // cell width at build time is 100/4 = 25px; a 10px move stays under it.
+      lastResizeObserver().trigger({ width: 110, height: 110 });
+
+      expect(canvas.style.width).toBe('110px');
+      expect(mockedSampleCells.mock.calls.length).toBe(callsBefore);
+      expect(createSpy.mock.calls.filter((c) => c[0] === 'canvas')).toHaveLength(0);
+      createSpy.mockRestore();
+    } finally {
+      restore();
+    }
+  });
+
+  it('a super-cell resize rebuilds the sprite strip but still does not resample', () => {
+    const { canvas, restore } = setup({ width: 100, height: 100 });
+    try {
+      createDithered(canvas, fillOptions({ cache: true }));
+      const callsBefore = mockedSampleCells.mock.calls.length;
+      const createSpy = vi.spyOn(document, 'createElement');
+
+      // cell width at build time is 100/4 = 25px; a 40px move clears it.
+      lastResizeObserver().trigger({ width: 140, height: 140 });
+
+      expect(canvas.style.width).toBe('140px');
+      expect(mockedSampleCells.mock.calls.length).toBe(callsBefore);
+      expect(createSpy.mock.calls.filter((c) => c[0] === 'canvas')).toHaveLength(1);
+      createSpy.mockRestore();
+    } finally {
+      restore();
+    }
+  });
+
+  it('a super-cell resize rebuild preserves the currently displayed frame instead of resetting to initialFrame (review finding 2)', () => {
+    const { canvas, ctx, restore } = setup({ width: 100, height: 100 });
+    try {
+      const instance = createDithered(canvas, fillOptions({ cache: true, frames: 10 }));
+      instance.setPaused(true);
+      instance.renderFrame(7); // e.g. a determinate `progress` render
+      ctx.drawImage.mockClear();
+
+      // cell width at build time is 100/4 = 25px; a 40px move clears it.
+      lastResizeObserver().trigger({ width: 140, height: 140 });
+
+      const lastCall = ctx.drawImage.mock.calls[ctx.drawImage.mock.calls.length - 1];
+      const builtW = 140; // the new device width, post-rebuild
+      expect(lastCall).toEqual([
+        expect.anything(),
+        7 * builtW,
+        0,
+        builtW,
+        builtW,
+        0,
+        0,
+        builtW,
+        builtW,
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
+  // -- epsilon guard / feedback loop ----------------------------------------
+
+  it('a measurement within 0.5 CSS px of the current size writes nothing to canvas.style', () => {
+    const { canvas, restore } = setup({ width: 100, height: 100 });
+    try {
+      createDithered(canvas, fillOptions());
+      const widthBefore = canvas.style.width;
+      const heightBefore = canvas.style.height;
+
+      lastResizeObserver().trigger({ width: 100.3, height: 100.2 });
+
+      expect(canvas.style.width).toBe(widthBefore);
+      expect(canvas.style.height).toBe(heightBefore);
+    } finally {
+      restore();
+    }
+  });
+
+  it('re-delivering the same box produces no further style writes and no rebuild', () => {
+    const { canvas, ctx, restore } = setup({ width: 100, height: 100 });
+    try {
+      createDithered(canvas, fillOptions({ cache: true }));
+      lastResizeObserver().trigger({ width: 200, height: 200 });
+      expect(canvas.style.width).toBe('200px');
+
+      const createSpy = vi.spyOn(document, 'createElement');
+      // Deleting the epsilon guard would still leave both assertions below
+      // passing (`resizeTo(200)` would just re-write the same '200px' and
+      // stay under the one-cell threshold), so also assert nothing was even
+      // repainted — `resizeTo()` always ends with an unconditional `blit()`,
+      // so a real (non-dropped) delivery always clears and redraws (review
+      // finding 5).
+      ctx.clearRect.mockClear();
+      // The parent "re-measuring its own now-written size" — same box again.
+      lastResizeObserver().trigger({ width: 200, height: 200 });
+
+      expect(canvas.style.width).toBe('200px');
+      expect(createSpy.mock.calls.filter((c) => c[0] === 'canvas')).toHaveLength(0);
+      expect(ctx.clearRect).not.toHaveBeenCalled();
+      createSpy.mockRestore();
+    } finally {
+      restore();
+    }
+  });
+
+  // -- dormancy --------------------------------------------------------------
+
+  it('a degenerate parent box goes dormant: 0px CSS size, loop halted, backing store retained', () => {
+    const { canvas, restore } = setup({ width: 100, height: 100 });
+    try {
+      const instance = createDithered(canvas, fillOptions());
+      expect(env.rafCallbacks.length).toBe(1);
+      const widthBefore = canvas.width;
+      const heightBefore = canvas.height;
+
+      lastResizeObserver().trigger({ width: 0, height: 0 });
+
+      expect(canvas.style.width).toBe('0px');
+      expect(canvas.style.height).toBe('0px');
+      expect(cancelAnimationFrame).toHaveBeenCalled();
+      // The backing store itself is untouched while dormant.
+      expect(canvas.width).toBe(widthBefore);
+      expect(canvas.height).toBe(heightBefore);
+
+      // Waking: a following non-degenerate box re-blits and reschedules the
+      // animation loop (ADR 0011's "reschedule the loop" — previously
+      // unasserted, see review finding 4).
+      env.rafCallbacks.length = 0;
+      lastResizeObserver().trigger({ width: 150, height: 150 });
+
+      expect(canvas.style.width).toBe('150px');
+      expect(canvas.width).toBe(150);
+      expect(env.rafCallbacks.length).toBe(1);
+      instance.setPaused(false); // no-op; just confirms the instance is alive
+    } finally {
+      restore();
+    }
+  });
+
+  // -- update() while dormant (review finding 1) -----------------------------
+
+  it('a shape change is resampled immediately while dormant, not lost on wake', () => {
+    const { parent, canvas, restore } = setup({ width: 100, height: 100 });
+    try {
+      const instance = createDithered(canvas, fillOptions());
+      // Actually zero the *measured* box (not just the synthetic RO
+      // delivery below) so a `shape` patch's internal `resolveFillSizeSync()`
+      // re-measurement — real box, not the last delivered entry — also
+      // finds it degenerate and stays dormant, exactly like a genuine
+      // `display: none` parent would.
+      setClientBox(parent, { width: 0, height: 0 });
+      lastResizeObserver().trigger({ width: 0, height: 0 }); // dormant
+      mockedSampleCells.mockClear();
+
+      instance.update({ shape: WIDE_SHAPE });
+
+      // Cells depend only on shape/cols/rows (never on the absent surface),
+      // so this must happen right away -- deferring it to "whenever the
+      // instance next wakes" would lose it permanently, since waking only
+      // re-runs applySurface()/buildCache(), never resample().
+      expect(mockedSampleCells).toHaveBeenCalledTimes(1);
+      expect(mockedSampleCells).toHaveBeenCalledWith(
+        WIDE_SHAPE,
+        expect.any(Number),
+        undefined,
+        expect.any(Number),
+        'bayer4',
+      );
+      expect(canvas.style.width).toBe('0px'); // still dormant
+
+      // Waking now fits the *new* shape's aspect ratio (2:1).
+      setClientBox(parent, { width: 200, height: 100 });
+      lastResizeObserver().trigger({ width: 200, height: 100 });
+      expect(canvas.style.width).toBe('200px');
+      expect(canvas.style.height).toBe('100px');
+    } finally {
+      restore();
+    }
+  });
+
+  it('an fg change picked up while dormant rebuilds the sprite cache on wake even at the same size', () => {
+    const { canvas, ctx, restore } = setup({ width: 100, height: 100 });
+    try {
+      const instance = createDithered(canvas, fillOptions({ cache: true }));
+      lastResizeObserver().trigger({ width: 0, height: 0 }); // dormant
+
+      instance.update({ fg: '#ff0000' });
+      expect(canvas.style.width).toBe('0px'); // still dormant; patch applied silently
+
+      const createSpy = vi.spyOn(document, 'createElement');
+      // Wake at the *same* device size: below the one-cell threshold, so
+      // absent the fix this would never rebuild and the strip would stay
+      // painted with the old fg indefinitely.
+      lastResizeObserver().trigger({ width: 100, height: 100 });
+
+      expect(createSpy.mock.calls.filter((c) => c[0] === 'canvas')).toHaveLength(1);
+      expect(ctx.fillStyle).toBe('#ff0000');
+      createSpy.mockRestore();
+    } finally {
+      restore();
+    }
+  });
+
+  // -- update()-driven wake from dormancy (review finding 1) -----------------
+  //
+  // The RO-driven wake path (`applyMeasurement` -> `resizeTo` -> `applySurface`,
+  // exercised by the two tests above) always restores the CSS size. These
+  // two reproduce the two `update()`-driven wake paths instead
+  // (`detachFillObserver()` on 'fill' -> number, and `resolveFillSizeSync()`
+  // on a reparent/shape change while still in fill mode) — neither ran
+  // `applySurface()` when the size they woke up to happened to equal the
+  // dormant-retained `sizePx`, leaving the canvas at the `0px` CSS size
+  // dormancy set, forever, despite an animating, correctly-sized backing
+  // store underneath.
+
+  it("'fill' -> number through update() while dormant restores the CSS size (review finding 1)", () => {
+    const { parent, canvas, restore } = setup({ width: 100, height: 100 });
+    try {
+      const instance = createDithered(canvas, fillOptions());
+      expect(canvas.style.width).toBe('100px');
+
+      setClientBox(parent, { width: 0, height: 0 });
+      lastResizeObserver().trigger({ width: 0, height: 0 }); // dormant
+      expect(canvas.style.width).toBe('0px');
+      expect(canvas.width).toBe(100); // backing store retained, not zeroed
+
+      // Waking to the *same* resolved size (100) that dormancy retained --
+      // exactly the case `sizePx !== prevSizePx` cannot catch on its own.
+      instance.update({ size: 100 });
+
+      expect(canvas.style.width).toBe('100px');
+      expect(canvas.style.height).toBe('100px');
+      expect(canvas.width).toBe(100);
+    } finally {
+      restore();
+    }
+  });
+
+  it("'fill' -> 'fill' reparent through update() while dormant restores the CSS size (review finding 1)", () => {
+    const { canvas, restore } = setup({ width: 100, height: 100 });
+    const parentB = document.createElement('div');
+    document.body.appendChild(parentB);
+    setClientBox(parentB, { width: 100, height: 100 }); // same size as the original parent
+    try {
+      const instance = createDithered(canvas, fillOptions());
+      expect(canvas.style.width).toBe('100px');
+
+      lastResizeObserver().trigger({ width: 0, height: 0 }); // dormant
+      expect(canvas.style.width).toBe('0px');
+      expect(canvas.width).toBe(100);
+
+      parentB.appendChild(canvas); // reparent while dormant, no update() yet
+      instance.update({ size: 'fill' }); // 'fill' -> 'fill': reparented, re-measures synchronously
+
+      expect(canvas.style.width).toBe('100px');
+      expect(canvas.style.height).toBe('100px');
+      expect(canvas.width).toBe(100);
+    } finally {
+      restore();
+      parentB.remove();
+    }
+  });
+
+  it("'fill' -> 'fill' while still dormant stays dormant through update() (review findings 1, 12)", () => {
+    const { parent, canvas, restore } = setup({ width: 100, height: 100 });
+    try {
+      const instance = createDithered(canvas, fillOptions());
+      setClientBox(parent, { width: 0, height: 0 });
+      lastResizeObserver().trigger({ width: 0, height: 0 }); // dormant
+      expect(canvas.style.width).toBe('0px');
+
+      // An unrelated update() while still genuinely dormant (parent still
+      // degenerate) must not fake a wake -- the canvas has to stay at 0px.
+      instance.update({ size: 'fill', fg: '#ff0000' });
+
+      expect(canvas.style.width).toBe('0px');
+      expect(canvas.style.height).toBe('0px');
+    } finally {
+      restore();
+    }
+  });
+
+  // -- update() after destroy() (review findings 2, 12) -----------------------
+
+  it('update() after destroy() is inert and does not resurrect fill state or leak a second ResizeObserver', () => {
+    const { canvas, restore } = setup({ width: 100, height: 100 });
+    try {
+      const instance = createDithered(canvas, fillOptions());
+      const roCountBefore = env.resizeObserverInstances.length;
+      instance.destroy();
+      canvas.style.display = 'sentinel-value';
+
+      instance.update({ size: 'fill' });
+
+      expect(env.resizeObserverInstances.length).toBe(roCountBefore); // no new observer
+      expect(canvas.style.display).toBe('sentinel-value'); // untouched by a resurrected fill mode
+    } finally {
+      restore();
+    }
+  });
+
+  // -- destroy() ---------------------------------------------------------------
+
+  it('the cheap path rescales the existing strip via drawImage with an explicit source/destination rect', () => {
+    const { canvas, ctx, restore } = setup({ width: 100, height: 100 });
+    try {
+      createDithered(canvas, fillOptions({ cache: true, frames: 1 }));
+      // Built at 100x100 device px (dpr 1, cols 4) -> builtW/builtH = 100.
+      ctx.drawImage.mockClear();
+
+      // cell width at build time is 100/4 = 25px; a 10px move stays under it.
+      lastResizeObserver().trigger({ width: 110, height: 110 });
+
+      expect(ctx.drawImage).toHaveBeenCalledTimes(1);
+      // Sourced at the strip's *build* resolution (frame 0 at 100x100),
+      // destined at the *new* device size (110x110) -- a rescale, not a
+      // plain 1:1 blit. Reverting to sourcing at the new W/H (`f * W, W, H`)
+      // would still pass every other test in this file, which is why this
+      // is asserted explicitly (review finding 4).
+      expect(ctx.drawImage).toHaveBeenCalledWith(expect.anything(), 0, 0, 100, 100, 0, 0, 110, 110);
+    } finally {
+      restore();
+    }
+  });
+
+  // -- reparenting -------------------------------------------------------------
+
+  it('reparenting the canvas retargets the ResizeObserver instead of accumulating parents (review finding 3)', () => {
+    const { parent: parentA, canvas } = makeCanvasWithParent();
+    setClientBox(parentA, { width: 100, height: 100 });
+    const parentB = document.createElement('div');
+    document.body.appendChild(parentB);
+    setClientBox(parentB, { width: 300, height: 300 });
+    const ctx = make2dCtx();
+    const getContextStub = stubGetContext(ctx);
+    try {
+      const instance = createDithered(canvas, fillOptions());
+      const ro = lastResizeObserver();
+      expect(ro.observedTargets).toEqual([parentA]);
+
+      parentB.appendChild(canvas); // move the canvas to a different parent
+      instance.update({ size: 'fill' }); // 'fill' -> 'fill': re-attaches, re-measures
+      expect(canvas.style.width).toBe('300px');
+
+      expect(ro.unobserve).toHaveBeenCalledWith(parentA);
+      // Exactly the new parent is observed -- not both (previously additive:
+      // `observe()` never paired with an `unobserve()` of the old target).
+      expect(ro.observedTargets).toEqual([parentB]);
+    } finally {
+      getContextStub.restore();
+      parentB.remove();
+    }
+  });
+
+  // -- no parent / no observer ------------------------------------------------
+
+  it('falls back to the default size and constructs no observer when there is no parent element (review finding 6)', () => {
+    const canvas = document.createElement('canvas'); // deliberately not appended anywhere
+    const ctx = make2dCtx();
+    const getContextStub = stubGetContext(ctx);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      createDithered(canvas, fillOptions());
+      expect(canvas.style.height).toBe('48px'); // DEFAULTS.size
+      // ADR 0011: "No parentElement ... attach no observer" -- not merely
+      // one that's constructed but idle.
+      expect(env.resizeObserverInstances).toHaveLength(0);
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      getContextStub.restore();
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('constructs and attaches the ResizeObserver once a parent appears on a later update() (ADR 0011 recovery)', () => {
+    const canvas = document.createElement('canvas'); // starts detached
+    const ctx = make2dCtx();
+    const getContextStub = stubGetContext(ctx);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const instance = createDithered(canvas, fillOptions());
+      expect(env.resizeObserverInstances).toHaveLength(0);
+
+      const parent = document.createElement('div');
+      setClientBox(parent, { width: 120, height: 120 });
+      parent.appendChild(canvas);
+
+      // Any update() re-attempts the attachment; the canvas going from no
+      // parent to a real one counts as "reparented", so this also forces
+      // the synchronous re-measure that fits it immediately.
+      instance.update({ fg: '#123456' });
+
+      expect(env.resizeObserverInstances).toHaveLength(1);
+      expect(env.resizeObserverInstances[0].observedTargets).toEqual([parent]);
+      expect(canvas.style.width).toBe('120px');
+    } finally {
+      getContextStub.restore();
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("a number -> 'fill' update on a still-detached canvas falls back to the numeric default, matching its own warning (review finding 6)", () => {
+    const canvas = document.createElement('canvas'); // never appended
+    const ctx = make2dCtx();
+    const getContextStub = stubGetContext(ctx);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const instance = createDithered(canvas, {
+        shape: SQUARE_SHAPE,
+        brightness: () => true,
+        size: 200,
+        cols: 4,
+        cache: false,
+      });
+      expect(canvas.style.height).toBe('200px');
+
+      instance.update({ size: 'fill' });
+
+      // Must match the "using the default size (48)" warning it just
+      // logged, not silently keep the previous numeric size.
+      expect(canvas.style.height).toBe('48px');
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      getContextStub.restore();
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('without a global ResizeObserver, takes one synchronous measurement and constructs no observer', () => {
+    vi.stubGlobal('ResizeObserver', undefined);
+    const { canvas, restore } = setup({ width: 100, height: 100 });
+    try {
+      createDithered(canvas, fillOptions());
+      expect(canvas.style.width).toBe('100px'); // the one synchronous measurement still applies
+      expect(env.resizeObserverInstances).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it('sets display: block while in fill mode and restores the previous value on exit', () => {
+    const { canvas, restore } = setup({ width: 100, height: 100 });
+    try {
+      canvas.style.display = 'inline-block';
+      const instance = createDithered(canvas, fillOptions());
+      expect(canvas.style.display).toBe('block');
+
+      instance.update({ size: 80 }); // fill -> number
+      expect(canvas.style.display).toBe('inline-block');
+    } finally {
+      restore();
+    }
+  });
+
+  it('destroy() restores the pre-fill display value, so a destroy+recreate cycle on the same canvas node does not corrupt it (review finding 1)', () => {
+    const { canvas, restore } = setup({ width: 100, height: 100 });
+    try {
+      canvas.style.display = 'inline-block';
+      const instance1 = createDithered(canvas, fillOptions());
+      expect(canvas.style.display).toBe('block');
+
+      instance1.destroy();
+      // Previously left at 'block' forever -- the value a second create()
+      // on this same node would (wrongly) capture as "previous".
+      expect(canvas.style.display).toBe('inline-block');
+
+      // Simulate a remount on the same DOM node (e.g. React StrictMode's
+      // double-invoked mount effect).
+      const instance2 = createDithered(canvas, fillOptions());
+      expect(canvas.style.display).toBe('block');
+      instance2.update({ size: 40 }); // fill -> number
+
+      expect(canvas.style.display).toBe('inline-block');
+    } finally {
+      restore();
+    }
+  });
+
+  it('restores the pre-fill display value even without a global ResizeObserver (review finding 5)', () => {
+    vi.stubGlobal('ResizeObserver', undefined);
+    const { canvas, restore } = setup({ width: 100, height: 100 });
+    try {
+      canvas.style.display = 'inline-block';
+      const instance = createDithered(canvas, fillOptions());
+      expect(canvas.style.display).toBe('block');
+
+      // An unrelated update while still in fill mode must not re-capture
+      // `previousDisplay` from the now-'block' value -- it stayed `null`
+      // gated on `resizeObserver` being non-null, which never happens here.
+      instance.update({ fg: '#123456' });
+      instance.update({ size: 60 }); // fill -> number
+
+      expect(canvas.style.display).toBe('inline-block');
+    } finally {
+      restore();
+    }
+  });
+
+  // -- fill + DPR combined -----------------------------------------------------
+
+  it('applies a DPR change on top of a fill-fitted size', () => {
+    vi.stubGlobal('devicePixelRatio', 2);
+    const { canvas, restore } = setup({ width: 100, height: 100 });
+    try {
+      createDithered(canvas, fillOptions());
+      expect(canvas.width).toBe(200); // 100 (fitted) * dpr 2
+
+      env.changeDpr(3);
+
+      expect(canvas.width).toBe(300); // 100 (fitted, unchanged) * dpr 3
+      expect(canvas.style.width).toBe('100px'); // CSS size untouched by a DPR-only change
+    } finally {
+      restore();
+    }
+  });
+
+  it('a modest DPR change absorbed while dormant forces a full rebuild on wake rather than the cheap path (review finding 7)', () => {
+    vi.stubGlobal('devicePixelRatio', 2);
+    const { canvas, restore } = setup({ width: 100, height: 100 });
+    try {
+      createDithered(canvas, fillOptions({ cache: true }));
+      lastResizeObserver().trigger({ width: 0, height: 0 }); // dormant
+
+      // A sub-cell-threshold DPR move (5% of the built width, at cols: 4 a
+      // cell is 25%), absorbed while there's nothing to redraw.
+      env.changeDpr(2.1);
+
+      const createSpy = vi.spyOn(document, 'createElement');
+      lastResizeObserver().trigger({ width: 100, height: 100 }); // wake, same box
+
+      expect(canvas.width).toBe(210); // 100 * dpr 2.1
+      // Absent the fix, this DPR move alone would be under the one-cell
+      // threshold on wake and would never rebuild the strip at the new
+      // resolution.
+      expect(createSpy.mock.calls.filter((c) => c[0] === 'canvas')).toHaveLength(1);
+      createSpy.mockRestore();
+    } finally {
+      restore();
+    }
+  });
+
+  // -- DPR -------------------------------------------------------------------
+
+  it('a DPR change reconfigures the backing store and re-arms the listener on the new ratio', () => {
+    vi.stubGlobal('devicePixelRatio', 2);
+    const { canvas, ctx } = makeFakeCanvas();
+    createDithered(canvas, {
+      shape: SQUARE_SHAPE,
+      brightness: () => true,
+      size: 40,
+      cols: 4,
+      cache: false,
+    });
+
+    expect(canvas.width).toBe(80); // 40 * dpr 2
+    expect(env.mediaQueries.some((m) => m.media === '(resolution: 2dppx)')).toBe(true);
+
+    ctx.clearRect.mockClear();
+    env.changeDpr(3);
+
+    expect(canvas.width).toBe(120); // 40 * dpr 3
+    expect(ctx.clearRect).toHaveBeenCalled(); // reconfigured + re-blit
+    expect(env.mediaQueries.some((m) => m.media === '(resolution: 3dppx)')).toBe(true);
+  });
+
+  it('maxDpr clamps the backing store, and a raw change entirely above the clamp re-arms without rebuilding', () => {
+    vi.stubGlobal('devicePixelRatio', 4);
+    const { canvas, ctx } = makeFakeCanvas();
+    createDithered(canvas, {
+      shape: SQUARE_SHAPE,
+      brightness: () => true,
+      size: 40,
+      cols: 4,
+      cache: false,
+      maxDpr: 2,
+    });
+
+    expect(canvas.width).toBe(80); // 40 * clamp 2, not 40 * raw 4
+
+    ctx.clearRect.mockClear();
+    env.changeDpr(5); // raw moves, but stays entirely above the clamp
+
+    expect(canvas.width).toBe(80); // unchanged
+    expect(ctx.clearRect).not.toHaveBeenCalled(); // no rebuild/re-blit
+    expect(env.mediaQueries.some((m) => m.media === '(resolution: 5dppx)')).toBe(true); // still re-armed
+  });
+
+  it('a DPR change preserves the currently displayed frame instead of resetting to initialFrame (review finding 2)', () => {
+    vi.stubGlobal('devicePixelRatio', 2);
+    const { canvas, ctx } = makeFakeCanvas();
+    // `cache: true` makes `buildCache()` create a *real* offscreen
+    // `<canvas>` for the sprite strip; route its `getContext('2d')` to the
+    // same recording `ctx` the fake main canvas already uses directly.
+    const getContextStub = stubGetContext(ctx);
+    try {
+      const instance = createDithered(canvas, {
+        shape: SQUARE_SHAPE,
+        brightness: () => true,
+        size: 40,
+        cols: 4,
+        cache: true,
+        frames: 10,
+      });
+      instance.setPaused(true);
+      instance.renderFrame(7); // e.g. a determinate `progress` render
+      ctx.drawImage.mockClear();
+
+      env.changeDpr(3);
+
+      // `buildCache()` always resets `currentFrame` to -1 internally; absent
+      // the fix the following blit reads that reset value and snaps back to
+      // `initialFrame` (0) instead of redrawing frame 7.
+      const lastCall = ctx.drawImage.mock.calls[ctx.drawImage.mock.calls.length - 1];
+      const builtW = 120; // size 40 * new dpr 3
+      expect(lastCall).toEqual([
+        expect.anything(),
+        7 * builtW,
+        0,
+        builtW,
+        builtW,
+        0,
+        0,
+        builtW,
+        builtW,
+      ]);
+    } finally {
+      getContextStub.restore();
+    }
+  });
+
+  // -- destroy() ---------------------------------------------------------------
+
+  it('destroy() disconnects the ResizeObserver and removes the DPR listener, and is idempotent', () => {
+    const { canvas, restore } = setup({ width: 100, height: 100 });
+    try {
+      const instance = createDithered(canvas, fillOptions());
+      const ro = lastResizeObserver();
+      const mqlEntry = env.mediaQueries[env.mediaQueries.length - 1];
+
+      instance.destroy();
+
+      expect(ro.disconnect).toHaveBeenCalled();
+      expect(mqlEntry.removeEventListener).toHaveBeenCalledWith('change', expect.any(Function));
+
+      // Idempotency is more than "doesn't throw" (review finding 12): a
+      // second `destroy()` must not clobber state the first call already
+      // restored, e.g. by re-running `detachFillObserver()` and resetting
+      // `display` a second time from whatever it's since been set to.
+      canvas.style.display = 'sentinel-value';
+      expect(() => instance.destroy()).not.toThrow();
+      expect(canvas.style.display).toBe('sentinel-value');
+    } finally {
+      restore();
+    }
+  });
+
+  it('destroy() while dormant restores the last resolved CSS size instead of leaving 0px x 0px (review finding 11)', () => {
+    const { canvas, restore } = setup({ width: 100, height: 100 });
+    try {
+      const instance = createDithered(canvas, fillOptions());
+      expect(canvas.style.width).toBe('100px');
+
+      lastResizeObserver().trigger({ width: 0, height: 0 }); // dormant
+      expect(canvas.style.width).toBe('0px');
+
+      instance.destroy();
+
+      expect(canvas.style.width).toBe('100px');
+      expect(canvas.style.height).toBe('100px');
+    } finally {
+      restore();
+    }
+  });
+
+  // -- update() transitions ------------------------------------------------
+
+  it('update() transitions between numeric and fill sizes correctly', () => {
+    const { parent, canvas, restore } = setup({ width: 100, height: 100 });
+    try {
+      const instance = createDithered(canvas, {
+        shape: SQUARE_SHAPE,
+        brightness: () => true,
+        size: 40,
+        cols: 4,
+        cache: false,
+      });
+      expect(env.resizeObserverInstances).toHaveLength(0);
+
+      // number -> 'fill': attaches an observer and re-fits.
+      instance.update({ size: 'fill' });
+      expect(env.resizeObserverInstances).toHaveLength(1);
+      const ro = env.resizeObserverInstances[0];
+      expect(ro.observedTargets).toContain(parent);
+      expect(canvas.style.width).toBe('100px');
+
+      // 'fill' -> 'fill': keeps the same observer instance.
+      instance.update({ size: 'fill' });
+      expect(env.resizeObserverInstances).toHaveLength(1);
+
+      // An unrelated update() in fill mode preserves the fitted size, even
+      // though the parent's box has changed underneath it.
+      setClientBox(parent, { width: 300, height: 300 });
+      instance.update({ fg: '#123456' });
+      expect(canvas.style.width).toBe('100px');
+
+      // 'fill' -> number: disconnects the observer and uses the number.
+      instance.update({ size: 80 });
+      expect(ro.disconnect).toHaveBeenCalled();
+      expect(canvas.style.width).toBe('80px');
+    } finally {
+      restore();
+    }
+  });
+
+  it("a live ResizeObserver-delivered size is not clobbered by an explicit `size: 'fill'` patch on an unrelated update (review finding 2)", () => {
+    const { canvas, restore } = setup({ width: 200, height: 200 });
+    try {
+      const instance = createDithered(canvas, fillOptions());
+      expect(canvas.style.width).toBe('200px'); // the initial synchronous fit
+
+      // A live RO delivery with a fractional size -- more precise than the
+      // synchronous `clientWidth`-based fit.
+      lastResizeObserver().trigger({ width: 199.3, height: 199.3 });
+      expect(canvas.style.width).toBe('199.3px');
+
+      // Simulates the React wrapper: it always resends `size: 'fill'`
+      // alongside every other prop, even though the parent's *measured*
+      // box hasn't changed. This must not re-run the coarser synchronous
+      // measurement over the fractional RO-delivered one.
+      instance.update({ size: 'fill', fg: '#123456' });
+
+      expect(canvas.style.width).toBe('199.3px');
+    } finally {
+      restore();
+    }
+  });
+
+  it('update({ paused: true }) does not resample, reconfigure the surface, or rebuild the sprite cache (review finding 3)', () => {
+    const { canvas, ctx, restore } = setup({ width: 100, height: 100 });
+    try {
+      const instance = createDithered(canvas, fillOptions({ cache: true }));
+      const callsBefore = mockedSampleCells.mock.calls.length;
+      const createSpy = vi.spyOn(document, 'createElement');
+      ctx.clearRect.mockClear();
+
+      instance.update({ paused: true });
+
+      expect(mockedSampleCells.mock.calls.length).toBe(callsBefore);
+      expect(createSpy.mock.calls.filter((c) => c[0] === 'canvas')).toHaveLength(0);
+      expect(ctx.clearRect).not.toHaveBeenCalled(); // nothing to redraw
+      createSpy.mockRestore();
+    } finally {
+      restore();
+    }
+  });
+
+  it("a cheap-path resize that crosses the cache: 'auto' 120px boundary still re-evaluates the strip (review finding 4)", () => {
+    // Square shape, cols: 16, dpr 1: built at 118 device px keeps a strip
+    // (118 <= 120). 118/16 = 7.375px threshold; a move to 125 (Δ=7) stays
+    // under it -- the cheap path -- but 125 > 120 should drop the strip.
+    const { canvas, ctx, restore } = setup({ width: 118, height: 118 });
+    try {
+      const instance = createDithered(canvas, fillOptions({ cache: 'auto', cols: 16 }));
+      ctx.drawImage.mockClear();
+      instance.renderFrame(0);
+      expect(ctx.drawImage).toHaveBeenCalled(); // a strip exists at 118px
+
+      lastResizeObserver().trigger({ width: 125, height: 125 });
+
+      ctx.drawImage.mockClear();
+      ctx.fill.mockClear();
+      instance.renderFrame(0);
+      // Strip dropped (125 > 120): painted directly, not blitted.
+      expect(ctx.drawImage).not.toHaveBeenCalled();
+      expect(ctx.fill).toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it('the one-cell threshold has a floor above the smallest possible device-pixel delta, so a fine grid does not rebuild on every single-pixel jitter (review finding 5)', () => {
+    // cols: 32 at a 30px fill gives a raw threshold of 30/32 = 0.9375
+    // device px. Device widths are always whole pixels, so the smallest
+    // possible nonzero move is 1px -- which an un-floored (or floored-at-1)
+    // threshold would still call a full rebuild every time (`1 >= 0.9375`
+    // or `1 >= 1`), i.e. on every single ResizeObserver delivery.
+    const { canvas, restore } = setup({ width: 30, height: 30 });
+    try {
+      createDithered(canvas, fillOptions({ cache: true, cols: 32 }));
+      const createSpy = vi.spyOn(document, 'createElement');
+
+      // 30 -> 30.6 CSS px rounds the device width from 30 to 31: a 1px move.
+      lastResizeObserver().trigger({ width: 30.6, height: 30.6 });
+
+      expect(canvas.style.width).toBe('30.6px'); // accepted (past the 0.5 epsilon)
+      expect(createSpy.mock.calls.filter((c) => c[0] === 'canvas')).toHaveLength(0);
+      createSpy.mockRestore();
+    } finally {
+      restore();
+    }
+  });
+
+  it('renderFrame() while dormant does not paint into a 0x0 backing store (review finding 7)', () => {
+    const { canvas, ctx, restore } = setup({ width: 0, height: 0 }); // degenerate from the start
+    try {
+      const instance = createDithered(canvas, fillOptions());
+      expect(canvas.style.width).toBe('0px'); // dormant from creation
+
+      ctx.clearRect.mockClear();
+      ctx.fill.mockClear();
+      instance.renderFrame(0);
+
+      expect(ctx.clearRect).not.toHaveBeenCalled();
+      expect(ctx.fill).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it('cache: true at a large resolved size falls back to direct painting instead of a blank strip (review finding 9)', () => {
+    // 800 (device px, dpr defaults to 1 in jsdom) * 48 (frames) = 38400,
+    // comfortably past the 32767 safe-canvas-dimension cap (review finding
+    // 3: the previous 16384 cap was too low and tripped for ordinary
+    // instances, so it was raised to a realistic browser maximum -- this
+    // box is sized to still exceed even the raised cap).
+    const { canvas, ctx, restore } = setup({ width: 800, height: 800 });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const instance = createDithered(canvas, fillOptions({ cache: true, frames: 48 }));
+      ctx.drawImage.mockClear();
+      ctx.fill.mockClear();
+
+      instance.renderFrame(0);
+
+      // No strip is built -- painted directly instead of blitting a blank one.
+      expect(ctx.drawImage).not.toHaveBeenCalled();
+      expect(ctx.fill).toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      restore();
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('a default-configured retina instance keeps its sprite cache and does not warn (review finding 3)', () => {
+    // The previous 16384 cap (checked as `W * frames`) tripped for entirely
+    // ordinary configurations once a real DPR was involved -- and did so
+    // under `cache: 'auto'`, not just an explicit `cache: true`, logging a
+    // warning whose remedy ("pass `cache: false`") made no sense to a
+    // caller who never asked for a cache at all.
+    vi.stubGlobal('devicePixelRatio', 3);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // Square shape at the cache: 'auto' on-threshold (120px) under dpr 3:
+    // W = 360, so the strip would be 360 * 48 = 17280px wide -- suppressed
+    // by the old 16384 cap, kept by the corrected one.
+    const onThreshold = makeFakeCanvas();
+    const onThresholdStub = stubGetContext(onThreshold.ctx);
+    try {
+      const instance = createDithered(onThreshold.canvas, {
+        shape: SQUARE_SHAPE,
+        brightness: () => true,
+        size: 120,
+      });
+      onThreshold.ctx.drawImage.mockClear();
+      instance.renderFrame(1);
+      expect(onThreshold.ctx.drawImage).toHaveBeenCalled();
+    } finally {
+      onThresholdStub.restore();
+    }
+
+    // A 3:1 shape at the *default* size (48px) under dpr 3: W = 432, so the
+    // strip would be 432 * 48 = 20736px wide -- also wrongly suppressed by
+    // the old cap.
+    const wideAtDefault = makeFakeCanvas();
+    const wideStub = stubGetContext(wideAtDefault.ctx);
+    try {
+      const instance = createDithered(wideAtDefault.canvas, {
+        shape: { path: 'M0 0 H30 V10 H0 Z', viewBox: { x: 0, y: 0, width: 30, height: 10 } },
+        brightness: () => true,
+      });
+      wideAtDefault.ctx.drawImage.mockClear();
+      instance.renderFrame(1);
+      expect(wideAtDefault.ctx.drawImage).toHaveBeenCalled();
+    } finally {
+      wideStub.restore();
+    }
+
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it('reconfigures on consecutive DPR changes, leaving a live listener only on the newest MediaQueryList (review finding 10)', () => {
+    vi.stubGlobal('devicePixelRatio', 1);
+    const { canvas } = makeFakeCanvas();
+    createDithered(canvas, {
+      shape: SQUARE_SHAPE,
+      brightness: () => true,
+      size: 40,
+      cols: 4,
+      cache: false,
+    });
+    expect(canvas.width).toBe(40);
+
+    env.changeDpr(2);
+    expect(canvas.width).toBe(80);
+
+    env.changeDpr(3);
+    expect(canvas.width).toBe(120);
+
+    const activeLists = env.mediaQueries.filter((m) => m.listeners.size > 0);
+    expect(activeLists).toHaveLength(1);
+    expect(activeLists[0].media).toBe('(resolution: 3dppx)');
+  });
+
+  it('supports the legacy addListener/removeListener MediaQueryList API (review finding 11)', () => {
+    const legacyListeners = new Map<string, Set<() => void>>();
+    vi.stubGlobal('devicePixelRatio', 1);
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => {
+        const listeners = new Set<() => void>();
+        legacyListeners.set(query, listeners);
+        return {
+          media: query,
+          matches: false,
+          addListener: (cb: () => void) => listeners.add(cb),
+          removeListener: (cb: () => void) => listeners.delete(cb),
+        };
+      }),
+    );
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, {
+      shape: SQUARE_SHAPE,
+      brightness: () => true,
+      size: 40,
+      cols: 4,
+      cache: false,
+    });
+
+    const firstQuery = '(resolution: 1dppx)';
+    expect(legacyListeners.get(firstQuery)?.size).toBe(1);
+
+    instance.destroy();
+    expect(legacyListeners.get(firstQuery)?.size).toBe(0);
+  });
+
+  it('degrades to no DPR tracking when matchMedia is absent or throws (review finding 11)', () => {
+    vi.stubGlobal('matchMedia', undefined);
+    const { canvas: canvasA } = makeFakeCanvas();
+    expect(() =>
+      createDithered(canvasA, {
+        shape: SQUARE_SHAPE,
+        brightness: () => true,
+        size: 40,
+        cols: 4,
+        cache: false,
+      }),
+    ).not.toThrow();
+
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => {
+        throw new Error('nope');
+      }),
+    );
+    const { canvas: canvasB } = makeFakeCanvas();
+    expect(() =>
+      createDithered(canvasB, {
+        shape: SQUARE_SHAPE,
+        brightness: () => true,
+        size: 40,
+        cols: 4,
+        cache: false,
+      }),
+    ).not.toThrow();
+  });
+
+  // -- cache policy against the resolved size --------------------------------
+
+  it("cache: 'auto' is evaluated against the resolved (fill-fitted) size", () => {
+    const big = setup({ width: 400, height: 400 });
+    try {
+      const bigInstance = createDithered(big.canvas, fillOptions({ cache: 'auto' }));
+      big.ctx.drawImage.mockClear();
+      bigInstance.renderFrame(1);
+      // 400px resolves above the auto threshold (120) -> no strip -> the
+      // main canvas paints cells directly, never via drawImage.
+      expect(big.ctx.drawImage).not.toHaveBeenCalled();
+      bigInstance.destroy();
+    } finally {
+      big.restore();
+    }
+
+    const small = setup({ width: 60, height: 60 });
+    try {
+      const smallInstance = createDithered(small.canvas, fillOptions({ cache: 'auto' }));
+      small.ctx.drawImage.mockClear();
+      smallInstance.renderFrame(1);
+      // 60px resolves at/under the auto threshold -> a strip exists -> the
+      // main canvas blits it via drawImage.
+      expect(small.ctx.drawImage).toHaveBeenCalled();
+      smallInstance.destroy();
+    } finally {
+      small.restore();
+    }
   });
 });

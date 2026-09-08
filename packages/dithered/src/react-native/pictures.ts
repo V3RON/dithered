@@ -6,6 +6,7 @@ import {
   paintFrame,
   resolveOptions,
   resolveRows,
+  resolveSizePx,
   surfaceSize,
   toPalette,
   type DitheredOptions,
@@ -105,7 +106,7 @@ export function useDitheredPictures(options: DitheredPicturesOptions): DitheredP
       radius,
       hitTest,
     });
-    const { width, height } = surfaceSize(opts);
+    const { width, height } = surfaceSize(resolveSizePx(opts.size), opts.shape);
     const frameCount = Math.max(1, opts.frames);
 
     const cells =

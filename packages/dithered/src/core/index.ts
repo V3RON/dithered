@@ -4,13 +4,16 @@
  * DOM, so both `dithered` (canvas) and `dithered/react-native` (Skia) build on
  * it without dragging one platform's globals into the other's bundle.
  */
-export type { Brightness, DitheredOptions, ResolvedOptions } from './options';
+export type { Brightness, DitheredOptions, ResolvedOptions, Size } from './options';
 export {
   DEFAULTS,
   assignDefined,
   clonePaletteOption,
+  effectiveDpr,
+  fitSize,
   resolveOptions,
   resolveRows,
+  resolveSizePx,
   surfaceSize,
 } from './options';
 export type { PaintContext, PaintGeometry } from './paint';

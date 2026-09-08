@@ -10,11 +10,20 @@ import type { DitherMatrix } from '../matrix';
  */
 export type Brightness = (cell: Cell, t: number) => number | boolean;
 
+/** CSS px (web) / dp (native) height, or `'fill'` to track the canvas's parent box (web only). */
+export type Size = number | 'fill';
+
 export interface DitheredOptions {
   shape: Shape;
   brightness: Brightness;
-  /** CSS px (web) / dp (native) height; width follows the shape's aspect ratio. Default 48. */
-  size?: number;
+  /**
+   * CSS px (web) / dp (native) height; width follows the shape's aspect
+   * ratio. `'fill'` tracks the canvas's parent content box (contain-fit) —
+   * web only, throws on native. Default 48.
+   */
+  size?: Size;
+  /** Upper bound on the backing-store device pixel ratio. Default 3. Web only; native ignores it. */
+  maxDpr?: number;
   /** Grid columns. Default 16. */
   cols?: number;
   /** Grid rows. Defaults to a value derived from the shape's aspect ratio. */
@@ -91,6 +100,7 @@ export const DEFAULTS: Omit<ResolvedOptions, 'shape' | 'brightness' | 'hitTest'>
   fg: string;
 } = {
   size: 48,
+  maxDpr: 3,
   cols: 16,
   rows: 0, // 0 means "derive from aspect ratio" (see resolveRows)
   matrix: 'bayer4',
@@ -167,13 +177,66 @@ export function resolveRows(opts: ResolvedOptions): number {
 }
 
 /**
- * Width/height, in the caller's units, for a shape rendered at `size`.
- * Left unrounded: the web driver rounds only when setting the backing
- * store's integer pixel dimensions, and keeps the CSS size exact.
+ * Width/height, in the caller's units, for a shape rendered at a resolved
+ * `sizePx` (a plain number — never `'fill'`; resolve that first with
+ * {@link resolveSizePx} or the web renderer's fill-fitting). Left
+ * unrounded: the web driver rounds only when setting the backing store's
+ * integer pixel dimensions, and keeps the CSS size exact.
  */
-export function surfaceSize(opts: ResolvedOptions, scale = 1): { width: number; height: number } {
+export function surfaceSize(
+  sizePx: number,
+  shape: Shape,
+  scale = 1,
+): { width: number; height: number } {
   return {
-    width: opts.size * aspectOf(opts.shape) * scale,
-    height: opts.size * scale,
+    width: sizePx * aspectOf(shape) * scale,
+    height: sizePx * scale,
   };
+}
+
+/**
+ * Resolves a {@link Size} to a plain pixel number, throwing on `'fill'`.
+ *
+ * `'fill'` needs a DOM parent to measure and is web-only; the web renderer
+ * handles it directly rather than calling this. Everywhere else that
+ * consumes a resolved size — natively, or in the platform-free core —
+ * goes through this guard so the failure is a clear, immediate error
+ * rather than `NaN` propagating through the geometry math.
+ */
+export function resolveSizePx(size: Size): number {
+  if (size === 'fill') {
+    throw new Error(
+      "dithered: size: 'fill' is web-only; on native, size the <Canvas> through the style prop.",
+    );
+  }
+  return size;
+}
+
+/**
+ * Contain-fits a box of aspect ratio `aspect` (width / height) inside a
+ * `contentWidth` x `contentHeight` box, returning the fitted height (the
+ * quantity `size` represents throughout this library). Returns `0` for a
+ * degenerate content box (either axis `<= 0`) or a non-finite/non-positive
+ * aspect ratio, signaling "nothing to fit" rather than `NaN` or `Infinity`.
+ *
+ * Pure and DOM-free so it is directly unit-testable; the web renderer
+ * supplies the actual parent measurement.
+ */
+export function fitSize(contentWidth: number, contentHeight: number, aspect: number): number {
+  if (!(contentWidth > 0) || !(contentHeight > 0) || !Number.isFinite(aspect) || !(aspect > 0)) {
+    return 0;
+  }
+  return Math.min(contentHeight, contentWidth / aspect);
+}
+
+/**
+ * The device pixel ratio actually used for the backing store: the raw
+ * ratio clamped to `maxDpr` (itself clamped to at least `1`). `raw` is
+ * likewise floored to `1` when non-finite or non-positive, so a `0` or
+ * unreadable `devicePixelRatio` never collapses the backing store.
+ */
+export function effectiveDpr(raw: number, maxDpr: number): number {
+  const safeRaw = Number.isFinite(raw) && raw > 0 ? raw : 1;
+  const safeMax = Number.isFinite(maxDpr) && maxDpr >= 1 ? maxDpr : 1;
+  return Math.min(safeRaw, safeMax);
 }

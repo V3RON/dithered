@@ -1,6 +1,14 @@
 import { forwardRef, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, MutableRefObject, Ref } from 'react';
-import { hasCurrentColor, renderToDataURL, resolveOptions, surfaceSize, toPalette } from './core';
+import {
+  DEFAULTS,
+  hasCurrentColor,
+  renderToDataURL,
+  resolveOptions,
+  resolveSizePx,
+  surfaceSize,
+  toPalette,
+} from './core';
 import { gem } from './presets';
 import { createDithered } from './renderer';
 import type { Brightness, DitheredInstance, DitheredOptions } from './renderer';
@@ -127,6 +135,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     shape,
     brightness = DEFAULT_BRIGHTNESS,
     size,
+    maxDpr,
     cols,
     rows,
     matrix,
@@ -174,7 +183,11 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
   const fallbackStyle = useMemo((): CSSProperties | undefined => {
     if (!ssrFallback) return undefined;
     const resolved = resolveOptions({ shape, brightness, size });
-    const { width, height } = surfaceSize(resolved);
+    // The server has no DOM to measure a `'fill'` canvas against, so the
+    // placeholder falls back to the default pixel size — the real size
+    // takes over via `ResizeObserver` once `createDithered` mounts.
+    const fallbackSize = resolved.size === 'fill' ? resolveSizePx(DEFAULTS.size) : resolved.size;
+    const { width, height } = surfaceSize(fallbackSize, shape);
     if (!showFallback) return { width, height };
     // Render the frame the mount effect will actually paint, not always
     // `initialFrame`: when `progress` is controlled, the determinate-
@@ -191,7 +204,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     const dataUrl = renderToDataURL({
       shape,
       brightness,
-      size,
+      size: fallbackSize,
       cols,
       rows,
       matrix,
@@ -232,6 +245,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
       shape,
       brightness,
       size,
+      maxDpr,
       cols,
       rows,
       matrix,
@@ -273,6 +287,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
       shape,
       brightness,
       size,
+      maxDpr,
       cols,
       rows,
       matrix,
@@ -291,6 +306,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     shape,
     brightness,
     size,
+    maxDpr,
     cols,
     rows,
     matrix,

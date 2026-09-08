@@ -9,7 +9,14 @@
 export type { Shape, Cell, FillRule, HitTester } from './shape';
 export { BAYER_4, aspectOf, defaultRowsFor, sampleCells } from './shape';
 export { hash, valueNoise, fbm } from './noise';
-export type { Brightness, DitheredOptions, PaintContext, PaintGeometry, Palette } from './core';
+export type {
+  Brightness,
+  DitheredOptions,
+  PaintContext,
+  PaintGeometry,
+  Palette,
+  Size,
+} from './core';
 export {
   computeGeometry,
   frameAt,
