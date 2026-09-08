@@ -203,7 +203,13 @@ export function createDithered(
     // running it before the throw would poison `paintOpts` with that
     // candidate and leave it poisoned even after `update()` rolls `opts`
     // back, since only `opts` is restored on catch.
-    const newCells = sampleCells(opts.shape, opts.cols, opts.hitTest, resolveRows(opts), opts.matrix);
+    const newCells = sampleCells(
+      opts.shape,
+      opts.cols,
+      opts.hitTest,
+      resolveRows(opts),
+      opts.matrix,
+    );
     applyResolvedFg();
 
     canvas.style.width = css.width + 'px';
