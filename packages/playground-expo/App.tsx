@@ -5,6 +5,7 @@ import { StatusBar } from 'expo-status-bar';
 import {
   Dithered,
   circle,
+  compose,
   diamond,
   fill,
   gem,
@@ -38,6 +39,16 @@ const SHAPES: Array<{ name: string; shape: Shape }> = [
   { name: 'heart', shape: heart },
 ];
 
+// Module-level, stable across renders — same reasoning as `FILL_UP` above.
+const BLEND_PRIMARY = gem();
+const BLEND_TARGETS: Array<{ name: string; brightness: Brightness }> = [
+  { name: 'sweep', brightness: sweep() },
+  { name: 'pulse', brightness: pulse() },
+  { name: 'rain', brightness: rain() },
+  { name: 'wave', brightness: wave() },
+];
+const MIX_STEPS = [0, 0.25, 0.5, 0.75, 1];
+
 const INK = '#111111';
 const MUTED = '#6b7280';
 
@@ -59,9 +70,30 @@ function Tile({ label, children }: { label: string; children: React.ReactNode })
   );
 }
 
+function Chip({
+  label,
+  active,
+  onPress,
+}: {
+  label: string;
+  active: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable style={[styles.chip, active && styles.chipActive]} onPress={onPress}>
+      <Text style={[styles.chipText, active && styles.chipTextActive]}>{label}</Text>
+    </Pressable>
+  );
+}
+
 export default function App() {
   const [paused, setPaused] = useState(false);
   const [progress, setProgress] = useState(0.35);
+  const [blendName, setBlendName] = useState('none');
+  const [mix, setMix] = useState(0.5);
+
+  const blendTarget = BLEND_TARGETS.find((t) => t.name === blendName);
+  const blended = blendTarget ? compose.blend(BLEND_PRIMARY, blendTarget.brightness, mix) : BLEND_PRIMARY;
 
   return (
     <SafeAreaProvider>
@@ -118,6 +150,48 @@ export default function App() {
             </Tile>
           </Section>
 
+          <Section title="Blend with">
+            <View style={{ gap: 12 }}>
+              <Tile label={blendTarget ? `gem × ${blendName} @ ${mix.toFixed(2)}` : 'gem'}>
+                <Dithered
+                  shape={rozenite}
+                  brightness={blended}
+                  size={72}
+                  fg={INK}
+                  paused={paused}
+                  label="Blended loader"
+                />
+              </Tile>
+              <View style={styles.chipRow}>
+                <Chip
+                  label="none"
+                  active={blendName === 'none'}
+                  onPress={() => setBlendName('none')}
+                />
+                {BLEND_TARGETS.map(({ name }) => (
+                  <Chip
+                    key={name}
+                    label={name}
+                    active={name === blendName}
+                    onPress={() => setBlendName(name)}
+                  />
+                ))}
+              </View>
+              {blendTarget && (
+                <View style={styles.chipRow}>
+                  {MIX_STEPS.map((m) => (
+                    <Chip
+                      key={m}
+                      label={`${m.toFixed(2)}`}
+                      active={m === mix}
+                      onPress={() => setMix(m)}
+                    />
+                  ))}
+                </View>
+              )}
+            </View>
+          </Section>
+
           <View style={styles.controls}>
             <Pressable style={styles.button} onPress={() => setPaused((p) => !p)}>
               <Text style={styles.buttonText}>{paused ? 'Resume' : 'Pause'}</Text>
@@ -153,4 +227,15 @@ const styles = StyleSheet.create({
     backgroundColor: INK,
   },
   buttonText: { color: '#ffffff', fontSize: 14, fontWeight: '600' },
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  chip: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+  },
+  chipActive: { backgroundColor: INK, borderColor: INK },
+  chipText: { fontSize: 12, color: INK, fontWeight: '600' },
+  chipTextActive: { color: '#ffffff' },
 });
