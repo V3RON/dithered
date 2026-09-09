@@ -623,6 +623,38 @@ describe('createDithered', () => {
     }
   });
 
+  // Regression: `blit` sets the *device* transform (`W / cssW`) before
+  // clearing in CSS units, but the cached branch's `drawImage` rectangles
+  // are already in device pixels. Painting the strip without dropping that
+  // transform first scaled every cached frame up by the DPR — on a retina
+  // display the sprite was drawn twice as large as the canvas and clipped
+  // at its bottom-right corner (the shape looked cut off / overflowing).
+  // Asserted as "the transform in effect at the `drawImage` call is the
+  // identity", not just "setTransform(1,...) was called", so a reordering
+  // that puts the device transform back afterwards can't pass.
+  it('drops the device transform before blitting the sprite strip, so a cached frame is not scaled by the DPR', () => {
+    vi.stubGlobal('devicePixelRatio', 2);
+    const { canvas, ctx } = makeFakeCanvas();
+    const strip = stubGetContext(make2dCtx());
+    try {
+      createDithered(canvas, baseOptions({ cache: true, frames: 48 }));
+
+      expect(ctx.drawImage).toHaveBeenCalledTimes(1);
+      const drawOrder = ctx.drawImage.mock.invocationCallOrder[0];
+      const transformsBefore = ctx.setTransform.mock.calls.filter(
+        (_call, i) => ctx.setTransform.mock.invocationCallOrder[i] < drawOrder,
+      );
+      expect(transformsBefore[transformsBefore.length - 1]).toEqual([1, 0, 0, 1, 0, 0]);
+
+      // ...and the destination rect is the full backing store, so the
+      // sprite covers exactly the canvas at 1:1 device pixels.
+      const [, , , , , dx, dy, dw, dh] = ctx.drawImage.mock.calls[0];
+      expect([dx, dy, dw, dh]).toEqual([0, 0, canvas.width, canvas.height]);
+    } finally {
+      strip.restore();
+    }
+  });
+
   it("wraps a negative initialFrame the same way core/static.ts's wrapFrame does", () => {
     const { canvas, ctx } = makeFakeCanvas();
     const strip = stubGetContext(make2dCtx());

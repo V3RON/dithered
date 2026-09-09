@@ -760,6 +760,14 @@ export function createDithered(
       // *current* W/H means an unchanged resolution is a plain 1:1 blit,
       // and a cheap-path resize since the last rebuild is a rescale — one
       // code path for both.
+      //
+      // Both rectangles are in *device* pixels, so the device transform
+      // set above (`W / cssW`) must be dropped first — leaving it in
+      // place scaled every cached frame up by the DPR, painting the
+      // sprite `dpr` times too large and clipping everything past the
+      // canvas's bottom-right corner. Only `clearRect` above wants the
+      // CSS-pixel transform, and it has already run.
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.drawImage(sheet, frame * builtW, 0, builtW, builtH, 0, 0, W, H);
     } else {
       paintFrame(
