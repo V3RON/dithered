@@ -148,6 +148,147 @@ describe('Dithered', () => {
     expect(mockedCreateDithered).toHaveBeenCalledTimes(1);
   });
 
+  // ADR 0004: with `transition` set, an option change is routed through
+  // transitionTo() (a morph) instead of update() (a cut).
+  it('without `transition`, a shape change calls update() and never transitionTo()', () => {
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} fg="#111111" />);
+    const instance = lastInstance();
+    const updateSpy = vi.spyOn(instance, 'update');
+    const transitionToSpy = vi.spyOn(instance, 'transitionTo');
+
+    rerender(<Dithered shape={SQUARE_SHAPE} fg="#222222" />);
+
+    expect(updateSpy).toHaveBeenCalledWith(expect.objectContaining({ fg: '#222222' }));
+    expect(transitionToSpy).not.toHaveBeenCalled();
+  });
+
+  it('with `transition` set, a shape/option change calls transitionTo() instead of update()', () => {
+    const { rerender } = render(
+      <Dithered shape={SQUARE_SHAPE} fg="#111111" transition={{ duration: 400 }} />,
+    );
+    const instance = lastInstance();
+    const updateSpy = vi.spyOn(instance, 'update');
+    const transitionToSpy = vi.spyOn(instance, 'transitionTo');
+
+    rerender(<Dithered shape={SQUARE_SHAPE} fg="#222222" transition={{ duration: 400 }} />);
+
+    // `transition` reaches `transitionTo()` fully resolved (`onLoopEnd`
+    // filled in from its default) — see the "declarative prop is the
+    // whole truth for this render" test below (finding 6).
+    expect(transitionToSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fg: '#222222',
+        transition: { duration: 400, onLoopEnd: false },
+      }),
+    );
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  // Regression (finding 5): the documented usage passes `transition` as an
+  // inline object literal (`transition={{ duration: 400 }}`), a fresh
+  // reference on every render. A re-render with no *option* change must
+  // not call transitionTo()/update() at all — dependency-array churn on
+  // `transition` alone is not a change.
+  it('with `transition` set, an unrelated re-render calls neither transitionTo() nor update() (finding 5)', () => {
+    const { rerender } = render(
+      <Dithered shape={SQUARE_SHAPE} fg="#111111" transition={{ duration: 400 }} />,
+    );
+    const instance = lastInstance();
+    const updateSpy = vi.spyOn(instance, 'update');
+    const transitionToSpy = vi.spyOn(instance, 'transitionTo');
+
+    // Same logical props, but `transition` is a brand-new object each time
+    // — exactly the documented usage pattern.
+    rerender(<Dithered shape={SQUARE_SHAPE} fg="#111111" transition={{ duration: 400 }} />);
+    rerender(<Dithered shape={SQUARE_SHAPE} fg="#111111" transition={{ duration: 400 }} />);
+
+    expect(transitionToSpy).not.toHaveBeenCalled();
+    expect(updateSpy).not.toHaveBeenCalled();
+
+    // A real change is still routed through transitionTo(), exactly once.
+    rerender(<Dithered shape={SQUARE_SHAPE} fg="#222222" transition={{ duration: 400 }} />);
+    expect(transitionToSpy).toHaveBeenCalledTimes(1);
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  // Regression (finding 6): the declarative `transition` prop is the whole
+  // truth for a render — dropping a field puts it back to its default
+  // rather than staying stuck at whatever an earlier render last set. The
+  // renderer's own `transitionTo(patch)` merge is sticky (see
+  // `renderer.test.ts`'s own coverage of that), but the React wrapper must
+  // not lean on that stickiness for its *declarative* prop, or
+  // `onLoopEnd: true` could never be turned back off from a component.
+  it("with `transition` set, dropping a field from the prop resets it to its default, not the previous render's value (finding 6)", () => {
+    const { rerender } = render(
+      <Dithered
+        shape={SQUARE_SHAPE}
+        fg="#111111"
+        transition={{ duration: 400, onLoopEnd: true }}
+      />,
+    );
+    const instance = lastInstance();
+    const transitionToSpy = vi.spyOn(instance, 'transitionTo');
+
+    // `onLoopEnd` is dropped this render, not repeated as `false` — under
+    // the old sticky merge this would still resolve to `onLoopEnd: true`.
+    rerender(<Dithered shape={SQUARE_SHAPE} fg="#222222" transition={{ duration: 400 }} />);
+
+    expect(transitionToSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ transition: { duration: 400, onLoopEnd: false } }),
+    );
+  });
+
+  // Regression (finding 4): `paused` and an option change landing in the
+  // *same* commit must produce the same morph-vs-cut decision as
+  // `dithered/native` — resolved in favour of native's rule ("the final,
+  // post-commit state decides"), via effect ordering here (see the
+  // `paused` effect's own comment).
+  it('unpausing and changing shape together starts a real morph, not an immediate cut (finding 4)', async () => {
+    const { rerender } = render(
+      <Dithered shape={SQUARE_SHAPE} paused transition={{ duration: 400 }} />,
+    );
+    const instance = lastInstance();
+    const transitionToSpy = vi.spyOn(instance, 'transitionTo');
+
+    const otherShape = { ...SQUARE_SHAPE }; // a distinct reference is all `changed` needs.
+    rerender(<Dithered shape={otherShape} transition={{ duration: 400 }} />); // `paused` dropped -> false.
+
+    expect(transitionToSpy).toHaveBeenCalled();
+    const promise = transitionToSpy.mock.results[0]!.value as Promise<void>;
+    let resolved = false;
+    void promise.then(() => {
+      resolved = true;
+    });
+
+    // An immediate cut (the pre-fix behaviour: the reconfigure effect ran
+    // while the instance was still paused from the previous render) would
+    // already be settled here — `cutToTarget` resolves synchronously. A
+    // real morph is still in progress: no tick has fired yet.
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+  });
+
+  // Mirror of the above: pausing and changing shape together must cut, on
+  // both platforms — there is no loop left to play a morph on once the
+  // instance ends this commit paused.
+  it('pausing and changing shape together still cuts immediately (finding 4)', async () => {
+    const { rerender } = render(<Dithered shape={SQUARE_SHAPE} transition={{ duration: 400 }} />);
+    const instance = lastInstance();
+    const transitionToSpy = vi.spyOn(instance, 'transitionTo');
+
+    const otherShape = { ...SQUARE_SHAPE };
+    rerender(<Dithered shape={otherShape} paused transition={{ duration: 400 }} />);
+
+    expect(transitionToSpy).toHaveBeenCalled();
+    const promise = transitionToSpy.mock.results[0]!.value as Promise<void>;
+    let resolved = false;
+    void promise.then(() => {
+      resolved = true;
+    });
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
   it('toggling paused calls setPaused with the new value', () => {
     const { rerender } = render(<Dithered shape={SQUARE_SHAPE} paused={false} />);
     const setPausedSpy = vi.spyOn(lastInstance(), 'setPaused');
@@ -157,6 +298,55 @@ describe('Dithered', () => {
 
     rerender(<Dithered shape={SQUARE_SHAPE} paused={false} />);
     expect(setPausedSpy).toHaveBeenCalledWith(false);
+  });
+
+  // Regression test (finding 1): `progress` holds the instance paused via
+  // `setPaused(true)`. A subsequent option change routed through
+  // `transitionTo()` (because `transition` is set) — here, on an instance
+  // that isn't advancing, taking `transitionTo`'s immediate-cut branch —
+  // must not silently resume playback. The underlying bug was
+  // `cutToTarget()` overwriting the imperative `isPaused` flag with the
+  // declarative `paused` *option* (`false`, the default — the reconfigure
+  // effect's patch never includes `paused` at all) and then calling
+  // `schedule()`, which requests a fresh animation frame the instant a
+  // shape/brightness prop changes on a `progress`-controlled indicator.
+  it('a transitionTo() cut on a progress-paused instance does not resume playback (finding 1)', () => {
+    const { rerender } = render(
+      <Dithered
+        shape={SQUARE_SHAPE}
+        progress={0.5}
+        frames={10}
+        period={1000}
+        transition={{ duration: 400 }}
+      />,
+    );
+    // `progress` paused the instance synchronously on mount (the mount
+    // effect itself schedules an animation frame before the later
+    // `progress` effect cancels it — `cancelAnimationFrame` in the test
+    // harness doesn't remove the entry, only marks it moot — so this
+    // just records the baseline rather than assuming a specific count).
+    const rafCountAfterMount = env.rafCallbacks.length;
+
+    const instance = lastInstance();
+    const transitionToSpy = vi.spyOn(instance, 'transitionTo');
+
+    rerender(
+      <Dithered
+        shape={SQUARE_SHAPE}
+        fg="#222222"
+        progress={0.5}
+        frames={10}
+        period={1000}
+        transition={{ duration: 400 }}
+      />,
+    );
+
+    // The `fg` change is routed through transitionTo() (transition is
+    // set); on a paused instance that's an immediate cut to the target,
+    // not a real morph.
+    expect(transitionToSpy).toHaveBeenCalled();
+    // Still paused: the cut must not have called `requestAnimationFrame`.
+    expect(env.rafCallbacks.length).toBe(rafCountAfterMount);
   });
 
   it('progress={0.5} pauses and drives the expected phase (default frames=48)', () => {

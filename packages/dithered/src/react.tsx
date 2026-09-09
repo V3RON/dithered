@@ -9,6 +9,8 @@ import {
   resolveSizePx,
   surfaceSize,
   toPalette,
+  TRANSITION_DEFAULTS,
+  type ResolvedTransitionOptions,
 } from './core';
 import { gem } from './presets';
 import { createDithered } from './renderer';
@@ -174,6 +176,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     respectReducedMotion,
     initialFrame,
     speed,
+    transition,
     progress,
     time,
     onFrame,
@@ -263,6 +266,51 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     progress,
   ]);
 
+  // `transition`'s own fields, resolved with the same defaults
+  // `resolveOptions` would fill in — read fresh from the `transition` prop
+  // object every render, never merged with an *earlier* render's
+  // `transition` (finding 6): the whole prop is the truth for this
+  // render, so dropping a field (`{ duration: 400 }` after `{ duration:
+  // 400, onLoopEnd: true }`) puts it back to its default instead of
+  // leaving it stuck at whatever a previous render last set — the
+  // declarative prop is not a one-way door. This is deliberately *not*
+  // how `transitionTo`'s own patch merging works on the imperative core
+  // API (`renderer.ts`'s `mergeTransitionOption` is sticky on purpose,
+  // and stays that way) — only the declarative prop gets whole-object
+  // semantics, because only the declarative prop can silently go stale
+  // between renders without the caller writing every field every time.
+  const resolvedTransition: ResolvedTransitionOptions | undefined = transition
+    ? {
+        duration: transition.duration ?? TRANSITION_DEFAULTS.duration,
+        onLoopEnd: transition.onLoopEnd ?? TRANSITION_DEFAULTS.onLoopEnd,
+      }
+    : undefined;
+
+  // The reconfigure effect's own "did any *option* actually change" record
+  // — deliberately excludes `transition` (see the effect below, and
+  // finding 5: the documented `transition={{ duration: 400 }}` usage is a
+  // fresh object literal every render, so comparing `transition` itself by
+  // identity would treat *every* unrelated re-render as a change).
+  const prevOptionsRef = useRef({
+    shape,
+    brightness,
+    size,
+    maxDpr,
+    cols,
+    rows,
+    matrix,
+    frames,
+    period,
+    fg,
+    bg,
+    cache,
+    gap,
+    radius,
+    respectReducedMotion,
+    initialFrame,
+    speed,
+  });
+
   // Latest-value refs rather than passing the callbacks through
   // `update()`: an inline arrow function (the overwhelmingly common
   // case) has a fresh identity every render, and routing that through
@@ -302,6 +350,7 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
       respectReducedMotion,
       initialFrame,
       speed,
+      transition,
       onFrame: (f, t) => onFrameRef.current?.(f, t),
       onLoop: (loops) => onLoopRef.current?.(loops),
     });
@@ -320,18 +369,114 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Applies `paused` directly via `setPaused()` — separate from the
+  // reconfigure effect below so toggling it never triggers a resample/
+  // cache rebuild. Skipped while `time` or `progress` is controlled,
+  // since the effect below owns pausing then.
+  //
+  // Declared *before* the reconfigure effect on purpose (finding 4):
+  // React runs a component's effects in declaration order, so when
+  // `paused` and an option like `shape` change in the same commit, this
+  // effect's `setPaused()` call lands on the instance before the
+  // reconfigure effect below calls `update()`/`transitionTo()` — meaning
+  // that call sees the instance's *new* pause state, not the one it had
+  // before this render. That matters because `transitionTo()` decides
+  // morph-vs-cut from whether the loop is currently advancing: with the
+  // effects in the other order, unpausing and changing `shape` together
+  // would call `transitionTo()` while the instance was *still* paused
+  // from the previous render, taking the immediate-cut branch — on
+  // `dithered/native`, the same two props in the same commit start a real
+  // morph, because `holding` there is computed from *this* render's props
+  // directly (see `native/Dithered.tsx`'s own comment on `holding`). This
+  // ordering makes the two platforms agree: the *final*, post-commit
+  // pause state decides, not which prop a caller happened to change in
+  // which commit. See the README's "Transitions" section for the
+  // user-facing rule.
+  useEffect(() => {
+    if (skipNextPaused.current) {
+      skipNextPaused.current = false;
+      return;
+    }
+    // `time == null` — loose, so it covers `null` as well as `undefined`.
+    // `null` is documented as behaving exactly like an absent prop (the
+    // `time={sharedValue ?? null}` pattern), and the effect below hands
+    // it to `clearTime()` rather than to `setTime`, so it does not own
+    // pausing and must not suppress it here.
+    if (progress === undefined && time == null) instanceRef.current?.setPaused(paused);
+  }, [paused, progress, time]);
+
   // Reconfigure (may resample cells / rebuild the sprite cache) on option
   // changes, skipping the initial mount run since `createDithered` above
   // already applied these values. `time`, `progress`, `onFrame` and
   // `onLoop` are deliberately absent: the first two get their own effect
   // below (a scrub at 60 Hz must never touch this one), and the
   // callbacks are wired once at mount via the refs above.
+  //
+  // Guarded on whether an option *actually* changed since the last render
+  // (finding 5): this effect's dependency array still has to list
+  // `transition` (its `duration`/`onLoopEnd` need to reach `update()`/
+  // `transitionTo()` too), but `transition` is deliberately left out of
+  // the "did anything change" comparison itself. Without that, the
+  // documented `transition={{ duration: 400 }}` usage — a fresh object
+  // literal every render — would make *every* unrelated parent re-render
+  // look like a change, calling `transitionTo()` on props that never
+  // moved. Via `transitionTo`, that cuts a half-finished morph straight to
+  // its target (the abrupt jump the feature exists to remove) and pays a
+  // full synchronous sprite-strip rebuild for nothing; `native/Dithered.tsx`
+  // already has this guard, so this brings the two platforms back in line.
+  //
+  // With `transition` set, a genuine change is routed through
+  // `transitionTo()` instead of `update()` — the whole point of the prop
+  // is that a `shape`/`brightness` change morphs rather than cuts.
+  // `transitionTo` never rejects (see `DitheredInstance`), so there is
+  // nothing to catch; `void` just tells the linter the floating promise is
+  // intentional.
   useEffect(() => {
     if (skipNextUpdate.current) {
       skipNextUpdate.current = false;
+      prevOptionsRef.current = {
+        shape,
+        brightness,
+        size,
+        maxDpr,
+        cols,
+        rows,
+        matrix,
+        frames,
+        period,
+        fg,
+        bg,
+        cache,
+        gap,
+        radius,
+        respectReducedMotion,
+        initialFrame,
+        speed,
+      };
       return;
     }
-    instanceRef.current?.update({
+
+    const prev = prevOptionsRef.current;
+    const changed =
+      prev.shape !== shape ||
+      prev.brightness !== brightness ||
+      prev.size !== size ||
+      prev.maxDpr !== maxDpr ||
+      prev.cols !== cols ||
+      prev.rows !== rows ||
+      prev.matrix !== matrix ||
+      prev.frames !== frames ||
+      prev.period !== period ||
+      prev.fg !== fg ||
+      prev.bg !== bg ||
+      prev.cache !== cache ||
+      prev.gap !== gap ||
+      prev.radius !== radius ||
+      prev.respectReducedMotion !== respectReducedMotion ||
+      prev.initialFrame !== initialFrame ||
+      prev.speed !== speed;
+
+    prevOptionsRef.current = {
       shape,
       brightness,
       size,
@@ -349,7 +494,35 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
       respectReducedMotion,
       initialFrame,
       speed,
-    });
+    };
+
+    if (!changed) return;
+
+    const patch = {
+      shape,
+      brightness,
+      size,
+      maxDpr,
+      cols,
+      rows,
+      matrix,
+      frames,
+      period,
+      fg,
+      bg,
+      cache,
+      gap,
+      radius,
+      respectReducedMotion,
+      initialFrame,
+      speed,
+      transition: resolvedTransition,
+    };
+    if (transition) {
+      void instanceRef.current?.transitionTo(patch);
+    } else {
+      instanceRef.current?.update(patch);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     shape,
@@ -369,23 +542,8 @@ export const Dithered = forwardRef<HTMLCanvasElement, DitheredProps>(function Di
     respectReducedMotion,
     initialFrame,
     speed,
+    transition,
   ]);
-
-  // Separate from the reconfigure effect so toggling `paused` never
-  // triggers a resample/cache rebuild. Skipped while `time` or
-  // `progress` is controlled, since the effect below owns pausing then.
-  useEffect(() => {
-    if (skipNextPaused.current) {
-      skipNextPaused.current = false;
-      return;
-    }
-    // `time == null` — loose, so it covers `null` as well as `undefined`.
-    // `null` is documented as behaving exactly like an absent prop (the
-    // `time={sharedValue ?? null}` pattern), and the effect below hands
-    // it to `clearTime()` rather than to `setTime`, so it does not own
-    // pausing and must not suppress it here.
-    if (progress === undefined && time == null) instanceRef.current?.setPaused(paused);
-  }, [paused, progress, time]);
 
   // Re-resolve `'currentColor'` on *every* render, not just when
   // `className`/`style`/`fg` change. The overwhelmingly common web

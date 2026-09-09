@@ -47,16 +47,32 @@ export type { PathSegment } from './core';
 export { arcToCubics, parsePath, serializePath, toAbsolute, transformSegments } from './core';
 export type { RenderToSvgOptions, SvgPaintContext } from './core';
 export { jsHitTester, renderToDataURL, renderToSvg, svgPaintContext } from './core';
+// `blend`/`blendPhases` from `./core` are deliberately not re-exported —
+// see the identical comment in `index.ts`.
+export type {
+  CellDiff,
+  ResolvedTransitionOptions,
+  Transition,
+  TransitionOptions,
+  TransitionSide,
+} from './core';
+export { ENTER_START, EXIT_END, TRANSITION_DEFAULTS, createTransition, diffCells } from './core';
 export { presets, gem, sweep, pulse, rain, wave, fill, gameOfLife } from './presets';
 export type { MixAmount, CellPredicate } from './compose';
 export { compose, blend, mask, timeScale, reverse, offset, invert, clamp } from './compose';
-export { shapes, rozenite, circle, square, diamond, heart } from './shapes';
+export { shapes, rozenite, circle, square, diamond, heart, check, cross } from './shapes';
 export { shapeFromSvgLite } from './svg-lite';
 
 export { Dithered } from './react-native/Dithered';
 export type { DitheredProps } from './react-native/Dithered';
 export { useDitheredPictures } from './react-native/pictures';
 export type { DitheredPictures, DitheredPicturesOptions } from './react-native/pictures';
+export { useDitheredTransition } from './react-native/transition';
+export type {
+  DitheredTransitionPictures,
+  DitheredTransitionSide,
+  UseDitheredTransitionOptions,
+} from './react-native/transition';
 export { skiaPaintContext } from './react-native/paint-context';
 export { skiaHitTester } from './react-native/hit-test';
 export {

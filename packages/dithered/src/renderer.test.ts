@@ -15,7 +15,7 @@ import { computeGeometry, resolveOptions, resolveRows } from './core';
 // eslint-disable-next-line import/first -- must come after vi.mock so it resolves to the mock.
 import { sampleCells, type Cell, type Shape } from './shape';
 // eslint-disable-next-line import/first -- must come after vi.mock so it resolves to the mock.
-import { shapes } from './shapes';
+import { rozenite, shapes } from './shapes';
 // eslint-disable-next-line import/first -- must come after vi.mock so it resolves to the mock.
 import {
   SQUARE_SHAPE,
@@ -618,6 +618,38 @@ describe('createDithered', () => {
       expect(ctx.drawImage).toHaveBeenCalledTimes(1);
       const [, sx] = ctx.drawImage.mock.calls[0];
       expect(sx).toBe(2 * canvas.width);
+    } finally {
+      strip.restore();
+    }
+  });
+
+  // Regression: `blit` sets the *device* transform (`W / cssW`) before
+  // clearing in CSS units, but the cached branch's `drawImage` rectangles
+  // are already in device pixels. Painting the strip without dropping that
+  // transform first scaled every cached frame up by the DPR — on a retina
+  // display the sprite was drawn twice as large as the canvas and clipped
+  // at its bottom-right corner (the shape looked cut off / overflowing).
+  // Asserted as "the transform in effect at the `drawImage` call is the
+  // identity", not just "setTransform(1,...) was called", so a reordering
+  // that puts the device transform back afterwards can't pass.
+  it('drops the device transform before blitting the sprite strip, so a cached frame is not scaled by the DPR', () => {
+    vi.stubGlobal('devicePixelRatio', 2);
+    const { canvas, ctx } = makeFakeCanvas();
+    const strip = stubGetContext(make2dCtx());
+    try {
+      createDithered(canvas, baseOptions({ cache: true, frames: 48 }));
+
+      expect(ctx.drawImage).toHaveBeenCalledTimes(1);
+      const drawOrder = ctx.drawImage.mock.invocationCallOrder[0];
+      const transformsBefore = ctx.setTransform.mock.calls.filter(
+        (_call, i) => ctx.setTransform.mock.invocationCallOrder[i] < drawOrder,
+      );
+      expect(transformsBefore[transformsBefore.length - 1]).toEqual([1, 0, 0, 1, 0, 0]);
+
+      // ...and the destination rect is the full backing store, so the
+      // sprite covers exactly the canvas at 1:1 device pixels.
+      const [, , , , , dx, dy, dw, dh] = ctx.drawImage.mock.calls[0];
+      expect([dx, dy, dw, dh]).toEqual([0, 0, canvas.width, canvas.height]);
     } finally {
       strip.restore();
     }
@@ -2979,5 +3011,951 @@ describe('createDithered playback controls', () => {
     expect(cancelAnimationFrame).toHaveBeenCalled();
     // And nothing new was scheduled in its place.
     expect(env.rafCallbacks.length).toBe(rafCountBefore);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// transitions (ADR 0004): transitionTo() / finishLoop()
+// ---------------------------------------------------------------------------
+
+describe('createDithered transitions', () => {
+  let env: ReturnType<typeof stubAnimationGlobals>;
+  let mockNow: number;
+  let nowSpy: ReturnType<typeof vi.spyOn>;
+
+  function baseOptions(overrides: Partial<DitheredOptions> = {}): DitheredOptions {
+    return {
+      shape: SQUARE_SHAPE,
+      brightness: () => true,
+      size: 40,
+      cols: 4,
+      cache: false,
+      period: 1000,
+      frames: 10,
+      ...overrides,
+    };
+  }
+
+  // Fires the most recently *scheduled* animation frame. stubAnimationGlobals
+  // never removes a cancelled callback from `rafCallbacks`, but createDithered
+  // only ever reads `raf`'s return value to decide whether to re-schedule, so
+  // the last entry is always the one that matters next.
+  function fire(ts: number): void {
+    const cbs = env.rafCallbacks;
+    cbs[cbs.length - 1](ts);
+  }
+
+  beforeEach(() => {
+    env = stubAnimationGlobals();
+    mockNow = 0;
+    nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => mockNow);
+  });
+
+  afterEach(() => {
+    env.restore();
+    nowSpy.mockRestore();
+  });
+
+  it('transitionTo resolves after duration of ticks and leaves the instance in the target state', async () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+    ctx.fill.mockClear();
+
+    mockNow = 1000;
+    let resolved = false;
+    const promise = instance
+      .transitionTo({ brightness: () => false, transition: { duration: 400 } })
+      .then(() => {
+        resolved = true;
+      });
+
+    // The first transition frame paints synchronously, at progress 0 —
+    // still the outgoing (always-true) brightness, so cells are drawn.
+    expect(ctx.fill.mock.calls.length).toBeGreaterThan(0);
+
+    ctx.fill.mockClear();
+    mockNow = 1200; // 200ms into a 400ms morph: not done yet.
+    fire(1200);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    ctx.fill.mockClear();
+    mockNow = 1400; // exactly at duration: progress reaches 1.
+    fire(1400);
+    await promise;
+    expect(resolved).toBe(true);
+    // Target brightness is always-false: the completed steady state draws
+    // nothing for this tick...
+    expect(ctx.fill).not.toHaveBeenCalled();
+
+    // ...and for a later one, at a different frame index, confirming this
+    // is the new steady state rather than a one-off empty transition frame.
+    ctx.fill.mockClear();
+    mockNow = 1500;
+    fire(1500);
+    expect(ctx.fill).not.toHaveBeenCalled();
+  });
+
+  it("repaints every tick during a morph, unlike steady state's skip-if-unchanged shortcut", () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    mockNow = 1000;
+    void instance.transitionTo({ brightness: () => true, transition: { duration: 1000 } });
+    ctx.clearRect.mockClear();
+
+    mockNow = 1100;
+    fire(1100);
+    expect(ctx.clearRect).toHaveBeenCalledTimes(1);
+
+    // Same instant again: a steady loop computes the same frame index and
+    // skips the redraw entirely. A morph must not — p is continuous.
+    fire(1100);
+    expect(ctx.clearRect).toHaveBeenCalledTimes(2);
+  });
+
+  it('drops the sprite strip for the morph and rebuilds it once the steady state resumes', () => {
+    const ctx = make2dCtx();
+    const getContextStub = stubGetContext(ctx);
+    const canvas = document.createElement('canvas');
+
+    try {
+      const instance = createDithered(canvas, baseOptions({ cache: true }));
+
+      // Before: the initial steady-state paint is cached, so it draws via drawImage.
+      expect(ctx.drawImage).toHaveBeenCalled();
+
+      ctx.drawImage.mockClear();
+      mockNow = 1000;
+      void instance.transitionTo({ brightness: () => false, transition: { duration: 400 } });
+      // During: the strip is dropped — the transition paints cells directly.
+      expect(ctx.drawImage).not.toHaveBeenCalled();
+
+      mockNow = 1200;
+      fire(1200);
+      expect(ctx.drawImage).not.toHaveBeenCalled();
+
+      ctx.drawImage.mockClear();
+      mockNow = 1400;
+      fire(1400); // progress reaches 1: completes, configure() rebuilds the strip.
+      // After: back to drawImage for the new steady state.
+      expect(ctx.drawImage).toHaveBeenCalled();
+    } finally {
+      getContextStub.restore();
+    }
+  });
+
+  it('prefers-reduced-motion skips the morph and cuts straight to the target', async () => {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({ matches: true })),
+    );
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+    ctx.fill.mockClear();
+
+    const promise = instance.transitionTo({
+      brightness: () => false,
+      transition: { duration: 5000 },
+    });
+
+    // No tick needed at all — it's already resolved.
+    await promise;
+    // Target's always-false brightness, applied immediately.
+    expect(ctx.fill).not.toHaveBeenCalled();
+  });
+
+  it('finishLoop() resolves when the frame index wraps to 0', async () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+
+    // The first tick after create() always sees dt=0 (lastNow starts
+    // null), so this just establishes the baseline timestamp — phase
+    // doesn't move yet, and no wrap has happened.
+    mockNow = 500;
+    fire(500);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    // dt=700ms out of a 1000ms period advances phase by 0.7 from its
+    // ~0.05 seed — not yet a full loop, so still no wrap.
+    mockNow = 1200;
+    fire(1200);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    // dt=950ms more crosses the 1.0 phase boundary: the loop has wrapped.
+    mockNow = 2150;
+    fire(2150);
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
+  it('finishLoop() resolves when playback halts (paused) without a wrap', async () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+
+    instance.setPaused(true);
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
+  it('finishLoop() resolves immediately when the loop is already halted', async () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ paused: true }));
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
+  it('finishLoop() resolves the moment a wrap falls inside an in-progress morph', async () => {
+    // Regression test: wrap detection used to live exclusively in the
+    // steady-state half of `tick()`'s `if (transition) {...} else {...}`
+    // split, so a `period` boundary crossed *while a morph is playing*
+    // was never observed — `finishLoop()` only resolved on whatever wrap
+    // came after the morph finished and steady playback resumed, up to a
+    // full `period` late. `onLoopEnd` (which starts a morph only once
+    // `finishLoop()` resolves) makes this common: any morph whose
+    // `duration` straddles the loop boundary reproduces it.
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions()); // period 1000, frames 10
+
+    mockNow = 800; // frame 8 — establishes a baseline tick before the morph starts.
+    fire(800);
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+
+    mockNow = 800;
+    void instance.transitionTo({ transition: { duration: 400 } }); // starts immediately: loop is advancing.
+
+    mockNow = 900;
+    fire(900);
+    await Promise.resolve();
+    expect(resolved).toBe(false); // 900 hasn't crossed the t=1000 boundary yet.
+
+    // The loop wraps at t = 1000, squarely inside the 400ms morph window
+    // (800 -> 1200). `finishLoop()` must resolve on *this* tick.
+    mockNow = 1000;
+    fire(1000);
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
+  it('an update() that changes `period` does not produce a spurious wrap or swallow a genuine one (finding 5)', async () => {
+    // Regression test, adapted for the phase-accumulator model: the
+    // original finding was that the old absolute `frameAt(nowMs, period,
+    // frames)` model could read a *lower* frame index for the same
+    // wall-clock instant right after `period` shrank, looking exactly
+    // like a wrap that never happened. `phase` has no such failure mode —
+    // it is a relative accumulator with no fixed relationship to
+    // wall-clock zero (ADR 0006), so a `period` change by itself can never
+    // look like a wrap. This test pins that down and, symmetrically,
+    // checks a *genuine* wrap under the new period is still detected.
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions()); // period 1000, frames 10
+
+    mockNow = 900;
+    fire(900); // first tick after create(): dt=0, just establishes the baseline.
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+
+    // Halves the period while holding the current phase.
+    instance.update({ period: 500 });
+
+    // dt=10ms out of the new 500ms period — nowhere near a full loop.
+    mockNow = 910;
+    fire(910);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    // dt=490ms more crosses the 1.0 phase boundary under the new,
+    // shorter period: a genuine wrap, correctly detected after the change.
+    mockNow = 1400;
+    fire(1400);
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
+  it('a transition landing does not swallow a wrap crossed shortly after it (finding 5)', async () => {
+    // Regression test, adapted for the phase-accumulator model: the
+    // original finding was that `configure()` unconditionally nulled out
+    // the wrap-detection baseline, so any reconfigure landing in the same
+    // rAF gap as a period boundary silently ate that wrap. Our
+    // `finishTransitionNow` resets `lastNow` (not `phase`) for a related
+    // but distinct reason (see its own comment) — the very next steady
+    // tick always measures `dt = 0` by design and so cannot itself detect
+    // a wrap, but a wrap crossed once real elapsed time resumes
+    // accumulating must still come through correctly.
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions()); // period 1000, frames 10
+
+    mockNow = 800;
+    fire(800); // baseline tick before the morph.
+
+    mockNow = 800;
+    void instance.transitionTo({ fg: '#bbb', transition: { duration: 100 } });
+
+    // Exactly at `duration`: the morph completes this tick, via
+    // `finishTransitionNow`, which resets `lastNow` to `null` but leaves
+    // `phase` exactly where it was frozen.
+    mockNow = 900;
+    fire(900);
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+
+    // The first steady tick after the reset measures dt=0 and so cannot
+    // detect a wrap by itself.
+    mockNow = 950;
+    fire(950);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    // dt=950ms more (enough to complete a full loop) is still detected
+    // correctly.
+    mockNow = 1900;
+    fire(1900);
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
+  it('update() drains a pending finishLoop() when the patch itself halts the loop (finding 3)', async () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+
+    // `update({ paused: true })` — not `setPaused(true)` — is the path
+    // that used to strand this promise: it went through `halt()` without
+    // ever calling `drainLoopEnd()`, unlike `haltPlayback()` (which
+    // `setPaused` uses).
+    instance.update({ paused: true });
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
+  it('a reduced-motion cut drains a pending finishLoop() instead of stranding it (finding 3)', async () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+
+    // The OS reduced-motion preference flips on, then any `transitionTo`/
+    // `update()` re-reads it and takes `cutToTarget`'s immediate-cut
+    // branch — which used to `halt()` without draining either.
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({ matches: true })),
+    );
+    await instance.transitionTo({ fg: '#123456', transition: { duration: 400 } });
+    expect(resolved).toBe(true);
+  });
+
+  it('renderFrame() during an active morph settles it first, painting the target rather than a stale mix (finding 9)', () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(
+      canvas,
+      baseOptions({ shape: SQUARE_SHAPE, brightness: () => true }),
+    );
+
+    mockNow = 1000;
+    void instance.transitionTo({
+      brightness: () => false,
+      transition: { duration: 1000 },
+    });
+
+    // 200ms into a still-in-flight 1000ms morph: `renderFrame` is called
+    // directly, without ever going through `setPaused`/`update` first —
+    // reachable by any direct `createDithered` consumer.
+    ctx.fill.mockClear();
+    mockNow = 1200;
+    instance.renderFrame(0);
+
+    // The morph is settled onto its target (always-false brightness) as
+    // part of this call, so frame 0 draws nothing — not a half-dissolved
+    // mix of the outgoing shape's cells against the target's (already
+    // resized) geometry.
+    expect(ctx.fill).not.toHaveBeenCalled();
+
+    // A later, ordinary tick confirms this really did adopt the target as
+    // the new steady state (rather than, say, coincidentally drawing zero
+    // cells for an unrelated reason): every subsequent frame is also
+    // brightness-false.
+    ctx.fill.mockClear();
+    mockNow = 1300;
+    fire(1300);
+    expect(ctx.fill).not.toHaveBeenCalled();
+  });
+
+  it('transition.onLoopEnd defers the morph until after the loop wraps', async () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    mockNow = 0;
+    let resolved = false;
+    const promise = instance
+      .transitionTo({ brightness: () => false, transition: { onLoopEnd: true, duration: 200 } })
+      .then(() => {
+        resolved = true;
+      });
+
+    // The first tick after create() always sees dt=0 (lastNow starts
+    // null) — this just establishes the baseline timestamp, no wrap yet.
+    mockNow = 500;
+    fire(500);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    // dt=700ms out of a 1000ms period: not yet a full loop.
+    mockNow = 1200;
+    fire(1200);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    ctx.fill.mockClear();
+    // dt=950ms more crosses the 1.0 phase boundary: wraps, deferred morph begins.
+    mockNow = 2150;
+    fire(2150);
+    await Promise.resolve(); // flush finishLoop()'s `.then(begin)`
+
+    mockNow = 2350; // 200ms after the morph actually started at 2150.
+    fire(2350);
+    await promise;
+    expect(resolved).toBe(true);
+  });
+
+  it('a second transitionTo mid-morph resolves the first and lands on the second target', async () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    mockNow = 1000;
+    let firstResolved = false;
+    void instance
+      .transitionTo({ brightness: () => false, transition: { duration: 1000 } })
+      .then(() => {
+        firstResolved = true;
+      });
+
+    mockNow = 1200;
+    fire(1200); // 200ms into the first (1000ms) morph — nowhere near done.
+    await Promise.resolve();
+    expect(firstResolved).toBe(false);
+
+    // A second call cuts the first one short: its target becomes the
+    // steady state and its own promise resolves right away.
+    let secondResolved = false;
+    const second = instance
+      .transitionTo({ brightness: () => true, transition: { duration: 400 } })
+      .then(() => {
+        secondResolved = true;
+      });
+
+    await Promise.resolve();
+    expect(firstResolved).toBe(true);
+    expect(secondResolved).toBe(false);
+
+    mockNow = 1600; // 400ms after the second morph started at 1200.
+    fire(1600);
+    await second;
+    expect(secondResolved).toBe(true);
+  });
+
+  it('destroy() resolves pending finishLoop/transitionTo promises, tears down listeners, and releases the strip', async () => {
+    const removeSpy = vi.spyOn(document, 'removeEventListener');
+    const ctx = make2dCtx();
+    const getContextStub = stubGetContext(ctx);
+    const canvas = document.createElement('canvas');
+
+    try {
+      const instance = createDithered(canvas, baseOptions({ cache: true }));
+
+      let loopEndResolved = false;
+      void instance.finishLoop().then(() => {
+        loopEndResolved = true;
+      });
+
+      mockNow = 1000;
+      let transitionResolved = false;
+      void instance
+        .transitionTo({ brightness: () => false, transition: { duration: 1000 } })
+        .then(() => {
+          transitionResolved = true;
+        });
+
+      instance.destroy();
+      await Promise.resolve();
+
+      expect(loopEndResolved).toBe(true);
+      expect(transitionResolved).toBe(true);
+      expect(cancelAnimationFrame).toHaveBeenCalled();
+      expect(env.ioInstances[0].disconnect).toHaveBeenCalled();
+      expect(removeSpy).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+
+      // The sprite strip is released, not just abandoned: a renderFrame()
+      // call afterward has nothing cached left to drawImage from.
+      ctx.drawImage.mockClear();
+      instance.renderFrame(0);
+      expect(ctx.drawImage).not.toHaveBeenCalled();
+    } finally {
+      getContextStub.restore();
+      removeSpy.mockRestore();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Regression tests for review findings 1, 2, 8 and 10 (see the ADR 0004
+  // implementation review this fixes).
+  // -------------------------------------------------------------------------
+
+  it('a halt during the onLoopEnd wait settles the deferred transition instead of stranding it (finding 1)', async () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    mockNow = 0;
+    let resolved = false;
+    const promise = instance
+      .transitionTo({ brightness: () => false, transition: { onLoopEnd: true, duration: 200 } })
+      .then(() => {
+        resolved = true;
+      });
+
+    mockNow = 500; // frame 5 — not a wrap yet, so the morph is still queued.
+    fire(500);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    // Playback halts (equivalently: tab hidden, canvas off-screen) while
+    // the deferred morph is still waiting for a wrap that will now never
+    // come — this must not hang the promise, nor leave the instance
+    // showing the outgoing (pre-`transitionTo`) state forever.
+    const rafCountBeforeHalt = env.rafCallbacks.length;
+    instance.setPaused(true);
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+
+    // `setPaused(true)` must actually leave the instance paused: settling
+    // the deferred transition used to overwrite the imperative `isPaused`
+    // flag with the (default, `false`) declarative `paused` option and
+    // call `schedule()`, silently resuming the loop the instant a queued
+    // `onLoopEnd` morph landed. No new animation frame may have been
+    // requested since the halt.
+    expect(env.rafCallbacks.length).toBe(rafCountBeforeHalt);
+
+    // The target's brightness (always false) must have been adopted, not
+    // left on the outgoing always-true brightness.
+    ctx.fill.mockClear();
+    instance.renderFrame(0);
+    expect(ctx.fill).not.toHaveBeenCalled();
+
+    // Advancing the clock far past when the wrap *would* have released the
+    // morph must not replay it — it was already settled.
+    ctx.fill.mockClear();
+    mockNow = 100_000;
+    instance.setPaused(false);
+    fire(100_000);
+    expect(ctx.fill).not.toHaveBeenCalled();
+  });
+
+  it('a plain update() during an onLoopEnd wait is not reverted when the deferred morph fires (finding 2)', async () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ fg: '#aaa' }));
+
+    mockNow = 0;
+    void instance.transitionTo({ fg: '#bbb', transition: { onLoopEnd: true, duration: 100 } });
+
+    mockNow = 500; // no wrap yet.
+    fire(500);
+
+    // A plain update() lands while the deferred morph is still queued.
+    mockNow = 600;
+    instance.update({ fg: '#ccc' });
+    expect(ctx.fillStyle).toBe('#ccc');
+
+    // Advance the frame index away from 0 before checking for a wrap, so
+    // this doesn't depend on whichever frame `update()` itself happens to
+    // paint.
+    mockNow = 700;
+    fire(700);
+
+    // The loop wraps, releasing the deferred morph (if it's still queued
+    // at all — see below). Release happens off a microtask (the old
+    // `finishLoopPromise().then(begin)` chain), so flush one before
+    // asserting.
+    ctx.fill.mockClear();
+    mockNow = 1600; // phase 600/1000 -> frame 6, less than frame 7 at t=700: wraps.
+    fire(1600);
+    await Promise.resolve();
+
+    // The deferred morph must not silently revert the newer update() — the
+    // steady state stays on '#ccc', not the stale '#bbb' from the earlier
+    // transitionTo call.
+    expect(ctx.fillStyle).toBe('#ccc');
+  });
+
+  it('a later transitionTo is not reverted when an earlier onLoopEnd morph fires (finding 2)', async () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    mockNow = 0;
+    // Queued: morph to "draw nothing" once the loop wraps.
+    void instance.transitionTo({
+      brightness: () => false,
+      transition: { onLoopEnd: true, duration: 100 },
+    });
+
+    mockNow = 600; // still no wrap.
+    fire(600);
+
+    // A newer, immediate transitionTo lands and completes before the wrap.
+    // `onLoopEnd: false` is explicit: the resolved `transition` option is
+    // sticky like every other option (a patch only overrides what it
+    // sets), so without this it would inherit `onLoopEnd: true` from the
+    // first call and queue behind a wrap too.
+    let secondResolved = false;
+    const second = instance
+      .transitionTo({
+        brightness: () => true,
+        transition: { duration: 300, onLoopEnd: false },
+      })
+      .then(() => {
+        secondResolved = true;
+      });
+
+    // 300ms after the second morph started at 600: it completes, painting
+    // through the tick itself (brightness true -> cells drawn). Checking
+    // via the tick's own paint, rather than a separate `renderFrame()`
+    // call, matters here: `renderFrame()` also writes `currentFrame`, and
+    // an incidental write would mask the wrap this test depends on below.
+    ctx.fill.mockClear();
+    mockNow = 900;
+    fire(900);
+    await second;
+    expect(secondResolved).toBe(true);
+    expect(ctx.fill).toHaveBeenCalled(); // brightness true: steady state draws.
+
+    // The loop wraps well after the second transitionTo completed —
+    // releasing the *first* (now stale) queued morph must not revert the
+    // newer steady state back to "draw nothing". Release happens off a
+    // microtask (the old `finishLoopPromise().then(begin)` chain), so
+    // flush one before letting a further tick observe its effect.
+    mockNow = 1100; // phase 100/1000 -> frame 1, less than frame 9 at t=900: wraps.
+    fire(1100);
+    await Promise.resolve();
+
+    // Give a wrongly-restarted stale morph (the bug: the first call's
+    // `.then(begin)` firing a *new* transition toward brightness-false)
+    // time to run to completion, and check the steady state is still the
+    // newer one, not reverted.
+    ctx.fill.mockClear();
+    mockNow = 1300;
+    fire(1300);
+    expect(ctx.fill).toHaveBeenCalled();
+  });
+
+  it('a reduced-motion cut holds the current phase instead of resetting to initialFrame (finding 8)', async () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    // `t` is passed straight through as the numeric brightness: at phase 0
+    // no cell can clear its (strictly positive) Bayer threshold, so frame 0
+    // always draws nothing, while a later frame draws at least one cell.
+    const instance = createDithered(canvas, baseOptions({ brightness: (_cell, t) => t }));
+
+    // The first tick after create() always sees dt=0 (lastNow starts
+    // null), so this just establishes the baseline timestamp.
+    mockNow = 500;
+    fire(500);
+    // dt=700ms out of a 1000ms period advances phase to ~0.75 from its
+    // ~0.05 seed -> frame 7 of 10.
+    mockNow = 1200;
+    fire(1200);
+
+    // Reduced motion turns on *after* the loop has already advanced away
+    // from frame 0/initialFrame.
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({ matches: true })),
+    );
+    ctx.fill.mockClear();
+
+    await instance.transitionTo({ transition: { duration: 300 } });
+
+    // Fixed: holds frame 7 (phase 0.7), which draws cells. The pre-fix
+    // dead ternary always fell back to `initialFrame` (0, phase 0), which
+    // draws nothing at all.
+    expect(ctx.fill).toHaveBeenCalled();
+  });
+
+  it('morphs the shape itself, resampling onto the target grid (ADR 0004 §2)', async () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    // `rozenite`'s viewBox (18.67 x 26.67) resolves to a different row
+    // count than the 1:1 SQUARE_SHAPE at the same `cols` — so completing
+    // this morph must leave the instance on rozenite's own grid/surface,
+    // not a hybrid of the two.
+    const instance = createDithered(canvas, baseOptions({ shape: SQUARE_SHAPE }));
+
+    const cssWidthBefore = canvas.style.width;
+
+    mockNow = 1000;
+    const promise = instance.transitionTo({
+      shape: rozenite,
+      transition: { duration: 400 },
+    });
+
+    // The surface resizes onto the target immediately (ADR 0004 §5), in
+    // the same synchronous call — not deferred until the morph completes.
+    expect(canvas.style.width).not.toBe(cssWidthBefore);
+
+    ctx.fill.mockClear();
+    mockNow = 1400;
+    fire(1400);
+    await promise;
+
+    // Steady state after the morph draws using rozenite's own cells, not
+    // an empty/stale set left over from the square.
+    ctx.fill.mockClear();
+    instance.renderFrame(0);
+    expect(ctx.fill).toHaveBeenCalled();
+  });
+
+  it('never paints an empty frame during a morph, at any tick (finding 10, ADR acceptance criterion)', () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(
+      canvas,
+      baseOptions({ shape: SQUARE_SHAPE, brightness: () => true }),
+    );
+
+    mockNow = 0;
+    void instance.transitionTo({
+      shape: rozenite,
+      brightness: () => true,
+      transition: { duration: 1000 },
+    });
+
+    // Sweep every 25ms across the whole morph; at each tick, the paint
+    // must have drawn at least one cell (paintFrame calls ctx.fill() once
+    // per drawn cell) — the end-to-end version of the cell-set-level
+    // guarantee `core/transition.test.ts` already covers.
+    for (let t = 0; t <= 1000; t += 25) {
+      ctx.fill.mockClear();
+      mockNow = t;
+      fire(t);
+      expect(ctx.fill.mock.calls.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('a morph that never touches `paused` does not resurrect a stale `paused: true` on natural completion', async () => {
+    // Regression test: the instance is *created* paused, then explicitly
+    // un-paused, then morphs — the transitionTo patch never mentions
+    // `paused`. `finishTransitionNow` used to reassign
+    // `isPaused = opts.paused`, and `opts.paused` still held the
+    // construction-time `true` (only `transitionTo`/`update()` patches
+    // that actually include `paused` are supposed to move it —
+    // `setPaused()` intentionally only ever writes the imperative
+    // `isPaused` flag). The instant a morph completed *normally*, that
+    // stale `true` silently froze playback with no further way to
+    // observe why, since nothing else changed.
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions({ paused: true }));
+    expect(env.rafCallbacks.length).toBe(0); // created paused: no frame scheduled yet.
+
+    instance.setPaused(false);
+    const rafCountAfterResume = env.rafCallbacks.length;
+    expect(rafCountAfterResume).toBeGreaterThan(0);
+
+    mockNow = 0;
+    let resolved = false;
+    const promise = instance
+      .transitionTo({ brightness: () => false, transition: { duration: 200 } })
+      .then(() => {
+        resolved = true;
+      });
+
+    mockNow = 200; // exactly at the morph's duration: completes this tick.
+    fire(200);
+    await promise;
+    expect(resolved).toBe(true);
+
+    // Playback must still be running — a further tick keeps rescheduling.
+    const rafCountAfterCompletion = env.rafCallbacks.length;
+    expect(rafCountAfterCompletion).toBeGreaterThan(rafCountAfterResume);
+    mockNow = 300;
+    fire(300);
+    expect(env.rafCallbacks.length).toBeGreaterThan(rafCountAfterCompletion);
+  });
+
+  it('a morph in flight completes immediately when playback is paused mid-morph (ADR 0004 §7)', async () => {
+    const { canvas, ctx } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    mockNow = 1000;
+    let resolved = false;
+    const promise = instance
+      .transitionTo({ brightness: () => false, transition: { duration: 1000 } })
+      .then(() => {
+        resolved = true;
+      });
+
+    mockNow = 1200; // 200ms into a 1000ms morph.
+    fire(1200);
+    expect(resolved).toBe(false);
+
+    instance.setPaused(true);
+    await promise;
+    expect(resolved).toBe(true);
+
+    // The target (always-false brightness) was adopted, not left half-morphed.
+    ctx.fill.mockClear();
+    instance.renderFrame(0);
+    expect(ctx.fill).not.toHaveBeenCalled();
+
+    // `setPaused(true)` must stick: `finishTransitionNow` used to
+    // overwrite `isPaused` with the *target options'* `paused` (`false`,
+    // the default — the `transitionTo` patch above never mentioned
+    // `paused`), so the instance only looked halted because no frame
+    // happened to be outstanding. Nothing had actually re-armed
+    // `schedule()`'s guard, so the next unrelated trigger that calls
+    // `schedule()` — the canvas re-entering the viewport, here — silently
+    // resumed playback despite `setPaused(true)`.
+    const rafCountAfterHalt = env.rafCallbacks.length;
+    env.ioInstances[0]!.callback(
+      [{ isIntersecting: true } as IntersectionObserverEntry],
+      env.ioInstances[0] as unknown as IntersectionObserver,
+    );
+    expect(env.rafCallbacks.length).toBe(rafCountAfterHalt);
+  });
+
+  // Closing-review finding: `finishTransitionNow` — the completion path for
+  // both `update()`'s "settle whatever's running first" and a morph
+  // finishing naturally on its own (`p >= 1` in `tick()`) — is itself
+  // capable of halting the loop: the patch that started (or superseded
+  // into) the morph can carry `paused: true`, applied here via
+  // `applyPausedPatch(t.patch)`. `update()`/`cutToTarget()` already call
+  // `drainIfHalted()` after a patch lands; a morph completing *on its own*,
+  // with nothing else in the call stack to drain afterward, was the one
+  // path that didn't — stranding a `finishLoop()` awaited before it landed.
+  it('finishLoop() resolves when a morph completes onto a patch that pauses playback', async () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+
+    mockNow = 0;
+    void instance.transitionTo({
+      fg: '#abc',
+      paused: true,
+      transition: { duration: 100 },
+    });
+    await Promise.resolve();
+    expect(resolved).toBe(false); // still morphing; the loop hasn't halted yet.
+
+    // Exactly at `duration`: the morph lands on `paused: true`. `schedule()`
+    // at the end of this same `tick()` is then a no-op — nothing else will
+    // ever come along to drain this promise if `finishTransitionNow` itself
+    // doesn't.
+    mockNow = 100;
+    fire(100);
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
+  it('finishLoop() resolves when prefers-reduced-motion turns on during an in-progress morph and it completes', async () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions());
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+
+    mockNow = 0;
+    void instance.transitionTo({ fg: '#abc', transition: { duration: 400 } });
+
+    // Flips on partway through the morph — `finishTransitionNow` re-reads
+    // it (`reduced = prefersReducedMotion(opts)`) only when the morph
+    // actually completes, not before.
+    mockNow = 200;
+    fire(200);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({ matches: true })),
+    );
+
+    mockNow = 400; // exactly at duration: the morph completes, and lands on a now-halted loop.
+    fire(400);
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
+  // Defect 5 (renderer): `checkWrap`'s `previousPeriod !== opts.period` arm.
+  // Deleting just this clause leaves every other existing test green — the
+  // period changes they exercise never happen to straddle a boundary the
+  // naive (period-blind) comparison would manufacture — so it needs its own
+  // case: a period change chosen so that comparing the *previous* wall-clock
+  // reading against the *new* period alone (what the code would do without
+  // this guard) reports a boundary crossing that was never actually part of
+  // any period the loop was really running under between the two ticks.
+  it('a period change does not manufacture a false wrap on the very next tick (defect 5)', async () => {
+    const { canvas } = makeFakeCanvas();
+    const instance = createDithered(canvas, baseOptions()); // period 1000
+
+    mockNow = 900;
+    fire(900); // establishes the wrap-detection baseline under period 1000.
+
+    let resolved = false;
+    void instance.finishLoop().then(() => {
+      resolved = true;
+    });
+
+    // Chosen so `floor(910 / 455) = 2 > floor(900 / 455) = 1` — the naive
+    // comparison (ignoring that the baseline was captured under a
+    // *different* period) reports a wrap that was never actually crossed
+    // under any single period the loop consistently ran under between the
+    // two ticks.
+    instance.update({ period: 455 });
+
+    mockNow = 910;
+    fire(910);
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    // The guard resetting the baseline (rather than comparing across the
+    // change) must not swallow a *genuine* wrap under the new period either.
+    mockNow = 1400; // floor(1400/455) = 3 > floor(910/455) = 2: a real wrap.
+    fire(1400);
+    await Promise.resolve();
+    expect(resolved).toBe(true);
   });
 });

@@ -4,6 +4,7 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import {
   Dithered,
+  check,
   circle,
   compose,
   diamond,
@@ -40,6 +41,13 @@ const CUSTOM_SVG_SHAPE = shapeFromSvgLite(`<svg viewBox="0 0 100 100">
 const SPEED_BRIGHTNESS = wave();
 const SCRUB_SHAPE = heart;
 const SCRUB_BRIGHTNESS = pulse();
+
+// Same reasoning applies to the transition demo below: with `transition`
+// set, a changed `brightness`/`shape` identity doesn't just resample, it
+// starts a real `transitionTo()` morph, so these must stay stable across
+// re-renders rather than being called inline in JSX.
+const LOADING_DONE_GEM = gem();
+const LOADING_DONE_FILL = fill();
 
 const PRESETS: Array<{ name: string; brightness: Brightness }> = [
   { name: 'gem', brightness: gem() },
@@ -125,6 +133,7 @@ export default function App() {
   const [matrix, setMatrix] = useState<Extract<DitherMatrix, string>>('bayer4');
   const [speed, setSpeed] = useState(1);
   const [scrub, setScrub] = useState(0);
+  const [done, setDone] = useState(false);
 
   const blendTarget = BLEND_TARGETS.find((t) => t.name === blendName);
   const blended = blendTarget
@@ -340,6 +349,19 @@ export default function App() {
             </View>
           </Section>
 
+          <Section title="Loading → done">
+            <Tile label={done ? 'done' : 'loading'}>
+              <Dithered
+                shape={done ? check : rozenite}
+                brightness={done ? LOADING_DONE_FILL : LOADING_DONE_GEM}
+                transition={{ duration: 400 }}
+                size={72}
+                fg={INK}
+                label={done ? 'Done' : 'Loading'}
+              />
+            </Tile>
+          </Section>
+
           <View style={styles.controls}>
             <Pressable style={styles.button} onPress={() => setPaused((p) => !p)}>
               <Text style={styles.buttonText}>{paused ? 'Resume' : 'Pause'}</Text>
@@ -349,6 +371,9 @@ export default function App() {
               onPress={() => setProgress((p) => (p >= 1 ? 0 : Math.min(1, p + 0.25)))}
             >
               <Text style={styles.buttonText}>Step progress</Text>
+            </Pressable>
+            <Pressable style={styles.button} onPress={() => setDone((d) => !d)}>
+              <Text style={styles.buttonText}>{done ? 'Reset' : 'Simulate completion'}</Text>
             </Pressable>
           </View>
         </ScrollView>

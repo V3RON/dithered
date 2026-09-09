@@ -342,6 +342,75 @@ function FillBox() {
 }
 
 // ---------------------------------------------------------------------------
+// Loading -> done: the headline `transitionTo`/`transition` use case
+// (ADR 0004, issue #4) — flip `shape`/`brightness` and the indicator
+// morphs between them instead of cutting, with `transition` as the only
+// prop that changed. Identical on `dithered/react` and `dithered/native`.
+// ---------------------------------------------------------------------------
+
+const LOADING_DONE_SNIPPET = `<Dithered
+  shape={done ? shapes.check : shapes.rozenite}
+  brightness={done ? presets.fill() : presets.gem()}
+  transition={{ duration: 400 }}
+  fg="${ACCENT}"
+/>`;
+
+// Module-level, not `presets.fill()`/`presets.gem()` called inline in the
+// JSX below — see the caveat on `Dithered`'s `brightness` prop in
+// `react.tsx` and in the README's Transitions section. `dithered/react`
+// diffs `brightness` (and `shape`) by identity, and with `transition` set
+// (as it is here) a changed identity doesn't just trigger a resample —
+// it starts a real `transitionTo()` morph. Calling `presets.fill()` fresh
+// on every render meant every *unrelated* re-render of the playground
+// (dragging the size slider, picking a shape elsewhere on the page — any
+// `App`-level state change, since this component isn't memoized) cut a
+// morph short and started a new one from the shape to itself.
+const LOADING_DONE_FILL = presets.fill();
+const LOADING_DONE_GEM = presets.gem();
+
+function LoadingToDone() {
+  const [done, setDone] = useState(false);
+
+  return (
+    <section style={panel}>
+      <h2 style={sectionTitle}>Loading → done</h2>
+      <p style={sectionHint}>
+        The one prop change a loading indicator almost always needs: flip <code>shape</code> and{' '}
+        <code>brightness</code> together and, with <code>transition</code> set, dithered morphs
+        smoothly between them instead of jumping.
+      </p>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 28, flexWrap: 'wrap' }}>
+        <div
+          style={{
+            flex: '0 0 auto',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 96,
+            height: 96,
+          }}
+        >
+          <Dithered
+            shape={done ? shapes.check : shapes.rozenite}
+            brightness={done ? LOADING_DONE_FILL : LOADING_DONE_GEM}
+            transition={{ duration: 400 }}
+            size={72}
+            fg={ACCENT}
+            label={done ? 'Done' : 'Loading'}
+          />
+        </div>
+        <div style={{ flex: '1 1 280px', minWidth: 240 }}>
+          <button onClick={() => setDone((v) => !v)} style={buttonStyle}>
+            {done ? 'Reset' : 'Simulate completion'}
+          </button>
+          <pre style={{ ...codeBlockStyle, marginTop: 14 }}>{LOADING_DONE_SNIPPET}</pre>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Playground: live preview + controls + paste-your-SVG + advanced options +
 // a code snippet that always matches whatever's currently configured
 // ---------------------------------------------------------------------------
@@ -1059,6 +1128,7 @@ function App() {
     >
       <Hero />
       <Gallery onSelect={applyExample} />
+      <LoadingToDone />
       <FillBox />
       <Playground
         ref={playgroundRef}
